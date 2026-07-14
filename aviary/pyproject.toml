@@ -1,0 +1,18 @@
+[project]
+name = "steeleagle-aviary"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "gabriel-protocol>=4.1",
+    "grpcio>=1.76.0",
+    "panda3d>=1.10.15",
+    "pymap3d>=3.2.0",
+    "pyzmq>=27.1.0",
+    "toml>=0.10.2",
+    "colorhash",
+    "opencv-python-headless",
+    "steeleagle-protocol>=0.1.0",
+]
+
+[project.scripts]
+steeleagle-aviary = "steeleagle_aviary:configure_and_start"
