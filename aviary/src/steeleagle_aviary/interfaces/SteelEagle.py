@@ -29,11 +29,11 @@ class SteelEagle:
                  ):
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
 
-        add_ControlServicer_to_server(_Interface(vehicle), self.server)
+        add_ControlServicer_to_server(Control(vehicle), self.server)
         self.server.add_insecure_port(address)
         self.server.start()
 
-class _Interface(ControlServicer):
+class Control(ControlServicer):
     """gRPC control interface."""
 
     def __init__(self, vehicle: Vehicle):
@@ -47,13 +47,13 @@ class _Interface(ControlServicer):
 
     def Land(self, request, context):
         current = self.vehicle.current_position()
-        self.vehicle.set_position_target(LPoint3f(current.x, current.y, 0))
+        self.vehicle.set_position_target(LPoint3f(current.x, current.y, self.vehicle.sim_origin.z))
         return control_proto.LandResponse()
 
     def Hold(self, request, context):
         self.vehicle.set_joystick_target(LVector3f(0, 0, 0))
         self.vehicle.set_pose_target(LVector3f(0, 0, 0), PoseMode.VELOCITY)
-        yield control_proto.HoldResponse()
+        return control_proto.HoldResponse()
 
     def SetHome(self, request, context):
         self.vehicle.origin.latitude = request.location.latitude
@@ -64,22 +64,37 @@ class _Interface(ControlServicer):
         self.vehicle.set_position_target(self.vehicle.sim_origin)
         return control_proto.ReturnToHomeResponse()
 
-    def SetVelocity(self, request, context):
-        self.vehicle.set_joystick_target(LVector3f(request.velocity.x_vel, request.velocity.y_vel, request.velocity.z_vel))
-        self.vehicle.set_pose_target(LVector3f(request.velocity.angular_vel, 0, 0), PoseMode.VELOCITY)
-        return control_proto.SetVelocityResponse()
+    def GoToRelativePosition(self, request, context):
+        offset = LVector3f(request.x, request.y, request.z)
+        position = self.vehicle.current_position()
+        pose = self.vehicle.current_pose()
+        heading_aligned = request.frame <= 1
+        new_position = calculate_position_from_offset(position, pose, offset, heading_aligned=heading_aligned)
+        new_pose = LPoint3f(pose.x + request.angle, pose.y, pose.z)
+        self.vehicle.set_position_target(new_position)
+        self.vehicle.set_pose_target(new_pose)
+        return control_proto.GoToRelativePositionResponse()
 
     def GoToGlobalPosition(self, request, context):
+        # If absolute altitude is specified, add the target altitude
+        # to the current altitude
+        if request.altitude_mode <= 1:
+            altitude = request.location.altitude - self.vehicle.sim_origin.z
+        else:
+            position = self.vehicle.current_position()
+            altitude = position.z + request.location.altitude
+
         self.vehicle.set_position_target(self.vehicle.convert_to_sim(
                 GeodeticPoint(
                     request.location.latitude,
                     request.location.longitude,
-                    request.location.altitude
+                    altitude
                     )
                 ))
 
-        bearing = request.location.heading
-        if not request.heading_mode:
+        # If heading mode is TO_TARGET, set the pose to look at the
+        # position target
+        if request.heading_mode <= 1:
             position = self.vehicle.current_geodetic_position()
             bearing = calculate_bearing(
                     position.latitude,
@@ -87,11 +102,14 @@ class _Interface(ControlServicer):
                     request.location.latitude,
                     request.location.longitude
                     )
-        self.vehicle.set_pose_target(LVector3f(bearing, 0, 0), PoseMode.ANGLE)
-
-        # TODO: Separate relative vs. absolute altitude
-        # TODO: Consider maximum velocity
+            self.vehicle.set_pose_target(LVector3f(bearing, 0, 0), PoseMode.ANGLE)
+        
         return control_proto.GoToGlobalPositionResponse()
+    
+    def SetVelocity(self, request, context):
+        self.vehicle.set_joystick_target(LVector3f(request.velocity.x_vel, request.velocity.y_vel, request.velocity.z_vel))
+        self.vehicle.set_pose_target(LVector3f(request.velocity.angular_vel, 0, 0), PoseMode.VELOCITY)
+        return control_proto.SetVelocityResponse()
 
     def SetGimbalPose(self, request, context):
         if request.pose_mode == 0:

@@ -208,25 +208,6 @@ class Vehicle:
         return isclose(a1, a2, abs_tol=1e-3) or \
                 isclose(a1, -(360.0 - a2), abs_tol=1e-3)
 
-    def set_joystick_target(self, vector: LVector3f):
-        """Set a joystick target.
-
-        Sets a joystick (relative position body) target with
-        respect to the current camera pose.
-
-        Args:
-            vector (LVector3f): velocity target relative to camera pose
-        """
-        theta = radians(self.current_rotation().x)
-        forward = LVector3f(-sin(theta), cos(theta), 0)
-        forward.normalize()
-        forward *= vector.x
-        right = LVector3f(cos(theta), sin(theta), 0)
-        right.normalize()
-        right *= vector.y
-        up = LVector3f(0, 0, 1) * vector.z
-        self.set_velocity_target(forward + right + up)
-
     def set_position_target(self, point: LPoint3f):
         """Set a position target.
 
@@ -238,18 +219,56 @@ class Vehicle:
         self.position_target = point
         self.mode = Mode.POSITION
 
-    def set_velocity_target(self, vector: LVector3f):
+    def set_relative_position_target(self, vector: LVector3f, body_aligned=False):
+        """Set a relative position target.
+
+        Set an offset position target relative to the current position
+        for the vehicle to move towards.
+
+        Args:
+            vector (LVector3f): offset vector 
+            body_algined (bool): whether or not to align the offset to
+                the current pose, default to `False`
+        """
+        if not body_aligned:
+            self.set_position_target(self.current_position() + vector)
+        else:
+            theta = math.radians(self.current_rotation().x)
+            forward = LVector3f(-sin(theta), cos(theta), 0)
+            forward.normalize()
+            forward *= offset.x
+            right = LVector3f(cos(theta), sin(theta), 0)
+            right.normalize()
+            right *= offset.y
+            up = LVector3f(0, 0, 1) *= offset.z
+            self.set_position_target(forward + right + up)
+
+    def set_velocity_target(self, vector: LVector3f, body_aligned=False):
         """Set a velocity target.
 
-        Set the velocity target for the vehicle to move at.
+        Set the velocity target for the vehicle to move at, either with
+        a body or global frame of reference.
 
         Args:
             vector (LVector3f): target velocity
+            body_algined (bool): whether or not to align the velocity to
+                the current pose, default to `False`
         """
-        self.velocity_target = vector
-        self.mode = Mode.VELOCITY
+        if not body_aligned:
+            self.velocity_target = vector
+            self.mode = Mode.VELOCITY
+        else:
+            theta = radians(self.current_rotation().x)
+            forward = LVector3f(-sin(theta), cos(theta), 0)
+            forward.normalize()
+            forward *= vector.x
+            right = LVector3f(cos(theta), sin(theta), 0)
+            right.normalize()
+            right *= vector.y
+            up = LVector3f(0, 0, 1) * vector.z
+            self.velocity_target = forward + right + up
 
-    def set_pose_target(self, vector: LVector3f, mode: PoseMode):
+    def set_pose_target(self, vector: LVector3f, mode: PoseMode, body_aligned=False):
         """Set a pose target for the camera.
 
         Args:
@@ -257,7 +276,10 @@ class Vehicle:
             mode (PoseMode): pose mode
         """
         if mode == PoseMode.ANGLE:
-            self.pose_target = LVector3f(convert_angle_heading(vector.x), vector.y, vector.z)
+            if not body_aligned:
+                self.pose_target = LVector3f(convert_angle_heading(vector.x), vector.y, vector.z)
+            else:
+                self.pose_target = LVector3f(convert_angle_heading(vector.x), vector.y, vector.z)
         else:
             self.pose_target = LVector3f(-vector.x, vector.y, vector.z)
         self.pose_mode = mode
