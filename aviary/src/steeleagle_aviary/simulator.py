@@ -1,3 +1,11 @@
+import argparse
+import importlib
+from typing import Optional
+from dataclasses import dataclass
+import logging
+import argparse
+import inspect
+from colorhash import ColorHash
 # Panda3D imports
 from panda3d.core import CardMaker, AmbientLight, DirectionalLight, Fog
 from panda3d.core import FrameBufferProperties, WindowProperties, PerspectiveLens, TransformState
@@ -8,27 +16,15 @@ from direct.showbase.ShowBase import ShowBase
 from direct.gui.DirectGui import DirectLabel
 from panda3d.core import loadPrcFileData
 from panda3d.core import GraphicsPipeSelection
-# Python imports
-import argparse
-import importlib
-from typing import Optional
-from dataclasses import dataclass
-import logging
-import argparse
+from panda3d.core import BitMask32
 # Numerical imports
 import numpy as np
-# Utility imports
-from datatypes import GroundHolder, CameraHolder, GeodeticPoint
-from engines.base import get_engine_from_name, EngineHolder
-# Entity imports
-from vehicle import Vehicle
-from actor import Actor
-# Toml parser
-import toml
-# Interface import
-from interface import SteelEagleInterface
-from vr_interface import SteelEagleVrInterface
-from colorhash import ColorHash
+# Simulator imports
+from steeleagle_aviary.interfaces.base import Interface
+from steeleagle_aviary.engines.base import Engine
+from steeleagle_aviary.datatypes import GroundHolder, CameraHolder, GeodeticPoint
+from steeleagle_aviary.vehicle import Vehicle
+from steeleagle_aviary.actor import Actor
 
 """Simulator for kinematic vehicle motion.
 
@@ -38,13 +34,45 @@ mock AI engines and actors which can be configured to
 move around the space.
 """
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('Aviary/simulator')
+
+# Ground size constant
+GROUND_SIZE = 100
 
 # Set headless mode
 loadPrcFileData("", """
   window-type none
 """)
+
+def import_class(module: str, cls: any) -> any:
+    """Imports a class from a module.
+
+    Imports a class type from a given module name. If there are more than
+    one class of that type, or if the class is not importable, then an
+    ImportError will be raised. The module must be importable in the
+    sys.path before this function is called.
+
+    Args:
+        module (str): module path to import from
+        cls (any): class type to import
+
+    Returns:
+        any: imported class
+
+    Raises:
+        ImportError: if name cannot be found or the import fails
+    """
+    mod = importlib.import_module(module)
+    matches = []
+    for name, obj in inspect.getmembers(mod, inspect.isclass):
+        if (issubclass(obj, cls)
+            and obj is not cls
+            and obj.__module__ == mod.__name__):
+            matches.append(obj)
+    if len(matches) != 1:
+        raise ImportError(f'Number of matching classes is not 1, instead it is {len(matches)}')
+    return matches[0]
+
 
 class Simulator(ShowBase):
     def __init__(self):
@@ -61,10 +89,9 @@ class Simulator(ShowBase):
         self.render.setLight(self.render.attachNewNode(directional))
 
         # Holds references to all moving entities
-        self.actors = []
-        self.vehicle_set = set([])
-        self.vehicles = []
-        self.interfaces = []
+        self.actors = {}
+        self.vehicles = {}
+        self.interfaces = {}
 
         # Trace support values
         self.active_trace = False
@@ -107,7 +134,7 @@ class Simulator(ShowBase):
         # Simulation tick task
         self.taskMgr.add(self.simulate, "simulate-task")
 
-    def add_vehicle(self, name: str, origin: GeodeticPoint, ground_size: int = 100, engines: Optional[dict] = {}, **kwargs) -> Vehicle:
+    def add_vehicle(self, name: str, interface: str, interface_args: dict[str, any], origin: GeodeticPoint, **kwargs) -> Vehicle:
         """Add a moveable vehicle to the simulation.
 
         Adds a vehicle and an actuation interface (SteelEagle) to the
@@ -115,18 +142,18 @@ class Simulator(ShowBase):
 
         Args:
             name (str): name of the vehicle (must be unique)
+            interface (str): interface module name for this vehicle (must be importable)
+            interface_args (dict[str, any]): interface arguments
             origin (GeodeticPoint): origin geodetic point of the vehicle
-            engines (dict): dictionary of engines to attach to this vehicle,
-                default None
+            kwargs (dict): kwargs for the vehicle initialization
 
         Returns:
             Vehicle: newly created vehicle object
         """
         # Check if name already exists, in this case ignore!
-        if name in self.vehicle_set:
-            return False
-        else:
-            self.vehicle_set.add(name)
+        if name in self.vehicles:
+            logger.warning(f'Vehicle {name} already exists, ignoring')
+            return None
 
         # Check if camera parameters are included, otherwise set defaults
         fov = (128, 72)
@@ -150,8 +177,9 @@ class Simulator(ShowBase):
         buffer.addRenderTexture(texture, GraphicsOutput.RTMCopyRam)
 
         # Ground plane horizontal
+        cam_mask = BitMask32.bit(len(self.vehicles)) # create mask ID from length of vehicle list
         cm = CardMaker(f"Ground [{name}]")
-        cm.setFrame(-ground_size, ground_size, -ground_size, ground_size)
+        cm.setFrame(-GROUND_SIZE, GROUND_SIZE, -GROUND_SIZE, GROUND_SIZE)
         ground = self.render.attachNewNode(cm.generate())
         ground.setHpr(0, -90, 0)  # horizontal X-Y plane
         tex = self.loader.load_texture("maps/envir-ground.jpg")
@@ -161,6 +189,8 @@ class Simulator(ShowBase):
         ts = TextureStage.get_default()
         ground.set_tex_scale(ts, 20, 20)  # Repeat 4x4 times
         ground.setBin("fixed", 0)
+        ground.hide(BitMask32.allOn()) # Hide on all cameras except this one
+        ground.show(BitMask32.bit(0) | cam_mask)
         ground_holder = GroundHolder(ground, ts)
 
         # Set up lens according to camera intrinsics
@@ -170,6 +200,7 @@ class Simulator(ShowBase):
         lens.setNear(0.1)
         lens.setFar(1000.0)
         camera = self.makeCamera(buffer, lens=lens, camName=f'Image Camera [{name}]')
+        camera.node().setCameraMask(BitMask32.bit(0) | cam_mask)
         proj = camera.attachNewNode('proj-holder')
 
         camera.reparentTo(self.render)
@@ -198,22 +229,19 @@ class Simulator(ShowBase):
             self.anchor = origin
 
         vehicle = Vehicle(name, origin, self.anchor, camera_holder, ground_holder)
-        # Build sink objects and attach them to the interface, if they exist
-        engine_holder = None
-        if len(engines):
-            engine_objects = []
-            for e in engines:
-                engine_objects.append(get_engine_from_name(e, **engines[e]))
-            engine_holder = EngineHolder(vehicle, self.actors, engine_objects)
-        # Create and store a reference to the control interface
-        # TODO: Add interface using: self.interfaces.append()
-        # Store a reference to this vehicle
-        self.vehicles.append(vehicle)
+        try:
+            iface = import_class(interface, Interface)(vehicle, **interface_args)
+            iface.start()
+            self.interfaces[name] = iface
+        except Exception as e:
+            logger.error(f'Cannot instantiate interface {interface}, reason: {e}')
+            return None
 
         logger.info(f'Added vehicle {name} at point {origin}!')
+        self.vehicles[name] = vehicle
         return vehicle
 
-    def add_actor(self, name: str, tag: str, origin: GeodeticPoint, **kwargs) -> Actor:
+    def add_actor(self, name: str, tag: str, origin: GeodeticPoint, waypoints: list, **kwargs) -> Actor:
         """Add a moveable actor to the simulation.
 
         Adds an actor to the simulation. Motion is kinematic so there
@@ -224,6 +252,8 @@ class Simulator(ShowBase):
             name (str): name of the actor
             tag (str): type of object to be reported by object detector logical inference
             origin (GeodeticPoint): origin geodetic point of the actor
+            waypoints (list): list of waypoints for the actor
+            kwargs (dict): kwargs for the actor initialization
 
         Returns:
             Actor: newly created actor object
@@ -264,99 +294,24 @@ class Simulator(ShowBase):
         if not self.anchor:
             self.anchor = origin
 
-        logger.info(f'Added actor {name} with tag {tag} and color {color.rgb} at point {origin}!')
-        logger.info(f'Actor {name} given velocity {kwargs["velocity"]} with waypoint set {kwargs["waypoints"]}')
-        actor = Actor(name, tag, origin, self.anchor, parent, **kwargs)
-        self.actors.append(actor)
+        logger.info(f'Added actor {name} with tag {tag} and color {color.rgb} at point {origin} and waypoints {waypoints}!')
+        actor = Actor(name, tag, origin, self.anchor, parent, waypoints, **kwargs)
+        self.actors[name] = actor
         return actor
 
-    def set_active_trace(self):
-        self.active_trace = True
-
-    def end_active_trace(self):
-        self.active_trace = False
-
-    def has_active_trace(self):
-        return self.active_trace
-
-    def set_trace_name(self, active_trace_name):
-        self.trace_name = active_trace_name
-
-    def get_trace_name(self):
-        return self.trace_name
-
     def simulate(self, task):
-        """Simulation tick, auto-called by Panda3d."""
+        """Simulation tick, auto-called by Panda3d.
+        """
         dt = globalClock.getDt()
         # Move objects
-        for act in self.actors:
+        for _, act in self.actors.items():
             act.move(dt)
-            if self.has_active_trace() and not act.has_waypoints_remaining():
-                if 'slalom' in self.get_trace_name():
-                    continue
-                self.end_active_trace()
-                for interface in self.interfaces:
-                    interface._interface.attempt_publish_results(self.get_trace_name())
 
         # Move vehicles
-        for veh in self.vehicles:
+        for _, veh in self.vehicles.items():
             veh.move(dt)
 
         # Build a new frame
         self.graphics_engine.render_frame()
 
         return task.cont
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Simulates digital twin SteelEagle drones in a configurable 3D world."
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="aviary.toml",
-        help="override config file path (default: aviary.toml)"
-    )
-    args = parser.parse_args()
-
-    config = None
-    try:
-        with open(args.config) as file:
-            config = toml.load(file)
-    except Exception as e:
-        logger.error(f'Failed to load config file {args.config}, reason: {e}')
-        quit()
-
-    app = Simulator()
-
-    try:
-        for a in config['actor']:
-            print(a)
-            actor = config['actor'][a]
-            tag = actor['tag']
-            origin = GeodeticPoint(actor['lat'], actor['lon'], 0)
-            kwargs = actor['kwargs']
-            kwargs['waypoints'] = actor.get('waypoints', [])
-            kwargs['velocity'] = actor.get('velocity', 0)
-            print(kwargs)
-            print(actor)
-            app.add_actor(a, tag, origin, **kwargs)
-
-        for v in config['vehicle']:
-            vehicle = config['vehicle'][v]
-            origin = GeodeticPoint(vehicle['lat'], vehicle['lon'], 0)
-            engines = vehicle['engines']
-            kwargs = vehicle['kwargs']
-            app.add_vehicle(v, origin, engines=engines, **kwargs)
-            logger.info(kwargs)
-            if 'vr_interface' in kwargs and kwargs['vr_interface']:
-                logger.info(f'Active trace registered for vr interface - {args.config}')
-                app.set_active_trace()
-                app.set_trace_name(args.config)
-
-    except Exception as e:
-        logger.error(f'Failed to add objects, reason: {e}')
-        quit()
-
-    logger.info('Simulation started! Connect with a vehicle to get started.')
-    app.run()

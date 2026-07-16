@@ -22,6 +22,7 @@ class Mode(Enum):
 
 class PoseMode(Enum):
     ANGLE = 'ANGLE'
+    OFFSET = 'OFFSET'
     VELOCITY = 'VELOCITY'
 
 @dataclass

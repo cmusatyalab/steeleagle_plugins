@@ -1,9 +1,10 @@
-from util import convert_angle_heading, calculate_bearing
-from datatypes import GeodeticPoint, Mode, PoseMode
 import pymap3d as pm
-from datatypes import CameraHolder, GroundHolder
 from panda3d.core import LVector3f, LPoint3f, NodePath
 from math import sin, cos, radians, isclose
+# Utility imports
+from steeleagle_aviary.util import convert_angle_heading, calculate_bearing
+from steeleagle_aviary.datatypes import GeodeticPoint, Mode, PoseMode
+from steeleagle_aviary.datatypes import CameraHolder, GroundHolder
 
 """Defines a vehicle that moves through the simulated world.
 
@@ -13,6 +14,11 @@ geodetic points into simulated space and vice-versa. In order
 for the vehicle to be controlled, it must be attached to an
 interface.
 """
+
+# Default transit speed
+DEFAULT_SPEED = 3.0
+# Default angular speed for pose adjustment
+DEFAULT_ANGULAR_SPEED = 90.0
 
 class Vehicle:
     def __init__(self,
@@ -43,9 +49,6 @@ class Vehicle:
         self.position_target = self.sim_origin
         self.velocity_target = LPoint3f(0.0, 0.0, 0.0) # x_vel, y_vel, z_vel
         self.pose_target = LPoint3f(0.0, 0.0, 0.0) # yaw, pitch, roll
-        # Max velocities
-        self.max_pose_velocity = 90.0
-        self.max_velocity = 5.0
 
     def get_sim_origin(self, origin: GeodeticPoint) -> LPoint3f:
         """Gets the simulation origin from starting position.
@@ -208,7 +211,7 @@ class Vehicle:
         return isclose(a1, a2, abs_tol=1e-3) or \
                 isclose(a1, -(360.0 - a2), abs_tol=1e-3)
 
-    def set_position_target(self, point: LPoint3f):
+    def set_position_target(self, point: LPoint3f, speed=DEFAULT_SPEED):
         """Set a position target.
 
         Set the position target for the vehicle to move towards.
@@ -219,14 +222,14 @@ class Vehicle:
         self.position_target = point
         self.mode = Mode.POSITION
 
-    def set_relative_position_target(self, vector: LVector3f, body_aligned=False):
+    def set_relative_position_target(self, vector: LVector3f, speed=DEFAULT_SPEED, body_aligned=False):
         """Set a relative position target.
 
         Set an offset position target relative to the current position
         for the vehicle to move towards.
 
         Args:
-            vector (LVector3f): offset vector 
+            vector (LVector3f): offset vector
             body_algined (bool): whether or not to align the offset to
                 the current pose, default to `False`
         """
@@ -240,7 +243,7 @@ class Vehicle:
             right = LVector3f(cos(theta), sin(theta), 0)
             right.normalize()
             right *= offset.y
-            up = LVector3f(0, 0, 1) *= offset.z
+            up = LVector3f(0, 0, offset.z)
             self.set_position_target(forward + right + up)
 
     def set_velocity_target(self, vector: LVector3f, body_aligned=False):
@@ -256,7 +259,6 @@ class Vehicle:
         """
         if not body_aligned:
             self.velocity_target = vector
-            self.mode = Mode.VELOCITY
         else:
             theta = radians(self.current_rotation().x)
             forward = LVector3f(-sin(theta), cos(theta), 0)
@@ -267,8 +269,9 @@ class Vehicle:
             right *= vector.y
             up = LVector3f(0, 0, 1) * vector.z
             self.velocity_target = forward + right + up
+        self.mode = Mode.VELOCITY
 
-    def set_pose_target(self, vector: LVector3f, mode: PoseMode, body_aligned=False):
+    def set_pose_target(self, vector: LVector3f, mode: PoseMode):
         """Set a pose target for the camera.
 
         Args:
@@ -276,10 +279,10 @@ class Vehicle:
             mode (PoseMode): pose mode
         """
         if mode == PoseMode.ANGLE:
-            if not body_aligned:
-                self.pose_target = LVector3f(convert_angle_heading(vector.x), vector.y, vector.z)
-            else:
-                self.pose_target = LVector3f(convert_angle_heading(vector.x), vector.y, vector.z)
+            self.pose_target = LVector3f(convert_angle_heading(vector.x), vector.y, vector.z)
+        elif mode == PoseMode.OFFSET:
+            pose = self.current_pose() + vector
+            self.pose_target = LVector3f(convert_angle_heading(pose.x), pose.y, pose.z)
         else:
             self.pose_target = LVector3f(-vector.x, vector.y, vector.z)
         self.pose_mode = mode
@@ -302,7 +305,7 @@ class Vehicle:
             move += diff
             if move.length() > 0:
                 move.normalize()
-                move *= self.max_velocity * dt
+                move *= self.speed_target * dt
             if move.length() > diff.length():
                 move *= (diff.length() / move.length())
         else:
@@ -332,7 +335,6 @@ class Vehicle:
         up = velocity.z
         return LVector3f(forward, right, up)
 
-
     def get_angular_velocity(self, dt: float) -> LVector3f:
         """Get current angular velocity.
 
@@ -356,7 +358,7 @@ class Vehicle:
             rot += diff
             if rot.length() > 0:
                 rot.normalize()
-                rot *= self.max_pose_velocity * dt
+                rot *= DEFAULT_ANGULAR_SPEED * dt
             if rot.length() > diff.length():
                 rot *= diff.length() / rot.length()
         else:
