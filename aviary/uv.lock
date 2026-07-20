@@ -464,7 +464,7 @@ wheels = [
 [[package]]
 name = "steeleagle-aviary"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "colorhash" },
     { name = "gabriel-protocol" },

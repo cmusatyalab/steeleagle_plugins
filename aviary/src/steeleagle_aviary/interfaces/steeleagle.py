@@ -252,7 +252,7 @@ class Stream(StreamServiceServicer):
             success, jpeg_data = cv2.imencode('.jpg', arr)
             if success:
                 telemetry = self.get_telemetry()
-                yield telemetry_proto.EncodedFrame(
+                frame = telemetry_proto.EncodedFrame(
                         timestamp=Timestamp().GetCurrentTime(),
                         encoded_data=jpeg_data.tobytes(),
                         id=frame_id,
@@ -260,6 +260,9 @@ class Stream(StreamServiceServicer):
                         gimbal_status=telemetry.gimbal_info.gimbals[0],
                         camera_id=0
                         )
+                yield stream_proto.StreamVideoFramesResponse(
+                    frame=frame
+                )
                 frame_id += 1
 
     def StreamTelemetry(self, request, context):

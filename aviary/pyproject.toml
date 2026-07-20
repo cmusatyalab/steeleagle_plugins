@@ -17,3 +17,10 @@ dependencies = [
 
 [project.scripts]
 steeleagle-aviary = "steeleagle_aviary:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/steeleagle_aviary"]
