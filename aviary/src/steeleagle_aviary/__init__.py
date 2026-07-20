@@ -58,15 +58,21 @@ def main():
             origin = GeodeticPoint(actor['lat'], actor['lon'], actor['alt'])
             waypoints = actor.get('waypoints', [])
             kwargs = actor.get('kwargs', {})
-            app.add_actor(name, tag, origin, waypoints, **kwargs)
+            res = app.add_actor(name, tag, origin, waypoints, **kwargs)
+            if not res:
+                logger.error(f'Failed to add actor {name}')
+                quit()
 
         for vehicle in config['vehicles']:
             name = vehicle['name']
             interface = vehicle['interface']
-            origin = GeodeticPoint(vehicle['lat'], vehicle['lon'], vehicle['lon'])
+            origin = GeodeticPoint(vehicle['lat'], vehicle['lon'], vehicle['alt'])
             ifargs = vehicle.get('ifargs', {})
             kwargs = vehicle.get('kwargs', {})
-            app.add_vehicle(name, interface, ifargs, origin, **kwargs)
+            res = app.add_vehicle(name, interface, ifargs, origin, **kwargs)
+            if not res:
+                logger.error(f'Failed to add vehicle {name}')
+                quit()
 
         # TODO: Add engines
 

@@ -10,7 +10,9 @@ dependencies = [
     "pyzmq>=27.1.0",
     "colorhash",
     "opencv-python-headless",
-    "steeleagle-protocol>=0.1.1",
+    "steeleagle-protocol>=0.1.5",
+    "toml>=0.10.2",
+    "xdg-base-dirs>=6.0.2",
 ]
 
 [project.scripts]

@@ -1,11 +1,11 @@
 [[vehicles]]
 name = "test-vehicle" # unique identifier for this vehicle
 interface = "steeleagle_aviary.interfaces.steeleagle" # interface identifier (must be importable)
-    [vehicle.ifargs]
 # origin coordinates
 lat = 40.413664 
 lon = -79.949285
 alt = 0
+    [vehicle.ifargs] # interface arguments
     [vehicle.kwargs] # provide vehicle specific kwargs here
 
 [[engines]]

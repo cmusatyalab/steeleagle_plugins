@@ -49,6 +49,7 @@ class Vehicle:
         self.position_target = self.sim_origin
         self.velocity_target = LPoint3f(0.0, 0.0, 0.0) # x_vel, y_vel, z_vel
         self.pose_target = LPoint3f(0.0, 0.0, 0.0) # yaw, pitch, roll
+        self.speed_target = DEFAULT_SPEED
 
     def get_sim_origin(self, origin: GeodeticPoint) -> LPoint3f:
         """Gets the simulation origin from starting position.
@@ -164,6 +165,16 @@ class Vehicle:
         rot = self.current_rotation()
         return LVector3f(convert_angle_heading(rot.x), rot.y, rot.z)
 
+    def current_pose_body(self) -> LVector3f:
+        """Get camera body-relative pose.
+
+        Returns:
+            LVector3f: camera body-relative pose
+                (heading, pitch, roll) in degrees
+        """
+        rot = self.current_rotation()
+        return LVector3f(0.0, rot.y, rot.z)
+
     def current_rotation(self) -> LVector3f:
         """Raw camera pose.
 
@@ -219,6 +230,7 @@ class Vehicle:
         Args:
             point (LPoint3f): target simulation world point
         """
+        self.speed_target = speed
         self.position_target = point
         self.mode = Mode.POSITION
 

@@ -1,5 +1,13 @@
+import time
+import numpy as np
+import os
 import grpc
+import cv2
+import subprocess
+import logging
 from concurrent import futures
+from xdg_base_dirs import xdg_runtime_dir
+from pathlib import Path
 # Simulator imports
 from steeleagle_aviary.vehicle import Vehicle
 # Panda3d imports
@@ -12,15 +20,41 @@ from steeleagle_aviary.interfaces.base import Interface
 # Protocol import
 import steeleagle_protocol.v1.services.driver.control_pb2 as control_proto
 from steeleagle_protocol.v1.services.driver.control_pb2_grpc import ControlServiceServicer, add_ControlServiceServicer_to_server
+import steeleagle_protocol.v1.services.driver.stream_pb2 as stream_proto
+from steeleagle_protocol.v1.services.driver.stream_pb2_grpc import StreamServiceServicer, add_StreamServiceServicer_to_server
+import steeleagle_protocol.v1.messages.stream.stream_pb2 as telemetry_proto
+import steeleagle_protocol.v1.common_pb2 as common_proto
+from google.protobuf.timestamp_pb2 import Timestamp
+
+"""SteelEagle Aviary interface.
+"""
+
+logger = logging.getLogger('Aviary/interfaces/steeleagle')
+
+# SteelEagle directory
+STEELEAGLE_DIR = 'steeleagle/plugins'
+# Directory to place all vehicles
+MAIN_DIR = 'aviary'
+# Socket for hosting the server
+SOCKET_ADDR = 'services.sock'
 
 class SteelEagle(Interface):
     """Control interface wrapper.
     """
     def start(self):
+        runtime_path = xdg_runtime_dir()
+        if not runtime_path:
+            raise ValueError('Runtime directory not set')
+        path = Path(runtime_path) / STEELEAGLE_DIR / MAIN_DIR / self.vehicle.name
+        os.makedirs(path, mode=0o777, exist_ok=True)
+        path = path / SOCKET_ADDR
+        logger.info(f'Listening on socket path {path}')
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-        add_ControlServicer_to_server(Control(self.vehicle), self.server)
-        self.server.add_insecure_port(address)
+        add_ControlServiceServicer_to_server(Control(self.vehicle), self.server)
+        add_StreamServiceServicer_to_server(Stream(self.vehicle), self.server)
+        self.server.add_insecure_port(f'unix://{path}')
         self.server.start()
+        logger.info(f'Server started!')
 
 class Control(ControlServiceServicer):
     """gRPC control interface.
@@ -38,7 +72,7 @@ class Control(ControlServiceServicer):
         return control_proto.LandResponse()
 
     def Hold(self, request, context):
-        self.vehicle.set_joystick_target(LVector3f(0, 0, 0))
+        self.vehicle.set_velocity_target(LVector3f(0, 0, 0))
         self.vehicle.set_pose_target(LVector3f(0, 0, 0), PoseMode.VELOCITY)
         return control_proto.HoldResponse()
 
@@ -91,7 +125,7 @@ class Control(ControlServiceServicer):
         return control_proto.GoToGlobalPositionResponse()
 
     def SetVelocity(self, request, context):
-        self.vehicle.set_joystick_target(LVector3f(request.velocity.x_vel, request.velocity.y_vel, request.velocity.z_vel))
+        self.vehicle.set_velocity_target(LVector3f(request.velocity.x_vel, request.velocity.y_vel, request.velocity.z_vel), body_aligned=(request.frame <= 1))
         self.vehicle.set_pose_target(LVector3f(request.velocity.angular_vel, 0, 0), PoseMode.VELOCITY)
         return control_proto.SetVelocityResponse()
 
@@ -120,3 +154,116 @@ class Control(ControlServiceServicer):
                     )
 
         return control_proto.SetGimbalPoseResponse()
+
+class Stream(StreamServiceServicer):
+    """gRPC stream interface.
+    """
+    def __init__(self, vehicle: Vehicle):
+        self.vehicle = vehicle
+
+    def get_telemetry(self):
+        # Get current position data
+        rel_pos = self.vehicle.current_position()
+        global_pos = self.vehicle.current_geodetic_position()
+        vel_body = self.vehicle.get_velocity_body(1.0)
+        angular_vel = self.vehicle.get_angular_velocity(1.0)
+        pose = self.vehicle.current_pose()
+        pose_body = self.vehicle.current_pose_body()
+
+        # Build telemetry object
+        # Battery Info
+        battery_info = telemetry_proto.BatteryInfo(percentage=100)
+
+        # GPS Info
+        gps_info = telemetry_proto.GPSInfo(satellites=15)
+
+        # Position Info
+        # Home
+        home = common_proto.GlobalPosition()
+        home.latitude = self.vehicle.origin.latitude
+        home.longitude = self.vehicle.origin.longitude
+        home.altitude = self.vehicle.origin.altitude
+        # Global position
+        global_position = common_proto.GlobalPosition()
+        global_position.latitude = global_pos.latitude
+        global_position.longitude = global_pos.longitude
+        global_position.altitude = global_pos.altitude
+        global_position.heading = pose.x
+        # Relative position
+        rel_position = common_proto.RelativePosition()
+        rel_position.x = rel_pos.x
+        rel_position.y = rel_pos.y
+        rel_position.z = rel_pos.z - self.vehicle.sim_origin.z
+        # Body velocity
+        velocity_body = common_proto.Velocity()
+        velocity_body.x_vel = vel_body.x
+        velocity_body.y_vel = vel_body.y
+        velocity_body.z_vel = vel_body.z
+        velocity_body.angular_vel = angular_vel.x
+        position_info = telemetry_proto.PositionInfo(
+                home=home,
+                global_position=global_position,
+                relative_position=rel_position,
+                velocity_body=velocity_body
+                )
+
+        # Gimbal Info
+        gimbals = []
+        gid = 0
+        gimbal_pose_body = common_proto.Pose()
+        gimbal_pose_body.yaw = pose_body.x
+        gimbal_pose_body.pitch = pose_body.x
+        gimbal_pose_body.roll = pose_body.x
+        gimbal_pose = common_proto.Pose()
+        gimbal_pose.yaw = pose.x
+        gimbal_pose.pitch = pose.y
+        gimbal_pose.roll = pose.z
+        gimbal_status = telemetry_proto.GimbalStatus(
+                id=gid,
+                pose_body=gimbal_pose_body,
+                pose_neu=gimbal_pose
+                )
+        gimbals.append(gimbal_status)
+        gimbal_info = telemetry_proto.GimbalInfo(gimbals=gimbals)
+
+        # No Alert Info needed, since there are no alerts to send
+        return telemetry_proto.Telemetry(
+                timestamp=Timestamp().GetCurrentTime(),
+                battery_info=battery_info,
+                gps_info=gps_info,
+                position_info=position_info,
+                gimbal_info=gimbal_info
+                )
+
+    #TODO: def GetVideoStreamURL(self, request, context):
+
+    def StreamVideoFrames(self, request, context):
+        sleep_time = 0.033 if not request.target_fps else (1.0 / request.target_fps)
+        frame_id = 0
+        while True:
+            time.sleep(sleep_time)
+            # Get frame data
+            h_res = self.vehicle.camera.texture.get_x_size()
+            v_res = self.vehicle.camera.texture.get_y_size()
+            data = self.vehicle.camera.texture.getRamImage()
+            arr = np.frombuffer(data, dtype=np.uint8)
+            arr = arr.reshape((v_res, h_res, 3))
+            arr = np.flipud(arr)
+            success, jpeg_data = cv2.imencode('.jpg', arr)
+            if success:
+                telemetry = self.get_telemetry()
+                yield telemetry_proto.EncodedFrame(
+                        timestamp=Timestamp().GetCurrentTime(),
+                        encoded_data=jpeg_data.tobytes(),
+                        id=frame_id,
+                        position_info=telemetry.position_info,
+                        gimbal_status=telemetry.gimbal_info.gimbals[0],
+                        camera_id=0
+                        )
+                frame_id += 1
+
+    def StreamTelemetry(self, request, context):
+        sleep_time = 0.033 if not request.target_fps else (1.0 / request.target_fps)
+        while True:
+            time.sleep(sleep_time)
+            yield stream_proto.StreamTelemetryResponse(telemetry=self.get_telemetry())
