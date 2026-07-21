@@ -1,0 +1,8 @@
+[project]
+name = "parrot-anafi"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "parrot-olympe>=8.4.0",
+    "steeleagle-protocol>=0.1.6",
+]

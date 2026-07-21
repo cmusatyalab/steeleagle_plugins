@@ -79,11 +79,11 @@ class Simulator(ShowBase):
         super().__init__()
 
         # Lighting
-        ambient = AmbientLight("ambient")
+        ambient = AmbientLight('ambient')
         ambient.setColor((0.7, 0.7, 0.7, 1))
         self.render.setLight(self.render.attachNewNode(ambient))
 
-        directional = DirectionalLight("directional")
+        directional = DirectionalLight('directional')
         directional.setDirection(LVector3f(-1, -1, -2))
         directional.setColor((0.8, 0.8, 0.8, 1))
         self.render.setLight(self.render.attachNewNode(directional))
@@ -107,7 +107,7 @@ class Simulator(ShowBase):
         gps = GraphicsPipeSelection.get_global_ptr()
         self.pipe = gps.make_default_pipe()
         if not self.pipe:
-            raise RuntimeError("Failed to create a GraphicsPipe (no GLX/EGL/etc available?)")
+            raise RuntimeError('Failed to create a GraphicsPipe (no GLX/EGL/etc available?)')
 
         # Build a dummy 1x1 offscreen buffer to act as the parent window.
         # This is necessary so that Panda3D can render offscreen buffers
@@ -122,7 +122,7 @@ class Simulator(ShowBase):
 
         self.win = self.graphicsEngine.make_output(
             self.pipe,
-            "MainHost",
+            'MainHost',
             0,
             fbp,
             wp,
@@ -132,7 +132,7 @@ class Simulator(ShowBase):
         )
 
         # Simulation tick task
-        self.taskMgr.add(self.simulate, "simulate-task")
+        self.taskMgr.add(self.simulate, 'simulate-task')
 
     def add_vehicle(self, name: str, interface: str, interface_args: dict[str, any], origin: GeodeticPoint, **kwargs) -> Vehicle:
         """Add a moveable vehicle to the simulation.
@@ -178,17 +178,17 @@ class Simulator(ShowBase):
 
         # Ground plane horizontal
         cam_mask = BitMask32.bit(len(self.vehicles)) # create mask ID from length of vehicle list
-        cm = CardMaker(f"Ground [{name}]")
+        cm = CardMaker(f'Ground [{name}]')
         cm.setFrame(-GROUND_SIZE, GROUND_SIZE, -GROUND_SIZE, GROUND_SIZE)
         ground = self.render.attachNewNode(cm.generate())
         ground.setHpr(0, -90, 0)  # horizontal X-Y plane
-        tex = self.loader.load_texture("maps/envir-ground.jpg")
+        tex = self.loader.load_texture('maps/envir-ground.jpg')
         tex.set_wrap_u(Texture.WM_repeat)
         tex.set_wrap_v(Texture.WM_repeat)
         ground.set_texture(tex)
         ts = TextureStage.get_default()
         ground.set_tex_scale(ts, 20, 20)  # Repeat 4x4 times
-        ground.setBin("fixed", 0)
+        ground.setBin('fixed', 0)
         ground.hide(BitMask32.allOn()) # Hide on all cameras except this one
         ground.show(BitMask32.bit(0) | cam_mask)
         ground_holder = GroundHolder(ground, ts)
@@ -204,9 +204,9 @@ class Simulator(ShowBase):
         proj = camera.attachNewNode('proj-holder')
 
         camera.reparentTo(self.render)
-        model = self.loader.loadModel("models/misc/objectHandles")
+        model = self.loader.loadModel('models/misc/objectHandles')
         model.setScale(0.5, 0.5, 0.5)
-        model.setBin("fixed", 10)
+        model.setBin('fixed', 10)
         model.reparentTo(camera)
         font = self.loader.loadFont('/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf')
         text = TextNode(f'{name}_text')
@@ -219,9 +219,9 @@ class Simulator(ShowBase):
         text_nodepath = NodePath(text)
         text_nodepath.reparentTo(camera)
         text_nodepath.setBillboardAxis(0.0)
-        text_nodepath.setPos(0,0,1)
+        text_nodepath.setPos(0, 0, 1)
         text_nodepath.setScale(0.5)
-        text_nodepath.setBin("fixed", 10)
+        text_nodepath.setBin('fixed', 10)
         camera_holder = CameraHolder(camera, buffer, texture, proj, fov, size)
 
         # Set the simulation anchor if it hasn't already been set
@@ -261,7 +261,7 @@ class Simulator(ShowBase):
 
         parent = NodePath(PandaNode(name))
         parent.reparentTo(self.render)
-        cube = self.loader.loadModel("models/box")
+        cube = self.loader.loadModel('models/box')
 
         obj_len = kwargs.get('length', 1)
         obj_width = kwargs.get('width', 1)
@@ -273,7 +273,7 @@ class Simulator(ShowBase):
         color = ColorHash(tag)
         r,g,b = color.rgb
         cube.setColor(r/255, g/255, b/255, 1)  # Normalize to 0.0-1.0 for Panda3D
-        cube.setBin("fixed", 10)
+        cube.setBin('fixed', 10)
         # Add a textnode with the name of the actor
         font = self.loader.loadFont('/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf')
         text = TextNode(f'{name}_text')
@@ -288,7 +288,7 @@ class Simulator(ShowBase):
         text_nodepath.setBillboardAxis(0.0)
         text_nodepath.setPos(0,0,1)
         text_nodepath.setScale(0.5)
-        text_nodepath.setBin("fixed", 10)
+        text_nodepath.setBin('fixed', 10)
 
         # Set the simulation anchor
         if not self.anchor:

@@ -22,7 +22,7 @@ import steeleagle_protocol.v1.services.driver.control_pb2 as control_proto
 from steeleagle_protocol.v1.services.driver.control_pb2_grpc import ControlServiceServicer, add_ControlServiceServicer_to_server
 import steeleagle_protocol.v1.services.driver.stream_pb2 as stream_proto
 from steeleagle_protocol.v1.services.driver.stream_pb2_grpc import StreamServiceServicer, add_StreamServiceServicer_to_server
-import steeleagle_protocol.v1.messages.stream.stream_pb2 as telemetry_proto
+import steeleagle_protocol.v1.messages.stream.telemetry_pb2 as telemetry_proto
 import steeleagle_protocol.v1.common_pb2 as common_proto
 from google.protobuf.timestamp_pb2 import Timestamp
 
@@ -77,11 +77,12 @@ class Control(ControlServiceServicer):
         return control_proto.HoldResponse()
 
     def SetHome(self, request, context):
-        self.vehicle.origin.latitude = request.location.latitude
-        self.vehicle.origin.longitude = request.location.longitude
+        self.vehicle.origin.latitude = request.new_home.latitude
+        self.vehicle.origin.longitude = request.new_home.longitude
         return control_proto.SetHomeResponse()
 
     def ReturnToHome(self, request, context):
+        # TODO: Replicate with waypoints
         self.vehicle.set_position_target(self.vehicle.sim_origin)
         return control_proto.ReturnToHomeResponse()
 

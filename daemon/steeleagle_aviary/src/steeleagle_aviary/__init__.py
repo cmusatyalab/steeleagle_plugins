@@ -7,27 +7,27 @@ from steeleagle_aviary.datatypes import GeodeticPoint
 from steeleagle_aviary.simulator import Simulator
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=logging.DEBUG,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
 )
-logger = logging.getLogger("Aviary/main")
+logger = logging.getLogger('aviary/main')
 
 def main():
     """Runs the simulator from either a config file or from JSON.
     """
     parser = argparse.ArgumentParser(
-        description="Simulates digital twin SteelEagle drones in a configurable 3D world."
+        description='Simulates digital twin SteelEagle drones in a configurable 3D world.'
     )
     parser.add_argument(
-        "--config",
+        '--config',
         type=str,
-        default="config.toml",
-        help="override config file path (default: config.toml)"
+        default='config.toml',
+        help='override config file path (default: config.toml)'
     )
     parser.add_argument(
-        "--jsonb64",
+        '--jsonb64',
         type=str,
-        help="base 64 encoded JSON string"
+        help='base 64 encoded JSON string'
     )
     args = parser.parse_args()
 
