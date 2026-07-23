@@ -1,8 +1,17 @@
 [project]
 name = "parrot-anafi"
 version = "0.1.0"
-requires-python = ">=3.14"
+requires-python = ">=3.10,<=3.11"
 dependencies = [
-    "parrot-olympe>=8.4.0",
-    "steeleagle-protocol>=0.1.6",
+    "grpcio==1.50.0",
+    "opencv-python-headless>=5.0.0.93",
+    "parrot-olympe>=7.7.5,<8.0.0",
+    "protobuf==3.19.4",
+    "steeleagle-protocol",
 ]
+
+[project.scripts]
+parrot-anafi = "parrot_anafi:main"
+
+[tool.uv.sources]
+steeleagle-protocol = {path = "./steeleagle_protocol", editable = true}

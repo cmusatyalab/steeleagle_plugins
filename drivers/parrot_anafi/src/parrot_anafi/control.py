@@ -2,26 +2,32 @@ import os
 from math import sin, cos
 import time
 import logging
+from numpy import clip
 from enum import Enum
 import grpc
 # Protocol imports
 import steeleagle_protocol.v1.common_pb2 as common_proto
-import steeleagle_protocol.v1.messages.stream_pb2 as telemetry_proto
-import steeleagle_protocol.v1.services.control_pb2 as control_proto
-import steeleagle_protocol.v1.services.stream_pb2 as control_proto
-import steeleagle_protocol.v1.services.calibrate_pb2 as control_proto
-from steeleagle_protocol.v1.services.control_pb2_grpc import ControlServiceServicer
-from steeleagle_protocol.v1.services.stream_pb2_grpc import StreamServiceServicer
-from steeleagle_protocol.v1.services.calibrate_pb2_grpc import CalibrateServiceServicer
+import steeleagle_protocol.v1.services.driver.control_pb2 as control_proto
+from steeleagle_protocol.v1.services.driver.control_pb2_grpc import ControlServiceServicer
+from steeleagle_protocol.v1.services.driver.stream_pb2_grpc import StreamServiceServicer
+from steeleagle_protocol.v1.services.driver.calibrate_pb2_grpc import CalibrateServiceServicer
 # Olympe imports
-from olympe.messages.ardrone3.Piloting import TakeOff, Landing, PCMD, extended_move_to, extended_move_by
+from olympe.messages.ardrone3.Piloting import TakeOff, Landing, PCMD
+from olympe.messages.move import extended_move_to, extended_move_by
 import olympe.enums.move as move_mode
-from olympe.messages.rth import abort, set_custom_location, return_to_home, set_min_altitude, set_ending_behavior, set_ending_hovering_altitude
+from olympe.messages.rth import (
+    abort,
+    set_custom_location,
+    return_to_home,
+    set_min_altitude,
+    set_ending_behavior,
+    set_ending_hovering_altitude,
+)
 import olympe.enums.rth as rth_state
 from olympe.messages.ardrone3.PilotingState import AttitudeChanged, GpsLocationChanged, AltitudeChanged
 from olympe.messages.gimbal import set_target, attitude
 
-logger = logging.getLogger('parrot-anafi/driver')
+logger = logging.getLogger('parrot-anafi/control')
 
 # Default speed in meters per second
 DEFAULT_SPEED = 3.0
@@ -39,11 +45,11 @@ class Control(ControlServiceServicer):
 
     def __init__(self, drone):
         self.drone = drone
-        self.mode = Control.FlightMode.LOITER
+        self.mode = FlightMode.LOITER
         self.velocity_task = VelocityPIDThread(self.drone)
         self.velocity_task.start()
 
-    def set_flight_mode(self, mode):
+    def set_flight_mode(self, mode: FlightMode):
         """Set the internal flight mode of the drone.
 
         This method tracks an implied flight mode for the drone
@@ -51,31 +57,31 @@ class Control(ControlServiceServicer):
         mode prevents the VelocityPIDThread from interrupting
         other flight commands.
         """
+        logger.debug(f'switching flight mode to {mode.name}')
         if mode == self.mode:
-            return True
-        if self.mode == Control.FlightMode.VELOCITY:
+            return
+        if self.mode == FlightMode.VELOCITY:
             # Switching out of velocity mode
             self.velocity_task.pause()
-        elif mode == Control.FlightMode.VELOCITY:
+        elif mode == FlightMode.VELOCITY:
             # Switching into velocity mode
             self.velocity_task.resume()
         self.mode = mode
-        return True
 
     def TakeOff(self, request, context):
-        self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
+        self.set_flight_mode(FlightMode.TAKEOFF_LAND)
         if request.take_off_altitude:
             logger.warning('no support for field take_off_altitude, ignoring')
         self.drone(TakeOff()).wait().success()
         return driver_proto.TakeOffResponse()
 
     def Land(self, request, context):
-        self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
+        self.set_flight_mode(FlightMode.TAKEOFF_LAND)
         self.drone(Landing()).wait().success()
         return driver_proto.LandResponse()
 
     def Hold(self, request, context):
-        self.set_flight_mode(Control.FlightMode.LOITER)
+        self.set_flight_mode(FlightMode.LOITER)
         # Abort an in-progress RTH since PCMD does not overwrite it
         self.drone(abort())
         # Set a slight positive throttle to cancel landing
@@ -90,7 +96,7 @@ class Control(ControlServiceServicer):
         return driver_proto.SetHomeResponse()
 
     def ReturnToHome(self, request, context):
-        self.set_flight_mode(Control.FlightMode.GUIDED)
+        self.set_flight_mode(FlightMode.GUIDED)
         # Set the end behavior for the RTH
         if request.end_behavior <= 1:
             self.drone(set_ending_behavior(rth_state.ending_behavior.hovering)).wait().success()
@@ -106,7 +112,7 @@ class Control(ControlServiceServicer):
         return driver_proto.ReturnToHomeResponse()
 
     def GoToRelativePosition(self, request, context):
-        self.set_flight_mode(Control.FlightMode.GUIDED)
+        self.set_flight_mode(FlightMode.GUIDED)
         if request.frame <= 1: # Body-aligned
             self.drone(extended_move_by(
                 request.position.x,
@@ -115,11 +121,11 @@ class Control(ControlServiceServicer):
                 request.position.angle,
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.speed if request.speed else DEFAULT_SPEED,
-                request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED
+                request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
                 )
             )
         else: # NEU-aligned
-            psi = self.drone.get_state(AttitudeChanged)['yaw'])
+            psi = self.drone.get_state(AttitudeChanged['yaw'])
             dx = request.position.x * cos(psi) + request.position.y * sin(psi)
             dy = -request.position.x * sin(psi) + request.position.y * cos(psi)
             self.drone(extended_move_by(
@@ -128,13 +134,13 @@ class Control(ControlServiceServicer):
                 request.position.angle,
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.speed if request.speed else DEFAULT_SPEED,
-                request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED
+                request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
                 )
             )
         return driver_proto.GoToRelativePositionResponse()
 
     def GoToGlobalPosition(self, request, context):
-        self.set_flight_mode(Control.FlightMode.GUIDED)
+        self.set_flight_mode(FlightMode.GUIDED)
         # Set heading mode
         heading_mode = move_mode.orientation_mode.to_target
         if request.heading_mode > 1:
@@ -147,7 +153,7 @@ class Control(ControlServiceServicer):
                 heading_mode,
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.speed if request.speed else DEFAULT_SPEED,
-                request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED
+                request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
                 )
             )
         else: # Absolute altitude
@@ -160,63 +166,58 @@ class Control(ControlServiceServicer):
                 heading_mode,
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.speed if request.speed else DEFAULT_SPEED,
-                request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED
+                request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
                 )
             )
         return driver_proto.GoToGlobalPositionResponse()
 
     def SetVelocity(self, request, context):
         self.velocity_task.set_target(request.velocity, request.frame)
-        self.set_flight_mode(Control.FlightMode.VELOCITY)
+        self.set_flight_mode(FlightMode.VELOCITY)
         return driver_proto.SetVelocityResponse()
 
     def SetGimbalPose(self, request, context):
-        # TODO
+        yaw = request.pose.yaw
+        pitch = request.pose.pitch
+        roll = request.pose.roll
+        frame = 'relative' if request.frame <= 1 else 'absolute'
         # Actuate the gimbal depending on mode
         if request.pose_mode == control_proto.PoseMode.ANGLE:
             self._drone(set_target(
                 gimbal_id=request.gimbal_id,
                 control_mode='position',
-                yaw_frame_of_reference='absolute',
-                yaw=request.pose.yaw,
-                pitch_frame_of_reference='absolute',
-                pitch=request.pose.pitch,
-                roll_frame_of_reference='absolute',
-                roll=request.pose.roll
+                yaw_frame_of_reference=frame if yaw else 'none',
+                yaw=yaw,
+                pitch_frame_of_reference=frame if pitch else 'none',
+                pitch=pitch,
+                roll_frame_of_reference=frame if roll else 'none',
+                roll=roll,
                 )
             ).wait().success()
         elif request.pose_mode == control_proto.PoseMode.OFFSET:
-            current_gimbal = self._get_gimbal_pose_neu(gimbal_id)
-            if request.frame == control_protocol.ReferenceFrame.BODY:
-                current_gimbal = self._get_gimbal_pose_body(gimbal_id)
-            target_yaw = current_gimbal.yaw + yaw
-            target_pitch = current_gimbal.pitch + pitch
-            target_roll = current_gimbal.roll + roll
-            yfor = "relative" if yaw != 0.0 else "none"
-            pfor = "relative" if pitch != 0.0 else "none"
-            rfor = "relative" if roll != 0.0 else "none"
-
+            gimbal_pose = self.drone.get_state(attitude)[request.gimbal_id]
             self._drone(set_target(
                 gimbal_id=request.gimbal_id,
                 control_mode='position',
-                yaw_frame_of_reference=,
-                yaw=yaw,
-                pitch_frame_of_reference=pfor,
-                pitch=pitch,
-                roll_frame_of_reference=rfor,
-                roll=roll
+                yaw_frame_of_reference=frame if yaw else 'none',
+                yaw=gimbal_pose[f'yaw_{frame}'] + yaw,
+                pitch_frame_of_reference=frame if pitch else 'none',
+                pitch=gimbal_pose[f'pitch_{frame}'] + pitch,
+                roll_frame_of_reference=frame if roll else 'none',
+                roll=gimbal_pose[f'roll_{frame}'] + roll,
                 )
             ).wait().success()
         else:
+            max_speed = self.drone.get_state(max_speed(request.gimbal_id))['pitch']
             self._drone(set_target(
-                gimbal_id=gimbal_id,
+                gimbal_id=request.gimbal_id,
                 control_mode='velocity',
                 yaw_frame_of_reference='relative',
-                yaw=request.pose.yaw,
+                yaw=clip(yaw / max_speed, -1.0, 1.0),
                 pitch_frame_of_reference='relative',
-                pitch=request.pose.pitch,
+                pitch=clip(pitch / max_speed, -1.0, 1.0),
                 roll_frame_of_reference='relative',
-                roll=request.pose.roll
+                roll=clip(roll / max_speed, -1.0, 1.0),
                 )
             ).wait().success()
         return driver_proto.SetGimbalPoseResponse()

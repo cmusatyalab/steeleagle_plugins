@@ -1,0 +1,12 @@
+version: v2
+clean: true
+inputs:
+  - git_repo: https://github.com/cmusatyalab/steeleagle.git
+    branch: v4.0-beta
+    subdir: api
+    recurse_submodules: true
+plugins:
+  - remote: buf.build/protocolbuffers/python:v3.14.0
+    out: steeleagle_protocol/src
+  - remote: buf.build/grpc/python:v1.50.0
+    out: steeleagle_protocol/src
