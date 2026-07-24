@@ -74,27 +74,27 @@ class Control(ControlServiceServicer):
         if request.take_off_altitude:
             logger.warning('no support for field take_off_altitude, ignoring')
         self.drone(TakeOff()).wait().success()
-        return driver_proto.TakeOffResponse()
+        return control_proto.TakeOffResponse()
 
     def Land(self, request, context):
         self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
         self.drone(Landing()).wait().success()
-        return driver_proto.LandResponse()
+        return control_proto.LandResponse()
 
     def Hold(self, request, context):
         self.set_flight_mode(Control.FlightMode.LOITER)
         # Abort an in-progress RTH since PCMD does not overwrite it
         self.drone(abort())
         # Set a slight positive throttle to cancel landing
-        self.drone(PCMD(1, 0, 0, 0, 1)).wait().success()
-        return driver_proto.HoldResponse()
+        self.drone(PCMD(1, 0, 0, 0, 1, timestampAndSeqNum=0)).wait().success()
+        return control_proto.HoldResponse()
 
     def SetHome(self, request, context):
         lat = request.new_home.latitude
         lon = request.new_home.longitude
         alt = request.new_home.altitude
         self.drone(set_custom_location(lat, lon, alt)).wait().success()
-        return driver_proto.SetHomeResponse()
+        return control_proto.SetHomeResponse()
 
     def ReturnToHome(self, request, context):
         self.set_flight_mode(Control.FlightMode.GUIDED)
@@ -110,7 +110,7 @@ class Control(ControlServiceServicer):
         if request.final_altitude:
             self.drone(set_ending_hovering_altitude(request.final_altitude)).wait().success()
         self.drone(return_to_home()).wait().success()
-        return driver_proto.ReturnToHomeResponse()
+        return control_proto.ReturnToHomeResponse()
 
     def GoToRelativePosition(self, request, context):
         self.set_flight_mode(Control.FlightMode.GUIDED)
@@ -138,7 +138,7 @@ class Control(ControlServiceServicer):
                 request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
                 )
             )
-        return driver_proto.GoToRelativePositionResponse()
+        return control_proto.GoToRelativePositionResponse()
 
     def GoToGlobalPosition(self, request, context):
         self.set_flight_mode(Control.FlightMode.GUIDED)
@@ -170,12 +170,12 @@ class Control(ControlServiceServicer):
                 request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
                 )
             )
-        return driver_proto.GoToGlobalPositionResponse()
+        return control_proto.GoToGlobalPositionResponse()
 
     def SetVelocity(self, request, context):
         self.velocity_task.set_target(request.velocity, request.frame)
         self.set_flight_mode(Control.FlightMode.VELOCITY)
-        return driver_proto.SetVelocityResponse()
+        return control_proto.SetVelocityResponse()
 
     def SetGimbalPose(self, request, context):
         yaw = request.pose.yaw
@@ -221,4 +221,4 @@ class Control(ControlServiceServicer):
                 roll=clip(roll / gimbal_max_speed['current_roll'], -1.0, 1.0),
                 )
             ).wait().success()
-        return driver_proto.SetGimbalPoseResponse()
+        return control_proto.SetGimbalPoseResponse()

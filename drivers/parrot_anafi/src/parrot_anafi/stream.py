@@ -1,4 +1,5 @@
 import grpc
+import os
 import time
 import logging
 from math import sin, cos, radians, degrees
@@ -113,14 +114,16 @@ class Stream(StreamServiceServicer):
         percent = self.drone.get_state(BatteryStateChanged)['percent']
         return telemetry_proto.BatteryInfo(percentage=percent)
 
+    def get_satellite_count(self):
+        """Get satellite count from the drone."""
+        try:
+            return self.drone.get_state(NumberOfSatelliteChanged)['numberOfSatellite']
+        except Exception:
+            return 0
+
     def get_gps_info(self):
         """Get GPS info from the drone."""
-        satellites = 0
-        try:
-            satellites = self.drone.get_state(NumberOfSatelliteChanged)['numberOfSatellite']
-        except Exception:
-            pass
-        return telemetry_proto.GPSInfo(satellites=satellites)
+        return telemetry_proto.GPSInfo(satellites=self.get_satellite_count())
 
     def get_alert_info(self):
         """Get alert info from the drone."""
@@ -128,10 +131,19 @@ class Stream(StreamServiceServicer):
             alert_state = self.drone.get_state(AlertStateChanged)['state']
         except Exception:
             alert_state = AlertStateChanged_State.none
-        gps_fixed = self.drone.get_state(GPSFixStateChanged)['fixed']
+        try:
+            gps_fixed = self.drone.get_state(GPSFixStateChanged)['fixed']
+        except Exception:
+            gps_fixed = False
+        try:
+            link_quality = self.drone.get_state(LinkSignalQuality)['value'] & 0x0F
+        except Exception:
+            link_quality = 0
+        try:
+            heading_lock = self.drone.get_state(HeadingLockedStateChanged)['state']
+        except Exception:
+            heading_lock = HeadingLockedStateChanged_State.critical
         satellites = self.get_satellite_count()
-        link_quality = self.drone.get_state(LinkSignalQuality)['value'] & 0x0F
-        heading_lock = self.drone.get_state(HeadingLockedStateChanged)['state']
 
         battery_warning = telemetry_proto.BATTERY_WARNING_UNSPECIFIED
         if alert_state in (AlertStateChanged_State.critical_battery, AlertStateChanged_State.almost_empty_battery):
@@ -173,13 +185,11 @@ class Stream(StreamServiceServicer):
 
     def StreamVideoFrames(self, request, context):
         if not self.cap:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp"
             self.cap = cv2.VideoCapture(
                     f"rtsp://{self.ip}/live",
                     cv2.CAP_FFMPEG,
-                    [
-                        cv2.CAP_PROP_N_THREADS, 1,
-                        cv2.CAP_PROP_BUFFERSIZE, 1,
-                    ],
+                    (cv2.CAP_PROP_N_THREADS, 1),
                 )
 
         framerate = np.clip(request.target_fps, 1, 30) if request.target_fps else 30
