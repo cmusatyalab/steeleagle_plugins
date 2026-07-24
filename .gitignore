@@ -3,3 +3,4 @@ __pycache__/
 **.egg-info/
 **aviary.toml
 drivers/parrot_anafi/steeleagle_protocol/src/*
+*~

@@ -32,17 +32,18 @@ logger = logging.getLogger('parrot-anafi/stream')
 METERS_PER_DEGREE_LATITUDE = 111320.0
 
 class Stream(StreamServiceServicer):
-    """Stream Service implementation.
-    """
+    """Stream Service implementation."""
     def __init__(self, drone, ip):
         self.drone = drone
         self.ip = ip
         self.cap = None
 
     def get_position_info(self) -> telemetry_proto.PositionInfo:
-        """Get position info from the drone.
-        """
-        home = self.drone.get_state(HomeChanged)
+        """Get position info from the drone."""
+        try:
+            home = self.drone.get_state(HomeChanged)
+        except Exception:
+            home = {'latitude': 0.0, 'longitude': 0.0, 'altitude': 0.0}
         gps = self.drone.get_state(GpsLocationChanged)
         att = self.drone.get_state(AttitudeChanged)
         speed = self.drone.get_state(SpeedChanged)
@@ -84,8 +85,7 @@ class Stream(StreamServiceServicer):
         )
 
     def get_gimbal_status(self, gimbal_id=0):
-        """Get gimbal status for a given gimbal.
-        """
+        """Get gimbal status for a given gimbal."""
         pose = self.drone.get_state(attitude)[gimbal_id]
         return telemetry_proto.GimbalStatus(
             id=gimbal_id,
@@ -102,31 +102,34 @@ class Stream(StreamServiceServicer):
         )
 
     def get_gimbal_info(self):
-        """Get gimbal info from the drone.
-        """
+        """Get gimbal info from the drone."""
         gimbal_ids = self.drone.get_state(attitude).keys()
         return telemetry_proto.GimbalInfo(
             gimbals=[self.get_gimbal_status(gimbal_id) for gimbal_id in gimbal_ids]
         )
 
     def get_battery_info(self):
-        """Get battery info from the drone.
-        """
+        """Get battery info from the drone."""
         percent = self.drone.get_state(BatteryStateChanged)['percent']
         return telemetry_proto.BatteryInfo(percentage=percent)
 
     def get_gps_info(self):
-        """Get GPS info from the drone.
-        """
-        satellites = self.drone.get_state(NumberOfSatelliteChanged)['numberOfSatellite']
+        """Get GPS info from the drone."""
+        satellites = 0
+        try:
+            satellites = self.drone.get_state(NumberOfSatelliteChanged)['numberOfSatellite']
+        except Exception:
+            pass
         return telemetry_proto.GPSInfo(satellites=satellites)
 
     def get_alert_info(self):
-        """Get alert info from the drone.
-        """
-        alert_state = self.drone.get_state(AlertStateChanged)['state']
+        """Get alert info from the drone."""
+        try:
+            alert_state = self.drone.get_state(AlertStateChanged)['state']
+        except Exception:
+            alert_state = AlertStateChanged_State.none
         gps_fixed = self.drone.get_state(GPSFixStateChanged)['fixed']
-        satellites = self.drone.get_state(NumberOfSatelliteChanged)['numberOfSatellite']
+        satellites = self.get_satellite_count()
         link_quality = self.drone.get_state(LinkSignalQuality)['value'] & 0x0F
         heading_lock = self.drone.get_state(HeadingLockedStateChanged)['state']
 
@@ -173,21 +176,25 @@ class Stream(StreamServiceServicer):
             self.cap = cv2.VideoCapture(
                     f"rtsp://{self.ip}/live",
                     cv2.CAP_FFMPEG,
-                    (cv2.CAP_PROP_N_THREADS, 1),
-                    (cv2.CAP_PROP_BUFFERSIZE, 1),
+                    [
+                        cv2.CAP_PROP_N_THREADS, 1,
+                        cv2.CAP_PROP_BUFFERSIZE, 1,
+                    ],
                 )
 
-        framerate = np.clip(request.framerate, 1, 30)
+        framerate = np.clip(request.target_fps, 1, 30) if request.target_fps else 30
         frame_id = 0
         while True:
             try:
-                ret, cv_frame = cap.read()
+                ret, cv_frame = self.cap.read()
                 if not ret:
                     logger.warning('frame could not be read')
+                    time.sleep(1.0 / framerate)
                     continue
                 success, encoded_img = cv2.imencode('.jpg', cv_frame)
                 if not success:
                     logger.warning('frame could not be decoded')
+                    time.sleep(1.0 / framerate)
                     continue
                 frame = telemetry_proto.EncodedFrame(
                     timestamp=Timestamp().GetCurrentTime(),
@@ -201,20 +208,23 @@ class Stream(StreamServiceServicer):
                 time.sleep(1.0 / framerate)
             except Exception as e:
                 logger.warning(f'frame could not be read, reason: {e}')
-        cap.release()
+                time.sleep(1.0 / framerate)
+        self.cap.release()
 
     def StreamTelemetry(self, request, context):
-        framerate = np.clip(request.framerate, 1, 60)
+        framerate = np.clip(request.target_fps, 1, 60) if request.target_fps else 30
         while True:
             try:
                 telemetry = telemetry_proto.Telemetry(
                     timestamp=Timestamp().GetCurrentTime(),
                     battery_info=self.get_battery_info(),
                     gps_info=self.get_gps_info(),
-                    position_info=self.get_position_info,
-                    gimbal_info=self.get_gimbal_info,
-                    alert_info=self.get_alert_info,
+                    position_info=self.get_position_info(),
+                    gimbal_info=self.get_gimbal_info(),
+                    alert_info=self.get_alert_info(),
                 )
                 yield stream_proto.StreamTelemetryResponse(telemetry=telemetry)
+                time.sleep(1.0 / framerate)
             except Exception as e:
                 logger.warning(f'telemetry frame could not be generated, reason: {e}')
+                time.sleep(1.0 / framerate)

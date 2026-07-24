@@ -48,13 +48,14 @@ def main():
     listen_address = os.getenv('LISTEN_SOCKET')
     if not listen_address:
         raise ValueError('no listen socket address provided!')
+    os.makedirs(os.path.dirname(listen_address), exist_ok=True)
 
     server = grpc.server(
         thread_pool=futures.ThreadPoolExecutor(max_workers=10)
     )
-    add_ControlServiceServicer_to_server(Control(drone))
-    add_StreamServiceServicer_to_server(Stream(drone))
-    add_CalibrateServiceServicer_to_server(Calibrate(drone))
+    add_ControlServiceServicer_to_server(Control(drone), server)
+    add_StreamServiceServicer_to_server(Stream(drone, args.ip), server)
+    add_CalibrateServiceServicer_to_server(Calibrate(drone), server)
     server.add_insecure_port(f'unix://{listen_address}')
     server.start()
     logger.info('all services started')

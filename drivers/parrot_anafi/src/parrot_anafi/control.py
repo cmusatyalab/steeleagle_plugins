@@ -25,7 +25,9 @@ from olympe.messages.rth import (
 )
 import olympe.enums.rth as rth_state
 from olympe.messages.ardrone3.PilotingState import AttitudeChanged, GpsLocationChanged, AltitudeChanged
-from olympe.messages.gimbal import set_target, attitude
+from olympe.messages.gimbal import set_target, attitude, max_speed
+# Driver imports
+from parrot_anafi.velocity_pid import VelocityPIDThread
 
 logger = logging.getLogger('parrot-anafi/control')
 
@@ -124,7 +126,7 @@ class Control(ControlServiceServicer):
                 )
             )
         else: # NEU-aligned
-            psi = self.drone.get_state(AttitudeChanged['yaw'])
+            psi = self.drone.get_state(AttitudeChanged)['yaw']
             dx = request.position.x * cos(psi) + request.position.y * sin(psi)
             dy = -request.position.x * sin(psi) + request.position.y * cos(psi)
             self.drone(extended_move_by(
@@ -182,7 +184,7 @@ class Control(ControlServiceServicer):
         frame = 'relative' if request.frame <= 1 else 'absolute'
         # Actuate the gimbal depending on mode
         if request.pose_mode == control_proto.PoseMode.ANGLE:
-            self._drone(set_target(
+            self.drone(set_target(
                 gimbal_id=request.gimbal_id,
                 control_mode='position',
                 yaw_frame_of_reference=frame if yaw else 'none',
@@ -195,7 +197,7 @@ class Control(ControlServiceServicer):
             ).wait().success()
         elif request.pose_mode == control_proto.PoseMode.OFFSET:
             gimbal_pose = self.drone.get_state(attitude)[request.gimbal_id]
-            self._drone(set_target(
+            self.drone(set_target(
                 gimbal_id=request.gimbal_id,
                 control_mode='position',
                 yaw_frame_of_reference=frame if yaw else 'none',
@@ -207,16 +209,16 @@ class Control(ControlServiceServicer):
                 )
             ).wait().success()
         else:
-            max_speed = self.drone.get_state(max_speed(request.gimbal_id))['pitch']
-            self._drone(set_target(
+            gimbal_max_speed = self.drone.get_state(max_speed)[request.gimbal_id]
+            self.drone(set_target(
                 gimbal_id=request.gimbal_id,
                 control_mode='velocity',
                 yaw_frame_of_reference='relative',
-                yaw=clip(yaw / max_speed, -1.0, 1.0),
+                yaw=clip(yaw / gimbal_max_speed['current_yaw'], -1.0, 1.0),
                 pitch_frame_of_reference='relative',
-                pitch=clip(pitch / max_speed, -1.0, 1.0),
+                pitch=clip(pitch / gimbal_max_speed['current_pitch'], -1.0, 1.0),
                 roll_frame_of_reference='relative',
-                roll=clip(roll / max_speed, -1.0, 1.0),
+                roll=clip(roll / gimbal_max_speed['current_roll'], -1.0, 1.0),
                 )
             ).wait().success()
         return driver_proto.SetGimbalPoseResponse()
