@@ -18,5 +18,5 @@ if [ "$INSTALL" = true ]; then
     buf generate
     uv pip install -e .
 else
-    uv run parrot-anafi
+    uv run parrot-anafi "$@"
 fi

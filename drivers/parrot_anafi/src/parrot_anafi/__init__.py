@@ -50,7 +50,7 @@ def main():
         raise ValueError('no listen socket address provided!')
 
     server = grpc.server(
-        migration_thread_pool=futures.ThreadPoolExecutor(max_workers=10)
+        thread_pool=futures.ThreadPoolExecutor(max_workers=10)
     )
     add_ControlServiceServicer_to_server(Control(drone))
     add_StreamServiceServicer_to_server(Stream(drone))

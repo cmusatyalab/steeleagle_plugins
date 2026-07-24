@@ -45,43 +45,42 @@ class Control(ControlServiceServicer):
 
     def __init__(self, drone):
         self.drone = drone
-        self.mode = FlightMode.LOITER
+        self.mode = Control.FlightMode.LOITER
         self.velocity_task = VelocityPIDThread(self.drone)
         self.velocity_task.start()
 
     def set_flight_mode(self, mode: FlightMode):
         """Set the internal flight mode of the drone.
 
-        This method tracks an implied flight mode for the drone
-        since Olympe does not provide one. Tracking the flight
-        mode prevents the VelocityPIDThread from interrupting
-        other flight commands.
+        This method tracks an implied flight mode for the drone since Olympe
+        does not provide one. Tracking the flight mode prevents the
+        VelocityPIDThread from interrupting other flight commands.
         """
         logger.debug(f'switching flight mode to {mode.name}')
         if mode == self.mode:
             return
-        if self.mode == FlightMode.VELOCITY:
+        if self.mode == Control.FlightMode.VELOCITY:
             # Switching out of velocity mode
             self.velocity_task.pause()
-        elif mode == FlightMode.VELOCITY:
+        elif mode == Control.FlightMode.VELOCITY:
             # Switching into velocity mode
             self.velocity_task.resume()
         self.mode = mode
 
     def TakeOff(self, request, context):
-        self.set_flight_mode(FlightMode.TAKEOFF_LAND)
+        self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
         if request.take_off_altitude:
             logger.warning('no support for field take_off_altitude, ignoring')
         self.drone(TakeOff()).wait().success()
         return driver_proto.TakeOffResponse()
 
     def Land(self, request, context):
-        self.set_flight_mode(FlightMode.TAKEOFF_LAND)
+        self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
         self.drone(Landing()).wait().success()
         return driver_proto.LandResponse()
 
     def Hold(self, request, context):
-        self.set_flight_mode(FlightMode.LOITER)
+        self.set_flight_mode(Control.FlightMode.LOITER)
         # Abort an in-progress RTH since PCMD does not overwrite it
         self.drone(abort())
         # Set a slight positive throttle to cancel landing
@@ -96,7 +95,7 @@ class Control(ControlServiceServicer):
         return driver_proto.SetHomeResponse()
 
     def ReturnToHome(self, request, context):
-        self.set_flight_mode(FlightMode.GUIDED)
+        self.set_flight_mode(Control.FlightMode.GUIDED)
         # Set the end behavior for the RTH
         if request.end_behavior <= 1:
             self.drone(set_ending_behavior(rth_state.ending_behavior.hovering)).wait().success()
@@ -112,7 +111,7 @@ class Control(ControlServiceServicer):
         return driver_proto.ReturnToHomeResponse()
 
     def GoToRelativePosition(self, request, context):
-        self.set_flight_mode(FlightMode.GUIDED)
+        self.set_flight_mode(Control.FlightMode.GUIDED)
         if request.frame <= 1: # Body-aligned
             self.drone(extended_move_by(
                 request.position.x,
@@ -140,7 +139,7 @@ class Control(ControlServiceServicer):
         return driver_proto.GoToRelativePositionResponse()
 
     def GoToGlobalPosition(self, request, context):
-        self.set_flight_mode(FlightMode.GUIDED)
+        self.set_flight_mode(Control.FlightMode.GUIDED)
         # Set heading mode
         heading_mode = move_mode.orientation_mode.to_target
         if request.heading_mode > 1:
@@ -173,7 +172,7 @@ class Control(ControlServiceServicer):
 
     def SetVelocity(self, request, context):
         self.velocity_task.set_target(request.velocity, request.frame)
-        self.set_flight_mode(FlightMode.VELOCITY)
+        self.set_flight_mode(Control.FlightMode.VELOCITY)
         return driver_proto.SetVelocityResponse()
 
     def SetGimbalPose(self, request, context):
