@@ -55,11 +55,11 @@ class Calibrate(CalibrateServiceServicer):
                         next_instruction='Rotate the drone around its Z (yaw) axis!',
                         step=3, total=3,
                     )
-                yield calibrate_proto.CalibrateResponse(
-                    next_instruction='Magnetic calibration complete!',
-                    step=3, total=3,
-                    complete=True,
-                )
+            yield calibrate_proto.CalibrateResponse(
+                next_instruction='Magnetic calibration complete!',
+                step=3, total=3,
+                complete=True,
+            )
         elif request.sensor == 2: # Gimbal
             self.drone(
                 calibrate(request.id)

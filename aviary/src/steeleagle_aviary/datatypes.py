@@ -19,6 +19,7 @@ class CameraHolder:
 class Mode(Enum):
     POSITION = 'POSITION'
     VELOCITY = 'VELOCITY'
+    WAYPOINT = 'WAYPOINT'
 
 class PoseMode(Enum):
     ANGLE = 'ANGLE'

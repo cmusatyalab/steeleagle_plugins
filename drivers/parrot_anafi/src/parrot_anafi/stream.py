@@ -11,6 +11,7 @@ import steeleagle_protocol.v1.services.driver.stream_pb2 as stream_proto
 import steeleagle_protocol.v1.messages.telemetry.telemetry_pb2 as telemetry_proto
 from steeleagle_protocol.v1.services.driver.stream_pb2_grpc import StreamServiceServicer
 from google.protobuf.timestamp_pb2 import Timestamp
+from google.protobuf.any_pb2 import Any
 # Olympe imports
 from olympe.messages.ardrone3.PilotingState import (
     AttitudeChanged,
@@ -19,8 +20,9 @@ from olympe.messages.ardrone3.PilotingState import (
     SpeedChanged,
     AlertStateChanged,
     HeadingLockedStateChanged,
+    FlyingStateChanged,
 )
-from olympe.enums.ardrone3.PilotingState import AlertStateChanged_State, HeadingLockedStateChanged_State
+from olympe.enums.ardrone3.PilotingState import AlertStateChanged_State, HeadingLockedStateChanged_State, FlyingStateChanged_State
 from olympe.messages.ardrone3.GPSSettingsState import HomeChanged, GPSFixStateChanged
 from olympe.messages.ardrone3.GPSState import NumberOfSatelliteChanged
 from olympe.messages.common.CommonState import BatteryStateChanged, LinkSignalQuality
@@ -49,6 +51,7 @@ class Stream(StreamServiceServicer):
         att = self.drone.get_state(AttitudeChanged)
         speed = self.drone.get_state(SpeedChanged)
         alt = self.drone.get_state(AltitudeChanged)
+        state = self.drone.get_state(FlyingStateChanged)
 
         psi = att['yaw']
         north = (gps['latitude'] - home['latitude']) * METERS_PER_DEGREE_LATITUDE
@@ -61,6 +64,18 @@ class Stream(StreamServiceServicer):
         vz = -speed['speedZ']
         vx_body = speed['speedX'] * cos(psi) + speed['speedY'] * sin(psi)
         vy_body = -speed['speedX'] * sin(psi) + speed['speedY'] * cos(psi)
+
+        motion_status = 0
+        if state['state'] == FlyingStateChanged_State.hovering:
+            motion_status = 1
+        elif state['state'] == FlyingStateChanged_State.landed:
+            motion_status = 3
+        else:
+            motion_status = 2
+
+        setpoint = Any()
+        if self.drone.setpoint:
+            setpoint.Pack(self.drone.setpoint)
 
         return telemetry_proto.PositionInfo(
             home=common_proto.GlobalPosition(
@@ -83,6 +98,8 @@ class Stream(StreamServiceServicer):
             velocity_neu=common_proto.Velocity(
                 x_vel=vx, y_vel=vy, z_vel=vz,
             ),
+            motion_status=motion_status,
+            setpoint=setpoint,
         )
 
     def get_gimbal_status(self, gimbal_id=0):
@@ -111,7 +128,10 @@ class Stream(StreamServiceServicer):
 
     def get_battery_info(self):
         """Get battery info from the drone."""
-        percent = self.drone.get_state(BatteryStateChanged)['percent']
+        percent = 100
+        battery_state = self.drone.get_state(BatteryStateChanged)
+        if battery_state:
+            percent = battery_state['percent']
         return telemetry_proto.BatteryInfo(percentage=percent)
 
     def get_satellite_count(self):
@@ -145,33 +165,33 @@ class Stream(StreamServiceServicer):
             heading_lock = HeadingLockedStateChanged_State.critical
         satellites = self.get_satellite_count()
 
-        battery_warning = telemetry_proto.BATTERY_WARNING_UNSPECIFIED
+        battery_warning = telemetry_proto.AlertInfo.BatteryWarning.BATTERY_WARNING_UNSPECIFIED
         if alert_state in (AlertStateChanged_State.critical_battery, AlertStateChanged_State.almost_empty_battery):
-            battery_warning = telemetry_proto.BATTERY_WARNING_CRITICAL
+            battery_warning = telemetry_proto.AlertInfo.BatteryWarning.BATTERY_WARNING_CRITICAL
         elif alert_state == AlertStateChanged_State.low_battery:
-            battery_warning = telemetry_proto.BATTERY_WARNING_LOW
+            battery_warning = telemetry_proto.AlertInfo.BatteryWarning.BATTERY_WARNING_LOW
 
-        gps_warning = telemetry_proto.GPS_WARNING_UNSPECIFIED
+        gps_warning = telemetry_proto.AlertInfo.GPSWarning.GPS_WARNING_UNSPECIFIED
         if not gps_fixed:
-            gps_warning = telemetry_proto.GPS_WARNING_NO_FIX
+            gps_warning = telemetry_proto.AlertInfo.GPSWarning.GPS_WARNING_NO_FIX
         elif satellites < 6:
-            gps_warning = telemetry_proto.GPS_WARNING_WEAK_SIGNAL
+            gps_warning = telemetry_proto.AlertInfo.GPSWarning.GPS_WARNING_WEAK_SIGNAL
 
-        magnetometer_warning = telemetry_proto.MAGNETOMETER_WARNING_UNSPECIFIED
+        magnetometer_warning = telemetry_proto.AlertInfo.MagnetometerWarning.MAGNETOMETER_WARNING_UNSPECIFIED
         if alert_state in (AlertStateChanged_State.magneto_pertubation, AlertStateChanged_State.magneto_low_earth_field):
-            magnetometer_warning = telemetry_proto.MAGNETOMETER_WARNING_PERTURBATIONS
+            magnetometer_warning = telemetry_proto.AlertInfo.MagnetometerWarning.MAGNETOMETER_WARNING_PERTURBATIONS
 
-        connection_warning = telemetry_proto.CONNECTION_WARNING_UNSPECIFIED
+        connection_warning = telemetry_proto.AlertInfo.ConnectionWarning.CONNECTION_WARNING_UNSPECIFIED
         if link_quality == 1:
-            connection_warning = telemetry_proto.CONNECTION_WARNING_DISCONNECTED
+            connection_warning = telemetry_proto.AlertInfo.ConnectionWarning.CONNECTION_WARNING_DISCONNECTED
         elif link_quality == 2:
-            connection_warning = telemetry_proto.CONNECTION_WARNING_WEAK_CONNECTION
+            connection_warning = telemetry_proto.AlertInfo.ConnectionWarning.CONNECTION_WARNING_WEAK_CONNECTION
 
-        compass_warning = telemetry_proto.COMPASS_WARNING_UNSPECIFIED
+        compass_warning = telemetry_proto.AlertInfo.CompassWarning.COMPASS_WARNING_UNSPECIFIED
         if heading_lock == HeadingLockedStateChanged_State.critical:
-            compass_warning = telemetry_proto.COMPASS_WARNING_NO_LOCK
+            compass_warning = telemetry_proto.AlertInfo.CompassWarning.COMPASS_WARNING_NO_LOCK
         elif heading_lock == HeadingLockedStateChanged_State.warning:
-            compass_warning = telemetry_proto.COMPASS_WARNING_WEAK_LOCK
+            compass_warning = telemetry_proto.AlertInfo.CompassWarning.COMPASS_WARNING_WEAK_LOCK
 
         return telemetry_proto.AlertInfo(
             battery_warning=battery_warning,
@@ -194,6 +214,7 @@ class Stream(StreamServiceServicer):
 
         framerate = np.clip(request.target_fps, 1, 30) if request.target_fps else 30
         frame_id = 0
+        ts = Timestamp()
         while True:
             try:
                 ret, cv_frame = self.cap.read()
@@ -206,8 +227,9 @@ class Stream(StreamServiceServicer):
                     logger.warning('frame could not be decoded')
                     time.sleep(1.0 / framerate)
                     continue
+                ts.GetCurrentTime()
                 frame = telemetry_proto.EncodedFrame(
-                    timestamp=Timestamp().GetCurrentTime(),
+                    timestamp=ts,
                     id=frame_id,
                     encoded_data=encoded_img.tobytes(),
                     position_info=self.get_position_info(),
@@ -219,14 +241,15 @@ class Stream(StreamServiceServicer):
             except Exception as e:
                 logger.warning(f'frame could not be read, reason: {e}')
                 time.sleep(1.0 / framerate)
-        self.cap.release()
 
     def StreamTelemetry(self, request, context):
         framerate = np.clip(request.target_fps, 1, 60) if request.target_fps else 30
+        ts = Timestamp()
         while True:
             try:
+                ts.GetCurrentTime()
                 telemetry = telemetry_proto.Telemetry(
-                    timestamp=Timestamp().GetCurrentTime(),
+                    timestamp=ts,
                     battery_info=self.get_battery_info(),
                     gps_info=self.get_gps_info(),
                     position_info=self.get_position_info(),

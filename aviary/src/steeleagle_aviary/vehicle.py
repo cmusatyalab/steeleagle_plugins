@@ -1,6 +1,7 @@
 import pymap3d as pm
 from panda3d.core import LVector3f, LPoint3f, NodePath
 from math import sin, cos, radians, isclose
+from collections import deque
 # Utility imports
 from steeleagle_aviary.util import convert_angle_heading, calculate_bearing
 from steeleagle_aviary.datatypes import GeodeticPoint, Mode, PoseMode
@@ -50,6 +51,7 @@ class Vehicle:
         self.velocity_target = LPoint3f(0.0, 0.0, 0.0) # x_vel, y_vel, z_vel
         self.pose_target = LPoint3f(0.0, 0.0, 0.0) # yaw, pitch, roll
         self.speed_target = DEFAULT_SPEED
+        self.waypoints = deque() 
 
     def get_sim_origin(self, origin: GeodeticPoint) -> LPoint3f:
         """Gets the simulation origin from starting position.
@@ -222,6 +224,44 @@ class Vehicle:
         return isclose(a1, a2, abs_tol=1e-3) or \
                 isclose(a1, -(360.0 - a2), abs_tol=1e-3)
 
+    def set_waypoint_target(self, waypoints: list[LPoint3f], speed=DEFAULT_SPEED):
+        """Set a waypoint target.
+
+        Set a list of waypoints (in sim coordinates) for the vehicle to move through.
+        The vehicle will visit each waypoint in order and stop once all waypoints are
+        visited.
+
+        Args:
+            waypoints (list[LPoint3f]): list of waypoints in sim coordinates
+        """
+        self.waypoints.clear()
+        if not len(waypoints):
+            return
+        for wp in waypoints:
+            self.waypoints.append(wp)
+        self.mode = Mode.WAYPOINT
+        self.speed_target = speed
+        self.set_position_target(self.waypoints[0], speed=speed)
+
+    def set_geodetic_waypoint_target(self, waypoints: list[GeodeticPoint], speed=DEFAULT_SPEED):
+        """Set a geodetic waypoint target.
+
+        Set a list of waypoints (in geodetic coordinates) for the vehicle to move through.
+        The vehicle will visit each waypoint in order and stop once all waypoints are
+        visited.
+
+        Args:
+            waypoints (list[LPoint3f]): list of waypoints in geodetic coordinates
+        """
+        self.waypoints.clear()
+        if not len(waypoints):
+            return
+        for wp in waypoints:
+            self.waypoints.append(self.convert_to_sim(wp))
+        self.mode = Mode.WAYPOINT
+        self.speed_target = speed
+        self.set_position_target(self.waypoints[0], speed=speed)
+
     def set_position_target(self, point: LPoint3f, speed=DEFAULT_SPEED):
         """Set a position target.
 
@@ -320,8 +360,22 @@ class Vehicle:
                 move *= self.speed_target * dt
             if move.length() > diff.length():
                 move *= (diff.length() / move.length())
-        else:
+        elif self.mode == Mode.VELOCITY:
             move = self.velocity_target * dt
+        else: # WAYPOINT mode
+            if not self.waypoints:
+                return move
+            current = self.current_position()
+            diff = self.position_target - current
+            if diff.length() == 0:
+                self.set_position_target(self.waypoints.popleft(), speed=self.speed_target)
+            else:
+                move += diff
+                if move.length() > 0:
+                    move.normalize()
+                    move *= self.speed_target * dt
+                if move.length() > diff.length():
+                    move *= (diff.length() / move.length())
         return move
 
     def get_velocity_body(self, dt: float) -> LVector3f:

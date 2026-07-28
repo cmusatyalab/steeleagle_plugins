@@ -1,4 +1,5 @@
 import os
+from functools import wraps
 from math import sin, cos
 import time
 import logging
@@ -24,7 +25,9 @@ from olympe.messages.rth import (
     set_ending_hovering_altitude,
 )
 import olympe.enums.rth as rth_state
+from olympe.enums.ardrone3.PilotingState import FlyingStateChanged_State
 from olympe.messages.ardrone3.PilotingState import AttitudeChanged, GpsLocationChanged, AltitudeChanged
+from olympe.messages.ardrone3.PilotingState import FlyingStateChanged
 from olympe.messages.gimbal import set_target, attitude, max_speed
 # Driver imports
 from parrot_anafi.velocity_pid import VelocityPIDThread
@@ -35,6 +38,17 @@ logger = logging.getLogger('parrot-anafi/control')
 DEFAULT_SPEED = 3.0
 # Default angular speed in degrees per second
 DEFAULT_ANGULAR_SPEED = 90.0
+
+def setpoint(func):
+    """Setpoint decorator.
+
+    Automatically marks the setpoint for the decorated RPC method.
+    """
+    @wraps(func)
+    def wrapper(self, request, context):
+        self.drone.mark_setpoint(request)
+        return func(self, request, context)
+    return wrapper
 
 class Control(ControlServiceServicer):
     """Control Service implementation.
@@ -69,18 +83,33 @@ class Control(ControlServiceServicer):
             self.velocity_task.resume()
         self.mode = mode
 
+    @setpoint
     def TakeOff(self, request, context):
         self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
         if request.take_off_altitude:
             logger.warning('no support for field take_off_altitude, ignoring')
+        if self.drone.get_state(FlyingStateChanged)['state'] != FlyingStateChanged_State.landed:
+            logger.error('takeoff attempted when drone not landed')
+            context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION, 
+                    'takeoff attemped when drone not landed',
+                    )
         self.drone(TakeOff()).wait().success()
         return control_proto.TakeOffResponse()
 
+    @setpoint
     def Land(self, request, context):
         self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
+        if self.drone.get_state(FlyingStateChanged)['state'] == FlyingStateChanged_State.landed:
+            logger.error('land attempted when drone not in the air')
+            context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION, 
+                    'land attempted when drone not in the air',
+                    )
         self.drone(Landing()).wait().success()
         return control_proto.LandResponse()
 
+    @setpoint
     def Hold(self, request, context):
         self.set_flight_mode(Control.FlightMode.LOITER)
         # Abort an in-progress RTH since PCMD does not overwrite it
@@ -96,6 +125,7 @@ class Control(ControlServiceServicer):
         self.drone(set_custom_location(lat, lon, alt)).wait().success()
         return control_proto.SetHomeResponse()
 
+    @setpoint
     def ReturnToHome(self, request, context):
         self.set_flight_mode(Control.FlightMode.GUIDED)
         # Set the end behavior for the RTH
@@ -104,14 +134,15 @@ class Control(ControlServiceServicer):
         else:
             self.drone(set_ending_behavior(rth_state.ending_behavior.landing)).wait().success()
         # Set the return minimum altitude
-        if request.return_altitude:
-            self.drone(set_min_altitude(request.return_altitude)).wait().success()
+        if request.min_return_altitude:
+            self.drone(set_min_altitude(request.min_return_altitude)).wait().success()
         # Set the final hovering altitude
         if request.final_altitude:
             self.drone(set_ending_hovering_altitude(request.final_altitude)).wait().success()
         self.drone(return_to_home()).wait().success()
         return control_proto.ReturnToHomeResponse()
 
+    @setpoint
     def GoToRelativePosition(self, request, context):
         self.set_flight_mode(Control.FlightMode.GUIDED)
         if request.frame <= 1: # Body-aligned
@@ -140,18 +171,20 @@ class Control(ControlServiceServicer):
             )
         return control_proto.GoToRelativePositionResponse()
 
+    @setpoint
     def GoToGlobalPosition(self, request, context):
         self.set_flight_mode(Control.FlightMode.GUIDED)
         # Set heading mode
         heading_mode = move_mode.orientation_mode.to_target
         if request.heading_mode > 1:
             heading_mode = move_mode.orientation_mode.heading_start
-        if request.altitude_mode > 1: # Relative altitude
+        if request.altitude_mode <= 1: # Relative altitude
             self.drone(extended_move_to(
                 request.position.latitude,
                 request.position.longitude,
                 request.position.altitude,
                 heading_mode,
+                request.position.heading,
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
@@ -165,6 +198,7 @@ class Control(ControlServiceServicer):
                 request.position.longitude,
                 absolute_altitude,
                 heading_mode,
+                request.position.heading,
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
@@ -172,11 +206,13 @@ class Control(ControlServiceServicer):
             )
         return control_proto.GoToGlobalPositionResponse()
 
+    @setpoint
     def SetVelocity(self, request, context):
         self.velocity_task.set_target(request.velocity, request.frame)
         self.set_flight_mode(Control.FlightMode.VELOCITY)
         return control_proto.SetVelocityResponse()
 
+    @setpoint
     def SetGimbalPose(self, request, context):
         yaw = request.pose.yaw
         pitch = request.pose.pitch

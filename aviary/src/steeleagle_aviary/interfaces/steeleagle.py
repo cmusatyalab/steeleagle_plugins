@@ -82,37 +82,59 @@ class Control(ControlServiceServicer):
         return control_proto.SetHomeResponse()
 
     def ReturnToHome(self, request, context):
-        # TODO: Replicate with waypoints
-        # TODO: Replicate end behavior/return altitude
-        self.vehicle.set_position_target(self.vehicle.sim_origin)
+        geod_position = self.vehicle.current_geodetic_position()
+        position = self.vehicle.current_position()
+        target = self.vehicle.convert_to_geodetic(
+                self.vehicle.get_sim_origin(),
+                )
+        bearing = calculate_bearing(
+                geod_position.latitude,
+                geod_position.longitude,
+                target.latitude,
+                target.longitude,
+                )
+        self.vehicle.set_pose_target(LVector3f(bearing, 0, 0), PoseMode.ANGLE)
+
+        altitude = request.min_return_altitude + self.vehicle.sim_origin.z
+        if request.min_return_altitude < self.vehicle.position.z:
+            altitude = self.vehicle.position.z
+
+        final = self.sim_origin.z
+        if request.end_behavior <= 1:
+            final = self.sim_origin.z + request.final_altitude
+
+        waypoints = [
+            LPoint3f(position.x, position.y, altitude),
+            LPoint3f(self.vehicle.sim_origin.x, self.vehicle.sim_origin.y, altitude),
+            LPoint3f(self.vehicle.sim_origin.x, self.vehicle.sim_origin.y, final),
+        ]
+        
+        self.vehicle.set_waypoint_target(waypoints)
         return control_proto.ReturnToHomeResponse()
 
     def GoToRelativePosition(self, request, context):
         offset = LVector3f(request.position.x, request.position.y, request.position.z)
         pose = LPoint3f(request.position.angle, 0, 0)
         body_aligned = request.frame <= 1
-        self.vehicle.set_relative_position_target(new_position, body_aligned=body_aligned)
-        # TODO: Add in speed and angular speed lever
-        self.vehicle.set_pose_target(pose, mode=PoseMode.OFFSET)
+        self.vehicle.set_relative_position_target(new_position, body_aligned=body_aligned, speed=request.speed)
+        self.vehicle.set_pose_target(pose, mode=PoseMode.OFFSET, speed=request.angular_speed)
         return control_proto.GoToRelativePositionResponse()
 
     def GoToGlobalPosition(self, request, context):
         # If absolute altitude is specified, add the target altitude
         # to the current altitude
-        if request.altitude_mode <= 1:
-            # TODO: Fix this to be absolute
+        if request.altitude_mode <= 1: # Relative mode
             altitude = request.position.altitude - self.vehicle.sim_origin.z
         else:
-            position = self.vehicle.current_position()
-            # TODO: Fix this to be relative to takeoff origin
-            altitude = position.z + request.position.altitude
+            altitude = position.z
 
         self.vehicle.set_position_target(self.vehicle.convert_to_sim(
                 GeodeticPoint(
                     request.position.latitude,
                     request.position.longitude,
                     altitude
-                    )
+                    ),
+                speed=request.speed,
                 ))
 
         # If heading mode is TO_TARGET, set the pose to look at the
@@ -125,8 +147,7 @@ class Control(ControlServiceServicer):
                     request.position.latitude,
                     request.position.longitude
                     )
-            # TODO: Add in angular speed lever
-            self.vehicle.set_pose_target(LVector3f(bearing, 0, 0), PoseMode.ANGLE)
+            self.vehicle.set_pose_target(LVector3f(bearing, 0, 0), PoseMode.ANGLE, speed=request.angular_speed)
 
         return control_proto.GoToGlobalPositionResponse()
 

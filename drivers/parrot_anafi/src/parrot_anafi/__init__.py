@@ -22,10 +22,24 @@ logger = logging.getLogger("parrot-anafi/main")
 olympe.log.update_config({
     "loggers": {
         "olympe": {
-            "level": "DEBUG"
+            "level": "INFO"
         }
     }
 })
+
+class DroneWrapper(olympe.Drone):
+    """Drone wrapper to keep track of setpoints.
+
+    This wrapper holds setpoint data to exchange between services.
+    Namely the StreamService must have access to ControlService
+    setpoints to correctly generate telemetry.
+    """
+    def __init__(self, ip):
+        super().__init__(ip)
+        self.setpoint = None
+
+    def mark_setpoint(self, setpoint):
+        self.setpoint = setpoint
 
 def main():
     """Runs the driver.
@@ -41,7 +55,7 @@ def main():
     )
     args = parser.parse_args()
 
-    drone = olympe.Drone(args.ip)
+    drone = DroneWrapper(args.ip)
     if not drone.connect():
         raise ConnectionError('cannot connect to device!')
 
