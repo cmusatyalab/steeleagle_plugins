@@ -57,9 +57,18 @@ class PIDGains:
 
 # Default gains, tuned for the Anafi/Anafi USA airframes. Callers can override
 # these per-axis after constructing VelocityPIDThread.
-DEFAULT_FORWARD_GAINS = PIDGains(kp=0.3, ki=0.001, kd=100.0, max_i=10.0)
-DEFAULT_RIGHT_GAINS = PIDGains(kp=0.3, ki=0.001, kd=100.0, max_i=10.0)
-DEFAULT_UP_GAINS = PIDGains(kp=2.0, ki=0.0, kd=100.0, max_i=10.0)
+#
+# kd=5.0 (down from a previous 100.0): measured against live telemetry, the
+# velocity reading's sample-to-sample noise alone produces a rate of change
+# (|delta error| / dt) with a median around 1.0 m/s/s and a max around 3.0
+# m/s/s on all three axes. At kd=100 even the median noise level alone
+# produces a derivative term of ~100 - i.e. full PCMD saturation from pure
+# sensor jitter, not genuine error dynamics. kd=5 keeps the derivative's
+# contribution from typical noise to a small fraction of the PCMD range
+# while still meaningfully damping real, fast error changes.
+DEFAULT_FORWARD_GAINS = PIDGains(kp=0.3, ki=0.001, kd=5.0, max_i=10.0)
+DEFAULT_RIGHT_GAINS = PIDGains(kp=0.3, ki=0.001, kd=5.0, max_i=10.0)
+DEFAULT_UP_GAINS = PIDGains(kp=2.0, ki=0.0, kd=5.0, max_i=10.0)
 
 
 def _clamp(value, lo, hi):
@@ -107,31 +116,62 @@ class AxisPID:
         self._integral = 0.0
         self._prev_error = 0.0
         self._prev_time = None
+        # Monotonic time of the last sample where `error` actually differed
+        # from the previous one. The underlying velocity telemetry updates at
+        # a much lower, uneven rate than this loop's tick interval, so most
+        # calls to update() see a repeat of the last reading. Measuring the
+        # derivative against the tick interval on the sample where the
+        # reading finally changes would divide a multi-tick delta by a
+        # single tick's worth of time, inflating d_term. This tracks the
+        # true elapsed time since the last distinct reading instead.
+        self._last_change_time = None
 
     def reset(self):
         """Clears accumulated integral/derivative state (e.g. on pause or braking)."""
         self._integral = 0.0
         self._prev_error = 0.0
         self._prev_time = None
+        self._last_change_time = None
 
-    def update(self, error: float, now: float) -> float:
-        """Advances the controller by one sample and returns the control output."""
+    def update(self, error: float, now: float) -> float | None:
+        """Advances the controller by one sample.
+
+        Returns the control output for this tick, or None if `error` is a
+        byte-for-byte repeat of the last sample (i.e. the underlying sensor
+        hasn't published a new reading since the previous tick). Callers
+        should hold their existing command rather than treat None as a
+        zero-valued delta.
+        """
         if abs(error) < ERROR_DEADBAND_MPS:
             error = 0.0
 
-        if self._prev_time is None or (now - self._prev_time) > STALE_SAMPLE_S:
+        first_sample = self._prev_time is None
+        gap = (not first_sample) and (now - self._prev_time) > STALE_SAMPLE_S
+        repeat = (not first_sample) and (not gap) and (error == self._prev_error)
+
+        if first_sample or gap:
             self._prev_time = now
             self._prev_error = error
+            self._last_change_time = now
+            dt = 0.0
+        else:
+            dt = now - self._prev_time
+            self._prev_time = now
 
-        dt = now - self._prev_time
+        if repeat:
+            # No new information since the last tick (the velocity telemetry
+            # this is driven by updates at a much lower, uneven rate than
+            # this control loop runs). Don't re-derive a delta from data
+            # we've already acted on.
+            return None
 
         p_term = self._gains.kp * error
 
         if abs(error) < SETTLING_ERROR_MPS:
             # Near the setpoint: damp the proportional response and freeze
             # the integral rather than let it keep winding.
-            self._prev_time = now
             self._prev_error = error
+            self._last_change_time = now
             return p_term / 2.0
 
         i_term = 0.0
@@ -143,12 +183,17 @@ class AxisPID:
                 i_term = 0.0
         self._integral = _clamp(self._integral + i_term, -self._gains.max_i, self._gains.max_i)
 
+        # This is guaranteed to be a genuinely new reading (the `repeat`
+        # check above already filtered out same-value ticks), so the
+        # derivative can be measured over the time since the reading last
+        # changed rather than since the last tick.
         d_term = 0.0
-        if abs(error) > 0.01 and dt > 0:
-            d_term = self._gains.kd * (error - self._prev_error) / dt
-
-        self._prev_time = now
+        d_dt = now - self._last_change_time
+        if abs(error) > 0.01 and d_dt > 0:
+            d_term = self._gains.kd * (error - self._prev_error) / d_dt
         self._prev_error = error
+        self._last_change_time = now
+
         return p_term + self._integral + d_term
 
 
@@ -173,6 +218,10 @@ class ActuationAxis:
     def compute(self, setpoint: float, current: float, now: float) -> int:
         error = setpoint - current
         output = self._pid.update(error, now)
+        if output is None:
+            # No new sensor reading this tick; hold the last commanded value
+            # instead of accumulating another delta onto it.
+            return round(self._previous_command)
 
         command = self._previous_command + output
         braking = _is_opposite_direction(setpoint, command)
