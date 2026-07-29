@@ -63,7 +63,7 @@ class Control(ControlServiceServicer):
         self.vehicle = vehicle
 
     def TakeOff(self, request, context):
-        self.vehicle.set_position_target(self.vehicle.current_position() + LVector3f(0, 0, request.take_off_altitude))
+        self.vehicle.set_position_target(self.vehicle.current_position() + LVector3f(0, 0, request.altitude))
         return control_proto.TakeOffResponse()
 
     def Land(self, request, context):
@@ -239,16 +239,26 @@ class Stream(StreamServiceServicer):
         gid = 0
         gimbal_pose_body = common_proto.Pose()
         gimbal_pose_body.yaw = pose_body.x
-        gimbal_pose_body.pitch = pose_body.x
-        gimbal_pose_body.roll = pose_body.x
+        gimbal_pose_body.pitch = pose_body.y
+        gimbal_pose_body.roll = pose_body.z
         gimbal_pose = common_proto.Pose()
         gimbal_pose.yaw = pose.x
         gimbal_pose.pitch = pose.y
         gimbal_pose.roll = pose.z
+        gimbal_velocity_body = common_proto.Pose()
+        gimbal_velocity_body.yaw = 0.0
+        gimbal_velocity_body.pitch = angular_vel.y
+        gimbal_velocity_body.roll = angular_vel.z
+        gimbal_velocity_neu = common_proto.Pose()
+        gimbal_velocity_neu.yaw = angular_vel.x
+        gimbal_velocity_neu.pitch = angular_vel.y
+        gimbal_velocity_neu.roll = angular_vel.z
         gimbal_status = telemetry_proto.GimbalStatus(
                 id=gid,
                 pose_body=gimbal_pose_body,
-                pose_neu=gimbal_pose
+                pose_neu=gimbal_pose,
+                angular_velocity_body=gimbal_velocity_body,
+                angular_velocity_neu=gimbal_velocity_neu,
                 )
         gimbals.append(gimbal_status)
         gimbal_info = telemetry_proto.GimbalInfo(gimbals=gimbals)

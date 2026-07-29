@@ -86,7 +86,8 @@ class Control(ControlServiceServicer):
     @setpoint
     def TakeOff(self, request, context):
         self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
-        if request.take_off_altitude:
+        if request.altitude:
+            # TODO: spawn off a thread that does this!
             logger.warning('no support for field take_off_altitude, ignoring')
         if self.drone.get_state(FlyingStateChanged)['state'] != FlyingStateChanged_State.landed:
             logger.error('takeoff attempted when drone not landed')
@@ -154,7 +155,7 @@ class Control(ControlServiceServicer):
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
-                )
+                ) >> FlyingStateChanged(state='flying')
             )
         else: # NEU-aligned
             psi = self.drone.get_state(AttitudeChanged)['yaw']
@@ -167,7 +168,7 @@ class Control(ControlServiceServicer):
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
-                )
+                ) >> FlyingStateChanged(state='flying')
             )
         return control_proto.GoToRelativePositionResponse()
 
@@ -188,7 +189,7 @@ class Control(ControlServiceServicer):
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
-                )
+                ) >> FlyingStateChanged(state='flying')
             )
         else: # Absolute altitude
             absolute_altitude = request.position.altitude - self.drone.get_state(GpsLocationChanged)['altitude'] \
@@ -202,7 +203,7 @@ class Control(ControlServiceServicer):
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.speed if request.speed else DEFAULT_SPEED,
                 request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
-                )
+                ) >> FlyingStateChanged(state='flying')
             )
         return control_proto.GoToGlobalPositionResponse()
 
