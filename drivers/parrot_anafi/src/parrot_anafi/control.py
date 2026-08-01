@@ -92,7 +92,7 @@ class Control(ControlServiceServicer):
         if self.drone.get_state(FlyingStateChanged)['state'] != FlyingStateChanged_State.landed:
             logger.error('takeoff attempted when drone not landed')
             context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION, 
+                    grpc.StatusCode.FAILED_PRECONDITION,
                     'takeoff attemped when drone not landed',
                     )
         self.drone(TakeOff()).wait().success()
@@ -104,7 +104,7 @@ class Control(ControlServiceServicer):
         if self.drone.get_state(FlyingStateChanged)['state'] == FlyingStateChanged_State.landed:
             logger.error('land attempted when drone not in the air')
             context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION, 
+                    grpc.StatusCode.FAILED_PRECONDITION,
                     'land attempted when drone not in the air',
                     )
         self.drone(Landing()).wait().success()

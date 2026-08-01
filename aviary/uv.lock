@@ -487,22 +487,22 @@ requires-dist = [
     { name = "panda3d", specifier = ">=1.10.15" },
     { name = "pymap3d", specifier = ">=3.2.0" },
     { name = "pyzmq", specifier = ">=27.1.0" },
-    { name = "steeleagle-protocol", specifier = ">=0.1.5" },
+    { name = "steeleagle-protocol", specifier = ">=0.1.15" },
     { name = "toml", specifier = ">=0.10.2" },
     { name = "xdg-base-dirs", specifier = ">=6.0.2" },
 ]
 
 [[package]]
 name = "steeleagle-protocol"
-version = "0.1.5"
+version = "0.1.15"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
     { name = "protobuf" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c9/9f/f7f510692144728540fbe367d2ea8aa4ecbdf80db7e2fab264d03474414a/steeleagle_protocol-0.1.5.tar.gz", hash = "sha256:59c6b3cd5f1a761f47a029171925f9e9d9002abf239654ebafc7799dfe7cd475", size = 20627, upload-time = "2026-07-19T18:42:39.219Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/19/0a/6e94a325cca1acf856c6138a44ddceed86995b3a218acd26cdacb09655c1/steeleagle_protocol-0.1.15.tar.gz", hash = "sha256:e9ddd86a9ee68800377e6979e96d313374c38094887ba2e98b51ef4149cc6528", size = 21921, upload-time = "2026-08-01T02:50:07.402Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/33/f9/10ebcdd59186499062662fcc82da1eafd0120876df202bcb9616735c8b83/steeleagle_protocol-0.1.5-py3-none-any.whl", hash = "sha256:35d3f41808324f212150668f416bea488a31b24f024db54b07b2bd2c8763a99b", size = 32847, upload-time = "2026-07-19T18:42:38.181Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/86/4df90ec252a749ac15abfae2ea6e0d46c48d969b2c45ca98cc14bf0c1d17/steeleagle_protocol-0.1.15-py3-none-any.whl", hash = "sha256:0d4a599743c571ce6910a4ce6c6df8f78ab342592f617ada8127d9dbb77df31e", size = 35917, upload-time = "2026-08-01T02:50:06.14Z" },
 ]
 
 [[package]]

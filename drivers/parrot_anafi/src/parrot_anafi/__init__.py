@@ -8,10 +8,12 @@ import olympe
 from steeleagle_protocol.v1.services.driver.control_pb2_grpc import ControlServiceServicer, add_ControlServiceServicer_to_server
 from steeleagle_protocol.v1.services.driver.stream_pb2_grpc import StreamServiceServicer, add_StreamServiceServicer_to_server
 from steeleagle_protocol.v1.services.driver.calibrate_pb2_grpc import CalibrateServiceServicer, add_CalibrateServiceServicer_to_server
+from steeleagle_protocol.v1.services.driver.info_pb2_grpc import InfoServiceServicer, add_InfoServiceServicer_to_server
 # Service imports
 from parrot_anafi.control import Control
 from parrot_anafi.stream import Stream
 from parrot_anafi.calibrate import Calibrate
+from parrot_anafi.info import Info
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -70,6 +72,7 @@ def main():
     add_ControlServiceServicer_to_server(Control(drone), server)
     add_StreamServiceServicer_to_server(Stream(drone, args.ip), server)
     add_CalibrateServiceServicer_to_server(Calibrate(drone), server)
+    add_InfoServiceServicer_to_server(Info(drone), server)
     server.add_insecure_port(f'unix://{listen_address}')
     server.start()
     logger.info('all services started')

@@ -22,12 +22,13 @@ import steeleagle_protocol.v1.services.driver.control_pb2 as control_proto
 from steeleagle_protocol.v1.services.driver.control_pb2_grpc import ControlServiceServicer, add_ControlServiceServicer_to_server
 import steeleagle_protocol.v1.services.driver.stream_pb2 as stream_proto
 from steeleagle_protocol.v1.services.driver.stream_pb2_grpc import StreamServiceServicer, add_StreamServiceServicer_to_server
-import steeleagle_protocol.v1.messages.stream.telemetry_pb2 as telemetry_proto
+import steeleagle_protocol.v1.services.driver.info_pb2 as info_proto
+from steeleagle_protocol.v1.services.driver.info_pb2_grpc import InfoServiceServicer, add_InfoServiceServicer_to_server
+import steeleagle_protocol.v1.messages.telemetry.telemetry_pb2 as telemetry_proto
 import steeleagle_protocol.v1.common_pb2 as common_proto
 from google.protobuf.timestamp_pb2 import Timestamp
 
-"""SteelEagle Aviary interface.
-"""
+"""SteelEagle Aviary interface."""
 
 logger = logging.getLogger('Aviary/interfaces/steeleagle')
 
@@ -37,10 +38,11 @@ STEELEAGLE_DIR = 'steeleagle/plugins'
 MAIN_DIR = 'aviary'
 # Socket for hosting the server
 SOCKET_ADDR = 'services.sock'
+# Reported vehicle model, since this is a simulated vehicle
+MODEL = 'aviary'
 
 class SteelEagle(Interface):
-    """Control interface wrapper.
-    """
+    """Control interface wrapper."""
     def start(self):
         runtime_path = xdg_runtime_dir()
         if not runtime_path:
@@ -52,13 +54,13 @@ class SteelEagle(Interface):
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
         add_ControlServiceServicer_to_server(Control(self.vehicle), self.server)
         add_StreamServiceServicer_to_server(Stream(self.vehicle), self.server)
+        add_InfoServiceServicer_to_server(Info(), self.server)
         self.server.add_insecure_port(f'unix://{path}')
         self.server.start()
         logger.info(f'Server started!')
 
 class Control(ControlServiceServicer):
-    """gRPC control interface.
-    """
+    """gRPC control interface."""
     def __init__(self, vehicle: Vehicle):
         self.vehicle = vehicle
 
@@ -182,9 +184,13 @@ class Control(ControlServiceServicer):
 
         return control_proto.SetGimbalPoseResponse()
 
+class Info(InfoServiceServicer):
+    """gRPC info interface."""
+    def GetVehicleInfo(self, request, context):
+        return info_proto.GetVehicleInfoResponse(model=MODEL)
+
 class Stream(StreamServiceServicer):
-    """gRPC stream interface.
-    """
+    """gRPC stream interface."""
     def __init__(self, vehicle: Vehicle):
         self.vehicle = vehicle
 
