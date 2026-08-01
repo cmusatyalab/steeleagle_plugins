@@ -208,9 +208,7 @@ class Simulator(ShowBase):
         model.setScale(0.5, 0.5, 0.5)
         model.setBin('fixed', 10)
         model.reparentTo(camera)
-        font = self.loader.loadFont('/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf')
         text = TextNode(f'{name}_text')
-        text.setFont(font)
         text.setText(name)
         text.setTextColor(0, 0, 0, 1)
         text.setCardColor(0.8, 0.8, 0.8, 0.3)
@@ -275,9 +273,7 @@ class Simulator(ShowBase):
         cube.setColor(r/255, g/255, b/255, 1)  # Normalize to 0.0-1.0 for Panda3D
         cube.setBin('fixed', 10)
         # Add a textnode with the name of the actor
-        font = self.loader.loadFont('/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf')
         text = TextNode(f'{name}_text')
-        text.setFont(font)
         text.setText(name)
         text.setTextColor(0, 0, 0, 1)
         text.setCardColor(0.8, 0.8, 0.8, 0.3)
