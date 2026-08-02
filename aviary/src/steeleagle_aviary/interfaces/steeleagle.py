@@ -25,7 +25,7 @@ from steeleagle_protocol.v1.services.driver.stream_pb2_grpc import StreamService
 import steeleagle_protocol.v1.services.driver.info_pb2 as info_proto
 from steeleagle_protocol.v1.services.driver.info_pb2_grpc import InfoServiceServicer, add_InfoServiceServicer_to_server
 import steeleagle_protocol.v1.messages.telemetry.telemetry_pb2 as telemetry_proto
-import steeleagle_protocol.v1.common_pb2 as common_proto
+import steeleagle_protocol.v1.common.common_pb2 as common_proto
 from google.protobuf.timestamp_pb2 import Timestamp
 
 """SteelEagle Aviary interface."""

@@ -4,3 +4,4 @@ __pycache__/
 **aviary.toml
 drivers/parrot_anafi/steeleagle_protocol/src/*
 *~
+config.toml

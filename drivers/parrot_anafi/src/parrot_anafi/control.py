@@ -7,7 +7,7 @@ from numpy import clip
 from enum import Enum
 import grpc
 # Protocol imports
-import steeleagle_protocol.v1.common_pb2 as common_proto
+import steeleagle_protocol.v1.common.common_pb2 as common_proto
 import steeleagle_protocol.v1.services.driver.control_pb2 as control_proto
 from steeleagle_protocol.v1.services.driver.control_pb2_grpc import ControlServiceServicer
 from steeleagle_protocol.v1.services.driver.stream_pb2_grpc import StreamServiceServicer

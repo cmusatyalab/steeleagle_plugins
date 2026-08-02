@@ -6,7 +6,7 @@ from math import sin, cos, radians, degrees
 import numpy as np
 import cv2
 # Protocol imports
-import steeleagle_protocol.v1.common_pb2 as common_proto
+import steeleagle_protocol.v1.common.common_pb2 as common_proto
 import steeleagle_protocol.v1.services.driver.stream_pb2 as stream_proto
 import steeleagle_protocol.v1.messages.telemetry.telemetry_pb2 as telemetry_proto
 from steeleagle_protocol.v1.services.driver.stream_pb2_grpc import StreamServiceServicer

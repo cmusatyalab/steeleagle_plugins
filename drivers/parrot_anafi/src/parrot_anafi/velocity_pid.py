@@ -22,7 +22,7 @@ from olympe.messages.ardrone3.Piloting import PCMD
 from olympe.messages.ardrone3.PilotingState import AttitudeChanged, SpeedChanged
 from olympe.messages.ardrone3.SpeedSettingsState import MaxRotationSpeedChanged
 
-import steeleagle_protocol.v1.common_pb2 as common_proto
+import steeleagle_protocol.v1.common.common_pb2 as common_proto
 import steeleagle_protocol.v1.services.driver.control_pb2 as control_proto
 
 # PCMD stick range accepted by Olympe.
