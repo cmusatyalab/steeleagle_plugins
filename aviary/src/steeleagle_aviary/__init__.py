@@ -52,7 +52,7 @@ def main():
     app = Simulator()
 
     try:
-        for actor in config['actors']:
+        for actor in config.get('actors', []):
             name = actor['name']
             tag = actor['tag']
             origin = GeodeticPoint(actor['lat'], actor['lon'], actor['alt'])

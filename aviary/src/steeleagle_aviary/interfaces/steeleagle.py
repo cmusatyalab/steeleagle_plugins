@@ -110,7 +110,7 @@ class Control(ControlServiceServicer):
             LPoint3f(self.vehicle.sim_origin.x, self.vehicle.sim_origin.y, altitude),
             LPoint3f(self.vehicle.sim_origin.x, self.vehicle.sim_origin.y, final),
         ]
-        
+
         self.vehicle.set_waypoint_target(waypoints)
         return control_proto.ReturnToHomeResponse()
 
@@ -285,12 +285,14 @@ class Stream(StreamServiceServicer):
         frame_id = 0
         while True:
             time.sleep(sleep_time)
-            # Get frame data
+            # Get frame data. Requested texture format is RGB, but some
+            # pipes (p3tinydisplay's RAM readback in particular) return RGBA
             h_res = self.vehicle.camera.texture.get_x_size()
             v_res = self.vehicle.camera.texture.get_y_size()
             data = self.vehicle.camera.texture.getRamImage()
             arr = np.frombuffer(data, dtype=np.uint8)
-            arr = arr.reshape((v_res, h_res, 3))
+            channels = arr.size // (v_res * h_res)
+            arr = arr.reshape((v_res, h_res, channels))[:, :, :3]
             arr = np.flipud(arr)
             success, jpeg_data = cv2.imencode('.jpg', arr)
             if success:

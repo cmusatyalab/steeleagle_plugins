@@ -131,6 +131,24 @@ class Simulator(ShowBase):
             None
         )
 
+        if not self.win:
+            logger.warning('Could not create a graphics buffer on the default pipe (no reachable display?); falling back to software rendering (p3tinydisplay)')
+            self.pipe = gps.make_module_pipe('p3tinydisplay')
+            if not self.pipe:
+                raise RuntimeError('Failed to create a fallback p3tinydisplay GraphicsPipe')
+            self.win = self.graphicsEngine.make_output(
+                self.pipe,
+                'MainHost',
+                0,
+                fbp,
+                wp,
+                GraphicsPipe.BFRefuseWindow,
+                None,
+                None
+            )
+            if not self.win:
+                raise RuntimeError('Failed to create a graphics buffer on the p3tinydisplay fallback pipe')
+
         # Simulation tick task
         self.taskMgr.add(self.simulate, 'simulate-task')
 
@@ -162,12 +180,14 @@ class Simulator(ShowBase):
             fov = kwargs['camera']['fov']
             size = kwargs['camera']['size']
 
-        # Set up texture and graphics buffer
+        # Set up texture and graphics buffer.
+        camera_fbp = FrameBufferProperties()
+        camera_fbp.setAlphaBits(0)
         buffer = self.graphicsEngine.make_output(
             self.pipe,
             f'Image Buffer [{name}]',
             -2,
-            FrameBufferProperties(),
+            camera_fbp,
             WindowProperties.size(*size),
             GraphicsPipe.BFRefuseWindow,
             self.win.getGsg(),
