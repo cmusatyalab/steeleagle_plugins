@@ -15,3 +15,4 @@ parrot-anafi = "parrot_anafi:main"
 
 [tool.uv.sources]
 steeleagle-protocol = {path = "./steeleagle_protocol", editable = true}
+parrot-olympe = { path = "./parrot_olympe-0.0.0-py3-none-manylinux_2_31_aarch64.whl", marker = "platform_machine == 'aarch64'" }
