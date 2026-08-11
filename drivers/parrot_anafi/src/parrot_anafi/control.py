@@ -48,7 +48,19 @@ def setpoint(func):
     """
     @wraps(func)
     def wrapper(self, request, context):
-        self.drone.mark_setpoint(request)
+        resp = func(self, request, context)
+        self.drone.mark_setpoint(resp.setpoint)
+        return resp
+    return wrapper
+
+def nosetpoint(func):
+    """No setpoint decorator.
+
+    Clears the setpoint, if any is current set.
+    """
+    @wraps(func)
+    def wrapper(self, request, context):
+        self.drone.mark_setpoint(None)
         return func(self, request, context)
     return wrapper
 
@@ -85,7 +97,7 @@ class Control(ControlServiceServicer):
             self.velocity_task.resume()
         self.mode = mode
 
-    @setpoint
+    @nosetpoint
     def TakeOff(self, request, context):
         self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
         if request.altitude:
@@ -103,7 +115,7 @@ class Control(ControlServiceServicer):
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,
         )
 
-    @setpoint
+    @nosetpoint
     def Land(self, request, context):
         self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
         if self.drone.get_state(FlyingStateChanged)['state'] == FlyingStateChanged_State.landed:
@@ -118,7 +130,7 @@ class Control(ControlServiceServicer):
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_STOPPED,
         )
 
-    @setpoint
+    @nosetpoint
     def Hold(self, request, context):
         self.set_flight_mode(Control.FlightMode.LOITER)
         # Abort an in-progress RTH since PCMD does not overwrite it
@@ -130,7 +142,7 @@ class Control(ControlServiceServicer):
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,
         )
 
-    @setpoint
+    @nosetpoint
     def Kill(self, request, context):
         self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
         self.drone(Emergency()).wait().success()
@@ -139,7 +151,7 @@ class Control(ControlServiceServicer):
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_STOPPED,
         )
 
-    @setpoint
+    @nosetpoint
     def ReturnToHome(self, request, context):
         self.set_flight_mode(Control.FlightMode.GUIDED)
         # Set the end behavior for the RTH
