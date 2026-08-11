@@ -53,6 +53,12 @@ class Stream(StreamServiceServicer):
         speed = self.drone.get_state(SpeedChanged)
         alt = self.drone.get_state(AltitudeChanged)
 
+        # Olympe reports 500.0 for latitude/longitude/altitude when there is
+        # no GPS fix
+        fix = self.drone.get_state(GPSFixStateChanged)
+        if not fix['fixed']:
+            gps = {'latitude': 0.0, 'longitude': 0.0, 'altitude': 0.0}
+
         psi = att['yaw']
         north = (gps['latitude'] - home['latitude']) * METERS_PER_DEGREE_LATITUDE
         east = (gps['longitude'] - home['longitude']) * METERS_PER_DEGREE_LATITUDE * cos(radians(home['latitude']))
