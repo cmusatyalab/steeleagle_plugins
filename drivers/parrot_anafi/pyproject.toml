@@ -16,3 +16,14 @@ parrot-anafi = "parrot_anafi:main"
 [tool.uv.sources]
 steeleagle-protocol = {path = "./steeleagle_protocol", editable = true}
 parrot-olympe = { path = "./parrot_olympe-0.0.0-py3-none-manylinux_2_31_aarch64.whl", marker = "platform_machine == 'aarch64'" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-order>=1.5.0",
+]
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"

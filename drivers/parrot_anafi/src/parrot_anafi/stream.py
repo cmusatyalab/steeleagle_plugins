@@ -33,6 +33,7 @@ logger = logging.getLogger('parrot-anafi/stream')
 # Approximate meters per degree of latitude, used to convert GPS deltas
 # into a local ENU frame for relative_position (equirectangular approximation).
 METERS_PER_DEGREE_LATITUDE = 111320.0
+DEFAULT_GIMBAL_ID = 0
 
 class Stream(StreamServiceServicer):
     """Stream Service implementation."""
@@ -51,27 +52,16 @@ class Stream(StreamServiceServicer):
         att = self.drone.get_state(AttitudeChanged)
         speed = self.drone.get_state(SpeedChanged)
         alt = self.drone.get_state(AltitudeChanged)
-        state = self.drone.get_state(FlyingStateChanged)
 
         psi = att['yaw']
         north = (gps['latitude'] - home['latitude']) * METERS_PER_DEGREE_LATITUDE
         east = (gps['longitude'] - home['longitude']) * METERS_PER_DEGREE_LATITUDE * cos(radians(home['latitude']))
-        x = north * cos(psi) + east * sin(psi)
-        y = -north * sin(psi) + east * cos(psi)
 
         vx = speed['speedX']
         vy = speed['speedY']
         vz = -speed['speedZ']
         vx_body = speed['speedX'] * cos(psi) + speed['speedY'] * sin(psi)
         vy_body = -speed['speedX'] * sin(psi) + speed['speedY'] * cos(psi)
-
-        motion_status = 0
-        if state['state'] == FlyingStateChanged_State.hovering:
-            motion_status = 1
-        elif state['state'] == FlyingStateChanged_State.landed:
-            motion_status = 3
-        else:
-            motion_status = 2
 
         setpoint = Any()
         if self.drone.setpoint:
@@ -90,7 +80,7 @@ class Stream(StreamServiceServicer):
                 heading=degrees(psi) % 360,
             ),
             relative_position=common_proto.RelativePosition(
-                x=x, y=y, z=alt['altitude'], angle=psi,
+                x=north, y=east, z=alt['altitude'], angle=degrees(psi),
             ),
             velocity_body=common_proto.Velocity(
                 x_vel=vx_body, y_vel=vy_body, z_vel=vz,
@@ -98,15 +88,23 @@ class Stream(StreamServiceServicer):
             velocity_neu=common_proto.Velocity(
                 x_vel=vx, y_vel=vy, z_vel=vz,
             ),
-            motion_status=motion_status,
             setpoint=setpoint,
         )
 
-    def get_gimbal_status(self, gimbal_id=0):
-        """Get gimbal status for a given gimbal."""
+    def get_motion_status(self):
+        """Get motion status from the drone."""
+        state = self.drone.get_state(FlyingStateChanged)
+        if state['state'] == FlyingStateChanged_State.hovering:
+            return telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING
+        elif state['state'] == FlyingStateChanged_State.landed:
+            return telemetry_proto.MotionStatus.MOTION_STATUS_STOPPED
+        else:
+            return telemetry_proto.MotionStatus.MOTION_STATUS_IN_TRANSIT
+
+    def get_gimbal_info(self, gimbal_id=DEFAULT_GIMBAL_ID):
+        """Get gimbal info for the primary gimbal."""
         pose = self.drone.get_state(attitude)[gimbal_id]
-        return telemetry_proto.GimbalStatus(
-            id=gimbal_id,
+        return telemetry_proto.GimbalInfo(
             pose_body=common_proto.Pose(
                 pitch=pose['pitch_relative'],
                 roll=pose['roll_relative'],
@@ -117,13 +115,6 @@ class Stream(StreamServiceServicer):
                 roll=pose['roll_absolute'],
                 yaw=pose['yaw_absolute'],
             ),
-        )
-
-    def get_gimbal_info(self):
-        """Get gimbal info from the drone."""
-        gimbal_ids = self.drone.get_state(attitude).keys()
-        return telemetry_proto.GimbalInfo(
-            gimbals=[self.get_gimbal_status(gimbal_id) for gimbal_id in gimbal_ids]
         )
 
     def get_battery_info(self):
@@ -143,7 +134,7 @@ class Stream(StreamServiceServicer):
 
     def get_gps_info(self):
         """Get GPS info from the drone."""
-        return telemetry_proto.GPSInfo(satellites=self.get_satellite_count())
+        return telemetry_proto.GpsInfo(satellites=self.get_satellite_count())
 
     def get_alert_info(self):
         """Get alert info from the drone."""
@@ -171,11 +162,11 @@ class Stream(StreamServiceServicer):
         elif alert_state == AlertStateChanged_State.low_battery:
             battery_warning = telemetry_proto.AlertInfo.BatteryWarning.BATTERY_WARNING_LOW
 
-        gps_warning = telemetry_proto.AlertInfo.GPSWarning.GPS_WARNING_UNSPECIFIED
+        gps_warning = telemetry_proto.AlertInfo.GpsWarning.GPS_WARNING_UNSPECIFIED
         if not gps_fixed:
-            gps_warning = telemetry_proto.AlertInfo.GPSWarning.GPS_WARNING_NO_FIX
+            gps_warning = telemetry_proto.AlertInfo.GpsWarning.GPS_WARNING_NO_FIX
         elif satellites < 6:
-            gps_warning = telemetry_proto.AlertInfo.GPSWarning.GPS_WARNING_WEAK_SIGNAL
+            gps_warning = telemetry_proto.AlertInfo.GpsWarning.GPS_WARNING_WEAK_SIGNAL
 
         magnetometer_warning = telemetry_proto.AlertInfo.MagnetometerWarning.MAGNETOMETER_WARNING_UNSPECIFIED
         if alert_state in (AlertStateChanged_State.magneto_pertubation, AlertStateChanged_State.magneto_low_earth_field):
@@ -233,7 +224,7 @@ class Stream(StreamServiceServicer):
                     id=frame_id,
                     encoded_data=encoded_img.tobytes(),
                     position_info=self.get_position_info(),
-                    gimbal_status=self.get_gimbal_status(),
+                    gimbal_info=self.get_gimbal_info(),
                 )
                 frame_id += 1
                 yield stream_proto.StreamVideoFramesResponse(frame=frame)
@@ -255,6 +246,7 @@ class Stream(StreamServiceServicer):
                     position_info=self.get_position_info(),
                     gimbal_info=self.get_gimbal_info(),
                     alert_info=self.get_alert_info(),
+                    motion_status=self.get_motion_status(),
                 )
                 yield stream_proto.StreamTelemetryResponse(telemetry=telemetry)
                 time.sleep(1.0 / framerate)

@@ -14,9 +14,6 @@ cancelled per-request.
 import threading
 import time
 from dataclasses import dataclass
-from math import radians, cos as mcos, sin as msin
-
-import numpy as np
 
 from olympe.messages.ardrone3.Piloting import PCMD
 from olympe.messages.ardrone3.PilotingState import AttitudeChanged, SpeedChanged
@@ -24,6 +21,8 @@ from olympe.messages.ardrone3.SpeedSettingsState import MaxRotationSpeedChanged
 
 import steeleagle_protocol.v1.common.common_pb2 as common_proto
 import steeleagle_protocol.v1.services.driver.control_pb2 as control_proto
+
+from parrot_anafi.util import rotate_neu_to_body
 
 # PCMD stick range accepted by Olympe.
 PCMD_MIN = -100
@@ -88,16 +87,13 @@ def get_velocity_neu(drone):
 def get_velocity_body(drone):
     """Reads the drone's current velocity in its own body frame (forward/right/up)."""
     neu = get_velocity_neu(drone)
+    # AttitudeChanged's yaw is already in radians.
     heading = drone.get_state(AttitudeChanged)['yaw']
-
-    forward_hdg = radians(heading) + radians(90)
-    forward_axis = np.array([mcos(forward_hdg), msin(forward_hdg)])
-    right_axis = np.array([mcos(forward_hdg + radians(90)), msin(forward_hdg + radians(90))])
-    ground_vec = np.array([neu.x_vel, neu.y_vel])
+    forward, right = rotate_neu_to_body(neu.x_vel, neu.y_vel, heading)
 
     velocity = common_proto.Velocity()
-    velocity.x_vel = np.dot(ground_vec, forward_axis) * -1
-    velocity.y_vel = np.dot(ground_vec, right_axis) * -1
+    velocity.x_vel = forward
+    velocity.y_vel = right
     velocity.z_vel = neu.z_vel
     return velocity
 
@@ -305,14 +301,23 @@ class VelocityPIDThread(threading.Thread):
             target = self._target
             frame = self._frame
 
+        # PCMD's stick inputs are always body-frame (pitch/roll relative to
+        # the vehicle's nose), so the PID always runs in body-frame terms too
+        # - a NEU-frame target is rotated into body-frame here, using the
+        # current heading, before being compared against the current
+        # body-frame velocity. Recomputing this every tick (rather than once
+        # at command time) keeps the target correct even if the vehicle is
+        # simultaneously turning (nonzero angular_vel).
+        current = get_velocity_body(self.drone)
         if frame == control_proto.ReferenceFrame.REFERENCE_FRAME_NEU:
-            current = get_velocity_neu(self.drone)
+            heading = self.drone.get_state(AttitudeChanged)['yaw']
+            target_forward, target_right = rotate_neu_to_body(target.x_vel, target.y_vel, heading)
         else:
-            current = get_velocity_body(self.drone)
+            target_forward, target_right = target.x_vel, target.y_vel
 
         now = time.monotonic()
-        forward_cmd = self._forward.compute(target.x_vel, current.x_vel, now)
-        right_cmd = self._right.compute(target.y_vel, current.y_vel, now)
+        forward_cmd = self._forward.compute(target_forward, current.x_vel, now)
+        right_cmd = self._right.compute(target_right, current.y_vel, now)
         up_cmd = self._up.compute(target.z_vel, current.z_vel, now)
 
         max_rotation = self.drone.get_state(MaxRotationSpeedChanged)['max']
