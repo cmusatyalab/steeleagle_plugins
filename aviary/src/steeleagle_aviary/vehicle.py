@@ -239,9 +239,11 @@ class Vehicle:
             return
         for wp in waypoints:
             self.waypoints.append(wp)
-        self.mode = Mode.WAYPOINT
         self.speed_target = speed
+        # set_position_target() sets self.mode = Mode.POSITION, so WAYPOINT
+        # must be (re-)applied after calling it.
         self.set_position_target(self.waypoints[0], speed=speed)
+        self.mode = Mode.WAYPOINT
 
     def set_geodetic_waypoint_target(self, waypoints: list[GeodeticPoint], speed=DEFAULT_SPEED):
         """Set a geodetic waypoint target.
@@ -258,9 +260,11 @@ class Vehicle:
             return
         for wp in waypoints:
             self.waypoints.append(self.convert_to_sim(wp))
-        self.mode = Mode.WAYPOINT
         self.speed_target = speed
+        # set_position_target() sets self.mode = Mode.POSITION, so WAYPOINT
+        # must be (re-)applied after calling it.
         self.set_position_target(self.waypoints[0], speed=speed)
+        self.mode = Mode.WAYPOINT
 
     def set_position_target(self, point: LPoint3f, speed=DEFAULT_SPEED):
         """Set a position target.
@@ -286,17 +290,17 @@ class Vehicle:
                 the current pose, default to `False`
         """
         if not body_aligned:
-            self.set_position_target(self.current_position() + vector)
+            self.set_position_target(self.current_position() + vector, speed=speed)
         else:
-            theta = math.radians(self.current_rotation().x)
+            theta = radians(self.current_rotation().x)
             forward = LVector3f(-sin(theta), cos(theta), 0)
             forward.normalize()
-            forward *= offset.x
+            forward *= vector.x
             right = LVector3f(cos(theta), sin(theta), 0)
             right.normalize()
-            right *= offset.y
-            up = LVector3f(0, 0, offset.z)
-            self.set_position_target(forward + right + up)
+            right *= vector.y
+            up = LVector3f(0, 0, vector.z)
+            self.set_position_target(self.current_position() + forward + right + up, speed=speed)
 
     def set_velocity_target(self, vector: LVector3f, body_aligned=False):
         """Set a velocity target.
@@ -363,12 +367,17 @@ class Vehicle:
         elif self.mode == Mode.VELOCITY:
             move = self.velocity_target * dt
         else: # WAYPOINT mode
-            if not self.waypoints:
-                return move
             current = self.current_position()
             diff = self.position_target - current
             if diff.length() == 0:
+                if not self.waypoints:
+                    # The final waypoint has been reached; nothing left to do.
+                    return move
+                # set_position_target() sets self.mode = Mode.POSITION, so
+                # WAYPOINT must be (re-)applied after calling it, otherwise
+                # any waypoints after this one are never visited.
                 self.set_position_target(self.waypoints.popleft(), speed=self.speed_target)
+                self.mode = Mode.WAYPOINT
             else:
                 move += diff
                 if move.length() > 0:
@@ -413,7 +422,11 @@ class Vehicle:
             LVector3f: scaled angular velocity vector
         """
         rot = LVector3f(0, 0, 0)
-        if self.pose_mode == PoseMode.ANGLE:
+        if self.pose_mode == PoseMode.ANGLE or self.pose_mode == PoseMode.OFFSET:
+            # OFFSET stores an absolute target pose in pose_target (current +
+            # offset, computed once in set_pose_target), so it converges the
+            # same way ANGLE does rather than being treated as a rate like
+            # VELOCITY mode below.
             current = self.current_rotation()
             diff = self.pose_target - current
             if diff.x >= 180.0:

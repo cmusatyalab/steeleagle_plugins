@@ -1,7 +1,27 @@
 from panda3d.core import LPoint3f, LVector3f
+from math import sin, cos
 import math
+import numpy as np
 
 """Utility functions for the simulator."""
+
+def rotation_matrix(theta: float) -> np.ndarray:
+    """Rotation matrix taking a body-frame (forward, right) vector into NEU.
+
+    `theta` is the vehicle's raw simulator heading (`Vehicle.current_rotation().x`),
+    in radians, matching the forward/right basis used elsewhere in `Vehicle`.
+    """
+    return np.array([[cos(theta), sin(theta)], [-sin(theta), cos(theta)]])
+
+def rotate_body_to_neu(forward: float, right: float, theta: float) -> tuple[float, float]:
+    """Rotate a body-frame (forward, right) vector into NEU (north, east)."""
+    north, east = rotation_matrix(theta) @ np.array([forward, right])
+    return north, east
+
+def rotate_neu_to_body(north: float, east: float, theta: float) -> tuple[float, float]:
+    """Rotate a NEU (north, east) vector into body-frame (forward, right)."""
+    forward, right = rotation_matrix(theta).T @ np.array([north, east])
+    return forward, right
 
 def convert_angle_heading(inp: float):
     """Convert angle to heading.
