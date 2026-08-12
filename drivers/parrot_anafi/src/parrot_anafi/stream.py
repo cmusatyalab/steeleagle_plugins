@@ -209,12 +209,13 @@ class Stream(StreamServiceServicer):
             self.cap = cv2.VideoCapture(
                     f"rtsp://{self.ip}/live",
                     cv2.CAP_FFMPEG,
-                    (cv2.CAP_PROP_N_THREADS, 1),
+                    (cv2.CAP_PROP_N_THREADS, 1, cv2.CAP_PROP_BUFFERSIZE, 1),
                 )
 
         framerate = np.clip(request.target_fps, 1, 30) if request.target_fps else 30
         frame_id = 0
         ts = Timestamp()
+        next_frame_time = time.monotonic()
         while True:
             try:
                 ret, cv_frame = self.cap.read()
@@ -237,14 +238,22 @@ class Stream(StreamServiceServicer):
                 )
                 frame_id += 1
                 yield stream_proto.StreamVideoFramesResponse(frame=frame)
-                time.sleep(1.0 / framerate)
+                next_frame_time += 1.0 / framerate
+                sleep_time = next_frame_time - time.monotonic()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                else:
+                    # Processing overran the period
+                    next_frame_time = time.monotonic()
             except Exception as e:
                 logger.warning(f'frame could not be read, reason: {e}')
                 time.sleep(1.0 / framerate)
+                next_frame_time = time.monotonic()
 
     def StreamTelemetry(self, request, context):
         framerate = np.clip(request.target_fps, 1, 60) if request.target_fps else 30
         ts = Timestamp()
+        next_frame_time = time.monotonic()
         while True:
             try:
                 ts.GetCurrentTime()
@@ -258,7 +267,13 @@ class Stream(StreamServiceServicer):
                     motion_status=self.get_motion_status(),
                 )
                 yield stream_proto.StreamTelemetryResponse(telemetry=telemetry)
-                time.sleep(1.0 / framerate)
+                next_frame_time += 1.0 / framerate
+                sleep_time = next_frame_time - time.monotonic()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                else:
+                    next_frame_time = time.monotonic()
             except Exception as e:
                 logger.warning(f'telemetry frame could not be generated, reason: {e}')
                 time.sleep(1.0 / framerate)
+                next_frame_time = time.monotonic()
