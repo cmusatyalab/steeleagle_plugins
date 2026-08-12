@@ -81,7 +81,7 @@ class Stream(StreamServiceServicer):
                 latitude=home['latitude'],
                 longitude=home['longitude'],
                 altitude=home['altitude'],
-            ),
+            ) if gps_valid else None,
             global_position=common_proto.GlobalPosition(
                 latitude=gps['latitude'],
                 longitude=gps['longitude'],
