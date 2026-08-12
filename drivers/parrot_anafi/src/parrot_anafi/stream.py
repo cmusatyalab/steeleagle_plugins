@@ -53,15 +53,18 @@ class Stream(StreamServiceServicer):
         speed = self.drone.get_state(SpeedChanged)
         alt = self.drone.get_state(AltitudeChanged)
 
-        if gps["latitude"] == 500.0 or gps["longitude"] == 500.0:
-            gps = {'latitude': 0.0, 'longitude': 0.0, 'altitude': 0.0}
         fix = self.drone.get_state(GPSFixStateChanged)
-        if not fix['fixed']:
+        gps_valid = fix['fixed'] and gps["latitude"] != 500.0 and gps["longitude"] != 500.0
+        if not gps_valid:
             gps = {'latitude': 0.0, 'longitude': 0.0, 'altitude': 0.0}
 
         psi = att['yaw']
-        north = (gps['latitude'] - home['latitude']) * METERS_PER_DEGREE_LATITUDE
-        east = (gps['longitude'] - home['longitude']) * METERS_PER_DEGREE_LATITUDE * cos(radians(home['latitude']))
+        if gps_valid:
+            north = (gps['latitude'] - home['latitude']) * METERS_PER_DEGREE_LATITUDE
+            east = (gps['longitude'] - home['longitude']) * METERS_PER_DEGREE_LATITUDE * cos(radians(home['latitude']))
+        else:
+            north = 0.0
+            east = 0.0
 
         vx = speed['speedX']
         vy = speed['speedY']
@@ -84,7 +87,7 @@ class Stream(StreamServiceServicer):
                 longitude=gps['longitude'],
                 altitude=gps['altitude'],
                 heading=degrees(psi) % 360,
-            ),
+            ) if gps_valid else None,
             relative_position=common_proto.RelativePosition(
                 x=north, y=east, z=alt['altitude'], angle=degrees(psi),
             ),
