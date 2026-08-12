@@ -1,5 +1,6 @@
 import grpc
 import os
+import threading
 import time
 import logging
 from math import sin, cos, radians, degrees
@@ -41,6 +42,27 @@ class Stream(StreamServiceServicer):
         self.drone = drone
         self.ip = ip
         self.cap = None
+        self._latest_frame = None
+        self._frame_lock = threading.Lock()
+        self._grabber_thread = None
+
+    def _grab_frames(self):
+        """Continuously read frames so only the newest is ever kept.
+        """
+        while self.cap is not None:
+            ret, frame = self.cap.read()
+            if not ret:
+                continue
+            with self._frame_lock:
+                self._latest_frame = frame
+
+    def _read_latest_frame(self):
+        with self._frame_lock:
+            frame = self._latest_frame
+            self._latest_frame = None
+        if frame is None:
+            return False, None
+        return True, frame
 
     def get_position_info(self) -> telemetry_proto.PositionInfo:
         """Get position info from the drone."""
@@ -209,8 +231,10 @@ class Stream(StreamServiceServicer):
             self.cap = cv2.VideoCapture(
                     f"rtsp://{self.ip}/live",
                     cv2.CAP_FFMPEG,
-                    (cv2.CAP_PROP_N_THREADS, 1, cv2.CAP_PROP_BUFFERSIZE, 1),
+                    (cv2.CAP_PROP_N_THREADS, 1),
                 )
+            self._grabber_thread = threading.Thread(target=self._grab_frames, daemon=True)
+            self._grabber_thread.start()
 
         framerate = np.clip(request.target_fps, 1, 30) if request.target_fps else 30
         frame_id = 0
@@ -218,9 +242,8 @@ class Stream(StreamServiceServicer):
         next_frame_time = time.monotonic()
         while True:
             try:
-                ret, cv_frame = self.cap.read()
+                ret, cv_frame = self._read_latest_frame()
                 if not ret:
-                    logger.warning('frame could not be read')
                     time.sleep(1.0 / framerate)
                     continue
                 success, encoded_img = cv2.imencode('.jpg', cv_frame)
