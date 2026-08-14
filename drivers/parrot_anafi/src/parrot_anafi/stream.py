@@ -36,6 +36,13 @@ logger = logging.getLogger('parrot-anafi/stream')
 METERS_PER_DEGREE_LATITUDE = 111320.0
 DEFAULT_GIMBAL_ID = 0
 
+RESOLUTION_DIMENSIONS = {
+    stream_proto.RESOLUTION_480P: (854, 480),
+    stream_proto.RESOLUTION_720P: (1280, 720),
+    stream_proto.RESOLUTION_1080P: (1920, 1080),
+    stream_proto.RESOLUTION_4K: (3840, 2160),
+}
+
 class Stream(StreamServiceServicer):
     """Stream Service implementation."""
     def __init__(self, drone, ip):
@@ -237,6 +244,7 @@ class Stream(StreamServiceServicer):
             self._grabber_thread.start()
 
         framerate = np.clip(request.target_fps, 1, 30) if request.target_fps else 30
+        dimensions = RESOLUTION_DIMENSIONS.get(request.resolution)
         frame_id = 0
         ts = Timestamp()
         next_frame_time = time.monotonic()
@@ -246,6 +254,8 @@ class Stream(StreamServiceServicer):
                 if not ret:
                     time.sleep(1.0 / framerate)
                     continue
+                if dimensions is not None and cv_frame.shape[1::-1] != dimensions:
+                    cv_frame = cv2.resize(cv_frame, dimensions, interpolation=cv2.INTER_AREA)
                 success, encoded_img = cv2.imencode('.jpg', cv_frame)
                 if not success:
                     logger.warning('frame could not be decoded')
