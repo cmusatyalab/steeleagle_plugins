@@ -51,7 +51,20 @@ class Vehicle:
         self.velocity_target = LPoint3f(0.0, 0.0, 0.0) # x_vel, y_vel, z_vel
         self.pose_target = LPoint3f(0.0, 0.0, 0.0) # yaw, pitch, roll
         self.speed_target = DEFAULT_SPEED
-        self.waypoints = deque() 
+        self.waypoints = deque()
+        self.setpoint = None
+
+    def mark_setpoint(self, setpoint):
+        """Track the last commanded setpoint.
+
+        Holds setpoint data to exchange between services. Namely the
+        Stream service must have access to Control service setpoints
+        to correctly generate telemetry.
+
+        Args:
+            setpoint: the last commanded setpoint message, or `None`
+        """
+        self.setpoint = setpoint
 
     def get_sim_origin(self, origin: GeodeticPoint) -> LPoint3f:
         """Gets the simulation origin from starting position.

@@ -5,6 +5,7 @@ import grpc
 import cv2
 import subprocess
 import logging
+from functools import wraps
 from math import radians, degrees
 from concurrent import futures
 from xdg_base_dirs import xdg_runtime_dir
@@ -28,6 +29,7 @@ from steeleagle_protocol.v1.services.driver.info_pb2_grpc import InfoServiceServ
 import steeleagle_protocol.v1.messages.telemetry.telemetry_pb2 as telemetry_proto
 import steeleagle_protocol.v1.common.common_pb2 as common_proto
 from google.protobuf.timestamp_pb2 import Timestamp
+from google.protobuf.any_pb2 import Any
 
 """SteelEagle Aviary interface."""
 
@@ -41,6 +43,29 @@ MAIN_DIR = 'aviary'
 SOCKET_ADDR = 'services.sock'
 # Reported vehicle model, since this is a simulated vehicle
 MODEL = 'aviary'
+
+def setpoint(func):
+    """Setpoint decorator.
+
+    Automatically marks the setpoint for the decorated RPC method.
+    """
+    @wraps(func)
+    def wrapper(self, request, context):
+        resp = func(self, request, context)
+        self.vehicle.mark_setpoint(resp.setpoint)
+        return resp
+    return wrapper
+
+def nosetpoint(func):
+    """No setpoint decorator.
+
+    Clears the setpoint, if any is currently set.
+    """
+    @wraps(func)
+    def wrapper(self, request, context):
+        self.vehicle.mark_setpoint(None)
+        return func(self, request, context)
+    return wrapper
 
 class SteelEagle(Interface):
     """Control interface wrapper."""
@@ -65,6 +90,7 @@ class Control(ControlServiceServicer):
     def __init__(self, vehicle: Vehicle):
         self.vehicle = vehicle
 
+    @nosetpoint
     def TakeOff(self, request, context):
         self.vehicle.set_position_target(self.vehicle.current_position() + LVector3f(0, 0, request.altitude))
         return control_proto.TakeOffResponse(
@@ -72,6 +98,7 @@ class Control(ControlServiceServicer):
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,
         )
 
+    @nosetpoint
     def Land(self, request, context):
         current = self.vehicle.current_position()
         self.vehicle.set_position_target(LPoint3f(current.x, current.y, self.vehicle.sim_origin.z))
@@ -80,6 +107,7 @@ class Control(ControlServiceServicer):
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_STOPPED,
         )
 
+    @nosetpoint
     def Hold(self, request, context):
         self.vehicle.set_velocity_target(LVector3f(0, 0, 0))
         self.vehicle.set_pose_target(LVector3f(0, 0, 0), PoseMode.VELOCITY)
@@ -88,6 +116,7 @@ class Control(ControlServiceServicer):
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,
         )
 
+    @nosetpoint
     def Kill(self, request, context):
         # No-op in the simulator: there is no motor/crash physics to model, so
         # this just reports the expected mode/status without changing vehicle
@@ -97,6 +126,7 @@ class Control(ControlServiceServicer):
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_STOPPED,
         )
 
+    @nosetpoint
     def ReturnToHome(self, request, context):
         geod_position = self.vehicle.current_geodetic_position()
         position = self.vehicle.current_position()
@@ -134,6 +164,7 @@ class Control(ControlServiceServicer):
             expected_status=expected_status,
         )
 
+    @setpoint
     def SetRelativePositionTarget(self, request, context):
         theta = radians(self.vehicle.current_rotation().x)
         offset = LVector3f(request.position.x, request.position.y, request.position.z)
@@ -159,6 +190,7 @@ class Control(ControlServiceServicer):
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,
         )
 
+    @setpoint
     def SetGlobalPositionTarget(self, request, context):
         # If absolute altitude is specified, add the target altitude to the
         # current altitude
@@ -196,6 +228,7 @@ class Control(ControlServiceServicer):
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,
         )
 
+    @setpoint
     def SetVelocityTarget(self, request, context):
         if request.frame <= 1: # Body-aligned
             vector = LVector3f(request.velocity.x_vel, request.velocity.y_vel, request.velocity.z_vel)
@@ -221,6 +254,7 @@ class Control(ControlServiceServicer):
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_IN_TRANSIT,
         )
 
+    @setpoint
     def SetGimbalAngleTarget(self, request, context):
         # Frame of reference (body/NEU) doesn't change the simulated gimbal's
         # behavior, since there's no physical yaw axis to reference.
@@ -242,6 +276,7 @@ class Control(ControlServiceServicer):
             ),
         )
 
+    @setpoint
     def SetGimbalVelocityTarget(self, request, context):
         self.vehicle.set_pose_target(LVector3f(
                 request.pose_velocity.yaw_vel,
@@ -300,11 +335,15 @@ class Stream(StreamServiceServicer):
         velocity_body.y_vel = vel_body.y
         velocity_body.z_vel = vel_body.z
         velocity_body.angular_vel = angular_vel.x
+        setpoint = Any()
+        if self.vehicle.setpoint:
+            setpoint.Pack(self.vehicle.setpoint)
         position_info = telemetry_proto.PositionInfo(
                 home=home,
                 global_position=global_position,
                 relative_position=rel_position,
-                velocity_body=velocity_body
+                velocity_body=velocity_body,
+                setpoint=setpoint,
                 )
 
         # Gimbal Info
