@@ -24,6 +24,7 @@ import (
 
 func main() {
 	logLevel := flag.String("log-level", zerolog.InfoLevel.String(), "log level: trace, debug, info, warn, error, fatal, panic, or disabled")
+	preloadPath := flag.String("mission-file", "", "dev/testing only: path to a pre-built mission binary to preload on startup, standing in for a live UploadMission RPC. A StartMission RPC is still required to run it.")
 	flag.Parse()
 
 	level, err := zerolog.ParseLevel(*logLevel)
@@ -62,6 +63,11 @@ func main() {
 	srv := newServer(clientSocket, runDir)
 	grpcServer := grpc.NewServer()
 	missionpb.RegisterMissionServiceServer(grpcServer, srv)
+
+	if *preloadPath != "" {
+		srv.preloadMission(*preloadPath)
+		log.Info().Str("path", *preloadPath).Msg("preloaded mission binary")
+	}
 
 	go func() {
 		<-ctx.Done()

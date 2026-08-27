@@ -43,6 +43,16 @@ func newServer(clientSocket, runDir string) *server {
 	return &server{clientSocket: clientSocket, runDir: runDir}
 }
 
+// preloadMission sets path as the mission binary to run on the next
+// StartMission call, standing in for a live UploadMission RPC. Dev/testing
+// only: unlike UploadMission, it doesn't copy path into runDir, so path must
+// keep existing for as long as the mission might be (re)started.
+func (s *server) preloadMission(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.binaryPath = path
+}
+
 // UploadMission stores req's mission binary, replacing any previously
 // uploaded one. Fails if a mission is currently running.
 func (s *server) UploadMission(ctx context.Context, req *missionpb.UploadMissionRequest) (*missionpb.UploadMissionResponse, error) {
