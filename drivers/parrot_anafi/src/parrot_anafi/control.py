@@ -280,8 +280,10 @@ class Control(ControlServiceServicer):
         # Pitch/roll are always horizon-stabilized (absolute); only yaw can be
         # body- or NEU-referenced.
         yaw_frame = 'relative' if request.frame <= 1 else 'absolute'
+        # Needed unconditionally (not just for ANGLE_MODE_OFFSET) to convert
+        # a body-relative yaw target into NEU for the reported setpoint below.
+        gimbal_pose = self.drone.get_state(attitude)[DEFAULT_GIMBAL_ID]
         if request.angle_mode == control_proto.AngleMode.ANGLE_MODE_OFFSET:
-            gimbal_pose = self.drone.get_state(attitude)[DEFAULT_GIMBAL_ID]
             target_yaw = gimbal_pose[f'yaw_{yaw_frame}'] + yaw
             target_pitch = gimbal_pose['pitch_absolute'] + pitch
             target_roll = gimbal_pose['roll_absolute'] + roll
@@ -298,11 +300,15 @@ class Control(ControlServiceServicer):
             roll=target_roll,
             )
         ).wait().success()
+        # Report yaw in the NEU frame
+        setpoint_yaw = target_yaw
+        if yaw_frame == 'relative':
+            setpoint_yaw = target_yaw + (gimbal_pose['yaw_absolute'] - gimbal_pose['yaw_relative'])
         return control_proto.SetGimbalAngleTargetResponse(
             setpoint=common_proto.Pose(
                 pitch=target_pitch,
                 roll=target_roll,
-                yaw=target_yaw,
+                yaw=setpoint_yaw,
             ),
         )
 
@@ -337,4 +343,11 @@ class Control(ControlServiceServicer):
             roll=roll_ratio or 0.0,
             )
         ).wait().success()
-        return control_proto.SetGimbalVelocityTargetResponse(setpoint=request.pose_velocity)
+        # yaw_vel is intentionally omitted from the setpoint since it cannot be read
+        # in Olympe
+        return control_proto.SetGimbalVelocityTargetResponse(
+            setpoint=common_proto.PoseVelocity(
+                pitch_vel=pitch_vel,
+                roll_vel=roll_vel,
+            ),
+        )
