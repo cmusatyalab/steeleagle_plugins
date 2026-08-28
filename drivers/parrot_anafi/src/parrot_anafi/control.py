@@ -189,10 +189,6 @@ class Control(ControlServiceServicer):
             )
         else: # NEU-aligned
             dx, dy = rotate_neu_to_body(request.position.x, request.position.y, yaw)
-            # RelativePosition.angle in the NEU frame is an absolute heading
-            # (degrees). extended_move_by's d_psi is a relative rotation
-            # (radians) from the current heading, so compute the
-            # shortest-path delta to reach it.
             heading_delta = (radians(request.position.angle) - yaw + pi) % (2 * pi) - pi
             self.drone(extended_move_by(
                 dx, dy,
@@ -216,34 +212,30 @@ class Control(ControlServiceServicer):
         heading_mode = move_mode.orientation_mode.to_target
         if request.heading_mode > 1:
             heading_mode = move_mode.orientation_mode.heading_start
+        gps_altitude = self.drone.get_state(GpsLocationChanged)['altitude']
+        relative_altitude = self.drone.get_state(AltitudeChanged)['altitude']
         if request.altitude_mode <= 1: # Relative altitude
-            self.drone(extended_move_to(
-                request.position.latitude,
-                request.position.longitude,
-                request.position.altitude,
-                heading_mode,
-                request.position.heading,
-                request.speed if request.speed else DEFAULT_SPEED,
-                request.speed if request.speed else DEFAULT_SPEED,
-                request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
-                ) >> FlyingStateChanged(state='flying')
-            )
+            move_altitude = request.position.altitude
+            setpoint_altitude = request.position.altitude - relative_altitude + gps_altitude
         else: # Absolute altitude
-            absolute_altitude = request.position.altitude - self.drone.get_state(GpsLocationChanged)['altitude'] \
-                    + self.drone.get_state(AltitudeChanged)['altitude']
-            self.drone(extended_move_to(
-                request.position.latitude,
-                request.position.longitude,
-                absolute_altitude,
-                heading_mode,
-                request.position.heading,
-                request.speed if request.speed else DEFAULT_SPEED,
-                request.speed if request.speed else DEFAULT_SPEED,
-                request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
-                ) >> FlyingStateChanged(state='flying')
-            )
+            move_altitude = request.position.altitude - gps_altitude + relative_altitude
+            setpoint_altitude = request.position.altitude
+        self.drone(extended_move_to(
+            request.position.latitude,
+            request.position.longitude,
+            move_altitude,
+            heading_mode,
+            request.position.heading,
+            request.speed if request.speed else DEFAULT_SPEED,
+            request.speed if request.speed else DEFAULT_SPEED,
+            request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
+            ) >> FlyingStateChanged(state='flying')
+        )
+        setpoint = common_proto.GlobalPosition()
+        setpoint.CopyFrom(request.position)
+        setpoint.altitude = setpoint_altitude
         return control_proto.SetGlobalPositionTargetResponse(
-            setpoint=request.position,
+            setpoint=setpoint,
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,
         )
 

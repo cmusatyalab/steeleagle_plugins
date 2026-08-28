@@ -135,9 +135,7 @@ class Control(ControlServiceServicer):
     @nosetpoint
     def Kill(self, request, context):
         self.motion_info.set_flight_mode(telemetry_proto.Mode.MODE_EMERGENCY)
-        # No-op in the simulator: there is no motor/crash physics to model, so
-        # this just reports the expected mode/status without changing vehicle
-        # state.
+        # TODO: needs to be implemented
         return control_proto.KillResponse(
             expected_mode=telemetry_proto.Mode.MODE_EMERGENCY,
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_STOPPED,
@@ -212,12 +210,14 @@ class Control(ControlServiceServicer):
     @setpoint
     def SetGlobalPositionTarget(self, request, context):
         self.motion_info.set_flight_mode(telemetry_proto.Mode.MODE_GUIDED)
-        # If absolute altitude is specified, add the target altitude to the
-        # current altitude
+        # convert_to_sim/convert_to_geodetic treat sim Z and geodetic
+        # altitude as the same value, so a relative (above-takeoff) request
+        # needs sim_origin.z added to become absolute, while an absolute
+        # request is already in the right frame.
         if request.altitude_mode <= 1: # Relative mode
-            altitude = request.position.altitude - self.vehicle.sim_origin.z
-        else:
-            altitude = self.vehicle.current_position().z
+            altitude = request.position.altitude + self.vehicle.sim_origin.z
+        else: # Absolute mode
+            altitude = request.position.altitude
 
         self.vehicle.set_position_target(self.vehicle.convert_to_sim(
                 GeodeticPoint(
@@ -243,8 +243,14 @@ class Control(ControlServiceServicer):
         else:
             self.vehicle.set_pose_target(LVector3f(request.position.heading, 0, 0), PoseMode.ANGLE)
 
+        # Report the setpoint in the same global (absolute-altitude) frame
+        # get_telemetry always reports, regardless of which frame the
+        # request came in.
+        setpoint = common_proto.GlobalPosition()
+        setpoint.CopyFrom(request.position)
+        setpoint.altitude = altitude
         return control_proto.SetGlobalPositionTargetResponse(
-            setpoint=request.position,
+            setpoint=setpoint,
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,
         )
 
