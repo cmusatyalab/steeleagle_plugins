@@ -528,7 +528,7 @@ wheels = [
 
 [[package]]
 name = "steeleagle-aviary"
-version = "0.1.0"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "colorhash" },
@@ -557,7 +557,7 @@ requires-dist = [
     { name = "panda3d", specifier = ">=1.10.15" },
     { name = "pymap3d", specifier = ">=3.2.0" },
     { name = "pyzmq", specifier = ">=27.1.0" },
-    { name = "steeleagle-protocol", specifier = ">=0.1.18" },
+    { name = "steeleagle-protocol", specifier = ">=0.1.19" },
     { name = "toml", specifier = ">=0.10.2" },
     { name = "xdg-base-dirs", specifier = ">=6.0.2" },
 ]
@@ -567,15 +567,15 @@ dev = [{ name = "pytest", specifier = ">=9.1.1" }]
 
 [[package]]
 name = "steeleagle-protocol"
-version = "0.1.18"
+version = "0.1.19"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
     { name = "protobuf" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/29/45/f3e096dfc46e203bd0eb5678087f55cc77c6c7caebacf11ac225d6fb97f4/steeleagle_protocol-0.1.18.tar.gz", hash = "sha256:8cbf0f033c4622bb8782482245b52b1592e1ab9ccbe440ac44880ec7fa30c576", size = 41063, upload-time = "2026-08-11T03:48:38.2Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4a/bf/780b2524c12e85fa68745b7c218f5e7727b7d35507cef87ba8e85f2db1dc/steeleagle_protocol-0.1.19.tar.gz", hash = "sha256:200735e345b887f6b5de93d56e8b9f534996da09ab7091e2cbe1057191d6f3c5", size = 41837, upload-time = "2026-08-28T01:29:34.721Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e5/80/17a9046cc03d2ba6ff087248db2e61442a1ad832aee317b03566edd8e4a7/steeleagle_protocol-0.1.18-py3-none-any.whl", hash = "sha256:b1517e2e59b753ef6b2f7b395badc7e73ea76e15e6dd7213d48a26168843c975", size = 70648, upload-time = "2026-08-11T03:48:36.956Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/34/71489caf97ca5ab14706a203e2006ab2c9951249439e52242f280bfa7683/steeleagle_protocol-0.1.19-py3-none-any.whl", hash = "sha256:73502a8b8e36734a5f21fa5e89d9f2b466943ee70a9b61fd0a9ab0ebbc641fed", size = 71376, upload-time = "2026-08-28T01:29:33.158Z" },
 ]
 
 [[package]]
