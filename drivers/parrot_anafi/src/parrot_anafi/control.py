@@ -220,6 +220,13 @@ class Control(ControlServiceServicer):
         else: # Absolute altitude
             move_altitude = request.position.altitude - gps_altitude + relative_altitude
             setpoint_altitude = request.position.altitude
+        logger.info(
+            'SetGlobalPositionTarget: lat=%s lon=%s move_altitude=%s '
+            '(gps_altitude=%s relative_altitude=%s) heading_mode=%s heading=%s speed=%s',
+            request.position.latitude, request.position.longitude, move_altitude,
+            gps_altitude, relative_altitude, heading_mode, request.position.heading,
+            request.speed if request.speed else DEFAULT_SPEED,
+        )
         self.drone(extended_move_to(
             request.position.latitude,
             request.position.longitude,
