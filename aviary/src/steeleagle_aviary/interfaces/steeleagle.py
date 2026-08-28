@@ -391,11 +391,15 @@ class Stream(StreamServiceServicer):
         gimbal_velocity_neu.yaw_vel = angular_vel.x
         gimbal_velocity_neu.pitch_vel = angular_vel.y
         gimbal_velocity_neu.roll_vel = angular_vel.z
+        gimbal_setpoint = Any()
+        if self.motion_info.setpoint:
+            gimbal_setpoint.Pack(self.motion_info.setpoint)
         gimbal_info = telemetry_proto.GimbalInfo(
                 pose_body=gimbal_pose_body,
                 pose_neu=gimbal_pose,
                 angular_velocity_body=gimbal_velocity_body,
                 angular_velocity_neu=gimbal_velocity_neu,
+                gimbal_setpoint=gimbal_setpoint,
                 )
 
         motion_status = telemetry_proto.MotionStatus.MOTION_STATUS_STOPPED

@@ -147,6 +147,11 @@ class Stream(StreamServiceServicer):
     def get_gimbal_info(self, gimbal_id=DEFAULT_GIMBAL_ID):
         """Get gimbal info for the primary gimbal."""
         pose = self.drone.get_state(attitude)[gimbal_id]
+
+        gimbal_setpoint = Any()
+        if self.drone.setpoint:
+            gimbal_setpoint.Pack(self.drone.setpoint)
+
         return telemetry_proto.GimbalInfo(
             pose_body=common_proto.Pose(
                 pitch=pose['pitch_relative'],
@@ -158,6 +163,7 @@ class Stream(StreamServiceServicer):
                 roll=pose['roll_absolute'],
                 yaw=pose['yaw_absolute'],
             ),
+            gimbal_setpoint=gimbal_setpoint,
         )
 
     def get_battery_info(self):
