@@ -108,7 +108,7 @@ class Control(ControlServiceServicer):
         self.motion_info.set_flight_mode(telemetry_proto.Mode.MODE_TAKEOFF)
         self.vehicle.set_position_target(self.vehicle.current_position() + LVector3f(0, 0, request.altitude))
         return control_proto.TakeOffResponse(
-            expected_mode=telemetry_proto.Mode.MODE_LOITER,
+            expected_mode=telemetry_proto.Mode.MODE_TAKEOFF,
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,
         )
 

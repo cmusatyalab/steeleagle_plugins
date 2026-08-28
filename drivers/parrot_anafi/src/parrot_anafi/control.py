@@ -98,7 +98,7 @@ class Control(ControlServiceServicer):
                     )
         self.drone(TakeOff()).wait().success()
         return control_proto.TakeOffResponse(
-            expected_mode=telemetry_proto.Mode.MODE_LOITER,
+            expected_mode=telemetry_proto.Mode.MODE_TAKEOFF,
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,
         )
 
