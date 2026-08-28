@@ -230,25 +230,25 @@ class Control(ControlServiceServicer):
                 )
 
         # If heading mode is TO_TARGET, set the pose to look at the position
-        # target; if it's START, face the explicitly provided heading instead
+        # target; if it's START, face the explicitly provided heading instead.
         if request.heading_mode <= 1:
             position = self.vehicle.current_geodetic_position()
-            bearing = calculate_bearing(
+            heading = calculate_bearing(
                     position.latitude,
                     position.longitude,
                     request.position.latitude,
                     request.position.longitude
                     )
-            self.vehicle.set_pose_target(LVector3f(bearing, 0, 0), PoseMode.ANGLE)
         else:
-            self.vehicle.set_pose_target(LVector3f(request.position.heading, 0, 0), PoseMode.ANGLE)
+            heading = request.position.heading
+        self.vehicle.set_pose_target(LVector3f(heading, 0, 0), PoseMode.ANGLE)
 
-        # Report the setpoint in the same global (absolute-altitude) frame
-        # get_telemetry always reports, regardless of which frame the
-        # request came in.
-        setpoint = common_proto.GlobalPosition()
-        setpoint.CopyFrom(request.position)
-        setpoint.altitude = altitude
+        setpoint = common_proto.GlobalPosition(
+            latitude=request.position.latitude,
+            longitude=request.position.longitude,
+            altitude=altitude,
+            heading=heading,
+        )
         return control_proto.SetGlobalPositionTargetResponse(
             setpoint=setpoint,
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,

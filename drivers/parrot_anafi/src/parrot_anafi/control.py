@@ -231,9 +231,15 @@ class Control(ControlServiceServicer):
             request.angular_speed if request.angular_speed else DEFAULT_ANGULAR_SPEED,
             ) >> FlyingStateChanged(state='flying')
         )
-        setpoint = common_proto.GlobalPosition()
-        setpoint.CopyFrom(request.position)
-        setpoint.altitude = setpoint_altitude
+        # heading is intentionally omitted from the setpoint in TO_TARGET
+        # mode so it must be set according to the TO_TARGET heading
+        setpoint = common_proto.GlobalPosition(
+            latitude=request.position.latitude,
+            longitude=request.position.longitude,
+            altitude=setpoint_altitude,
+        )
+        if request.heading_mode > 1: # HEADING_START
+            setpoint.heading = request.position.heading
         return control_proto.SetGlobalPositionTargetResponse(
             setpoint=setpoint,
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,
