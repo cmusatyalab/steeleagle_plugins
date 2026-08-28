@@ -5,6 +5,7 @@ import argparse
 from concurrent import futures
 import olympe
 # Protocol imports
+import steeleagle_protocol.v1.messages.telemetry.telemetry_pb2 as telemetry_proto
 from steeleagle_protocol.v1.services.driver.control_pb2_grpc import ControlServiceServicer, add_ControlServiceServicer_to_server
 from steeleagle_protocol.v1.services.driver.stream_pb2_grpc import StreamServiceServicer, add_StreamServiceServicer_to_server
 from steeleagle_protocol.v1.services.driver.calibrate_pb2_grpc import CalibrateServiceServicer, add_CalibrateServiceServicer_to_server
@@ -39,9 +40,13 @@ class DroneWrapper(olympe.Drone):
     def __init__(self, ip):
         super().__init__(ip)
         self.setpoint = None
+        self.flight_mode = telemetry_proto.Mode.MODE_UNSPECIFIED
 
     def mark_setpoint(self, setpoint):
         self.setpoint = setpoint
+
+    def set_flight_mode(self, mode: telemetry_proto.Mode):
+        self.flight_mode = mode
 
 def main():
     """Runs the driver.

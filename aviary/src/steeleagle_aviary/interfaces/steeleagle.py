@@ -52,7 +52,7 @@ def setpoint(func):
     @wraps(func)
     def wrapper(self, request, context):
         resp = func(self, request, context)
-        self.vehicle.mark_setpoint(resp.setpoint)
+        self.motion_info.mark_setpoint(resp.setpoint)
         return resp
     return wrapper
 
@@ -63,7 +63,7 @@ def nosetpoint(func):
     """
     @wraps(func)
     def wrapper(self, request, context):
-        self.vehicle.mark_setpoint(None)
+        self.motion_info.mark_setpoint(None)
         return func(self, request, context)
     return wrapper
 
@@ -78,20 +78,34 @@ class SteelEagle(Interface):
         path = path / SOCKET_ADDR
         logger.info(f'Listening on socket path {path}')
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-        add_ControlServiceServicer_to_server(Control(self.vehicle), self.server)
-        add_StreamServiceServicer_to_server(Stream(self.vehicle), self.server)
+        self.info = MotionInfo()
+        add_ControlServiceServicer_to_server(Control(self.vehicle, self.info), self.server)
+        add_StreamServiceServicer_to_server(Stream(self.vehicle, self.info), self.server)
         add_InfoServiceServicer_to_server(Info(), self.server)
         self.server.add_insecure_port(f'unix://{path}')
         self.server.start()
         logger.info(f'Server started!')
 
+class MotionInfo:
+    def __init__(self):
+        self.setpoint = None
+        self.mode = telemetry_proto.Mode.MODE_UNSPECIFIED
+
+    def mark_setpoint(self, setpoint):
+        self.setpoint = setpoint
+
+    def set_flight_mode(self, mode: telemetry_proto.Mode):
+        self.mode = mode
+
 class Control(ControlServiceServicer):
     """gRPC control interface."""
-    def __init__(self, vehicle: Vehicle):
+    def __init__(self, vehicle: Vehicle, motion_info: MotionInfo):
         self.vehicle = vehicle
+        self.motion_info = motion_info
 
     @nosetpoint
     def TakeOff(self, request, context):
+        self.motion_info.set_flight_mode(telemetry_proto.Mode.MODE_TAKEOFF)
         self.vehicle.set_position_target(self.vehicle.current_position() + LVector3f(0, 0, request.altitude))
         return control_proto.TakeOffResponse(
             expected_mode=telemetry_proto.Mode.MODE_LOITER,
@@ -100,6 +114,7 @@ class Control(ControlServiceServicer):
 
     @nosetpoint
     def Land(self, request, context):
+        self.motion_info.set_flight_mode(telemetry_proto.Mode.MODE_LAND)
         current = self.vehicle.current_position()
         self.vehicle.set_position_target(LPoint3f(current.x, current.y, self.vehicle.sim_origin.z))
         return control_proto.LandResponse(
@@ -109,6 +124,7 @@ class Control(ControlServiceServicer):
 
     @nosetpoint
     def Hold(self, request, context):
+        self.motion_info.set_flight_mode(telemetry_proto.Mode.MODE_LOITER)
         self.vehicle.set_velocity_target(LVector3f(0, 0, 0))
         self.vehicle.set_pose_target(LVector3f(0, 0, 0), PoseMode.VELOCITY)
         return control_proto.HoldResponse(
@@ -118,6 +134,7 @@ class Control(ControlServiceServicer):
 
     @nosetpoint
     def Kill(self, request, context):
+        self.motion_info.set_flight_mode(telemetry_proto.Mode.MODE_EMERGENCY)
         # No-op in the simulator: there is no motor/crash physics to model, so
         # this just reports the expected mode/status without changing vehicle
         # state.
@@ -128,6 +145,7 @@ class Control(ControlServiceServicer):
 
     @nosetpoint
     def ReturnToHome(self, request, context):
+        self.motion_info.set_flight_mode(telemetry_proto.Mode.MODE_RETURN_TO_HOME)
         geod_position = self.vehicle.current_geodetic_position()
         position = self.vehicle.current_position()
         target = self.vehicle.convert_to_geodetic(self.vehicle.sim_origin)
@@ -166,6 +184,7 @@ class Control(ControlServiceServicer):
 
     @setpoint
     def SetRelativePositionTarget(self, request, context):
+        self.motion_info.set_flight_mode(telemetry_proto.Mode.MODE_GUIDED)
         theta = radians(self.vehicle.current_rotation().x)
         offset = LVector3f(request.position.x, request.position.y, request.position.z)
         pose = LPoint3f(request.position.angle, 0, 0)
@@ -192,6 +211,7 @@ class Control(ControlServiceServicer):
 
     @setpoint
     def SetGlobalPositionTarget(self, request, context):
+        self.motion_info.set_flight_mode(telemetry_proto.Mode.MODE_GUIDED)
         # If absolute altitude is specified, add the target altitude to the
         # current altitude
         if request.altitude_mode <= 1: # Relative mode
@@ -230,6 +250,7 @@ class Control(ControlServiceServicer):
 
     @setpoint
     def SetVelocityTarget(self, request, context):
+        self.motion_info.set_flight_mode(telemetry_proto.Mode.MODE_GUIDED)
         if request.frame <= 1: # Body-aligned
             vector = LVector3f(request.velocity.x_vel, request.velocity.y_vel, request.velocity.z_vel)
         else: # NEU-aligned
@@ -293,8 +314,9 @@ class Info(InfoServiceServicer):
 
 class Stream(StreamServiceServicer):
     """gRPC stream interface."""
-    def __init__(self, vehicle: Vehicle):
+    def __init__(self, vehicle: Vehicle, motion_info: MotionInfo):
         self.vehicle = vehicle
+        self.motion_info = motion_info
 
     def get_telemetry(self):
         # Get current position data
@@ -336,8 +358,8 @@ class Stream(StreamServiceServicer):
         velocity_body.z_vel = vel_body.z
         velocity_body.angular_vel = angular_vel.x
         setpoint = Any()
-        if self.vehicle.setpoint:
-            setpoint.Pack(self.vehicle.setpoint)
+        if self.motion_info.setpoint:
+            setpoint.Pack(self.motion_info.setpoint)
         position_info = telemetry_proto.PositionInfo(
                 home=home,
                 global_position=global_position,
@@ -370,13 +392,23 @@ class Stream(StreamServiceServicer):
                 angular_velocity_neu=gimbal_velocity_neu,
                 )
 
+        motion_status = telemetry_proto.MotionStatus.MOTION_STATUS_STOPPED
+        if vel_body.length() > 0:
+            motion_status = telemetry_proto.MotionStatus.MOTION_STATUS_IN_TRANSIT
+        elif rel_position.z > 0:
+            motion_status = telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING
+
+        mode = self.motion_info.mode
+
         # No Alert Info needed, since there are no alerts to send
         return telemetry_proto.Telemetry(
                 timestamp=Timestamp().GetCurrentTime(),
                 battery_info=battery_info,
                 gps_info=gps_info,
                 position_info=position_info,
-                gimbal_info=gimbal_info
+                gimbal_info=gimbal_info,
+                motion_status=motion_status,
+                mode=mode,
                 )
 
     #TODO: def GetVideoStreamURL(self, request, context):

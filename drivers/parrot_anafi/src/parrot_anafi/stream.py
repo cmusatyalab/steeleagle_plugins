@@ -140,6 +140,10 @@ class Stream(StreamServiceServicer):
         else:
             return telemetry_proto.MotionStatus.MOTION_STATUS_IN_TRANSIT
 
+    def get_mode(self):
+        """Get the mode of the drone."""
+        return self.drone.flight_mode
+
     def get_gimbal_info(self, gimbal_id=DEFAULT_GIMBAL_ID):
         """Get gimbal info for the primary gimbal."""
         pose = self.drone.get_state(attitude)[gimbal_id]
@@ -299,6 +303,7 @@ class Stream(StreamServiceServicer):
                     gimbal_info=self.get_gimbal_info(),
                     alert_info=self.get_alert_info(),
                     motion_status=self.get_motion_status(),
+                    mode=self.get_mode(),
                 )
                 yield stream_proto.StreamTelemetryResponse(telemetry=telemetry)
                 next_frame_time += 1.0 / framerate

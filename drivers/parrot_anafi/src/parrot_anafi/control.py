@@ -4,7 +4,6 @@ from math import degrees, radians, pi
 import time
 import logging
 from numpy import clip
-from enum import Enum
 import grpc
 # Protocol imports
 import steeleagle_protocol.v1.common.common_pb2 as common_proto
@@ -67,39 +66,27 @@ def nosetpoint(func):
 class Control(ControlServiceServicer):
     """Control Service implementation.
     """
-    class FlightMode(Enum):
-        LOITER = 'LOITER'
-        TAKEOFF_LAND = 'TAKEOFF_LAND'
-        VELOCITY = 'VELOCITY'
-        GUIDED = 'GUIDED'
 
     def __init__(self, drone):
         self.drone = drone
-        self.mode = Control.FlightMode.LOITER
         self.velocity_task = VelocityPIDThread(self.drone)
         self.velocity_task.start()
 
-    def set_flight_mode(self, mode: FlightMode):
-        """Set the internal flight mode of the drone.
+    def set_flight_mode(self, mode: telemetry_proto.Mode, on_velocity=False):
+        """Sets flight mode and toggles velocity control.
 
-        This method tracks an implied flight mode for the drone since Olympe
-        does not provide one. Tracking the flight mode prevents the
-        VelocityPIDThread from interrupting other flight commands.
+        Monitors each flight mode change and if velocity control should
+        be enabled, start the velocity task.
         """
-        logger.debug(f'switching flight mode to {mode.name}')
-        if mode == self.mode:
-            return
-        if self.mode == Control.FlightMode.VELOCITY:
-            # Switching out of velocity mode
-            self.velocity_task.pause()
-        elif mode == Control.FlightMode.VELOCITY:
-            # Switching into velocity mode
+        self.drone.set_flight_mode(mode)
+        if on_velocity:
             self.velocity_task.resume()
-        self.mode = mode
+        else:
+            self.velocity_task.pause()
 
     @nosetpoint
     def TakeOff(self, request, context):
-        self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
+        self.set_flight_mode(telemetry_proto.Mode.MODE_TAKEOFF)
         if request.altitude:
             # TODO: spawn off a thread that does this!
             logger.warning('no support for field take_off_altitude, ignoring')
@@ -117,7 +104,7 @@ class Control(ControlServiceServicer):
 
     @nosetpoint
     def Land(self, request, context):
-        self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
+        self.set_flight_mode(telemetry_proto.Mode.MODE_LAND)
         if self.drone.get_state(FlyingStateChanged)['state'] == FlyingStateChanged_State.landed:
             logger.error('land attempted when drone not in the air')
             context.abort(
@@ -132,7 +119,7 @@ class Control(ControlServiceServicer):
 
     @nosetpoint
     def Hold(self, request, context):
-        self.set_flight_mode(Control.FlightMode.LOITER)
+        self.set_flight_mode(telemetry_proto.Mode.MODE_LOITER)
         # Abort an in-progress RTH since PCMD does not overwrite it
         self.drone(abort())
         # Set a slight positive throttle to cancel landing
@@ -144,7 +131,7 @@ class Control(ControlServiceServicer):
 
     @nosetpoint
     def Kill(self, request, context):
-        self.set_flight_mode(Control.FlightMode.TAKEOFF_LAND)
+        self.set_flight_mode(telemetry_proto.Mode.MODE_EMERGENCY)
         self.drone(Emergency()).wait().success()
         return control_proto.KillResponse(
             expected_mode=telemetry_proto.Mode.MODE_EMERGENCY,
@@ -153,7 +140,7 @@ class Control(ControlServiceServicer):
 
     @nosetpoint
     def ReturnToHome(self, request, context):
-        self.set_flight_mode(Control.FlightMode.GUIDED)
+        self.set_flight_mode(telemetry_proto.Mode.MODE_RETURN_TO_HOME)
         # Set the end behavior for the RTH
         if request.end_behavior <= 1:
             self.drone(set_ending_behavior(rth_state.ending_behavior.hovering)).wait().success()
@@ -177,7 +164,7 @@ class Control(ControlServiceServicer):
 
     @setpoint
     def SetRelativePositionTarget(self, request, context):
-        self.set_flight_mode(Control.FlightMode.GUIDED)
+        self.set_flight_mode(telemetry_proto.Mode.MODE_GUIDED)
         yaw = self.drone.get_state(AttitudeChanged)['yaw']
         if request.frame <= 1: # Body-aligned
             self.drone(extended_move_by(
@@ -224,7 +211,7 @@ class Control(ControlServiceServicer):
 
     @setpoint
     def SetGlobalPositionTarget(self, request, context):
-        self.set_flight_mode(Control.FlightMode.GUIDED)
+        self.set_flight_mode(telemetry_proto.Mode.MODE_GUIDED)
         # Set heading mode
         heading_mode = move_mode.orientation_mode.to_target
         if request.heading_mode > 1:
@@ -262,8 +249,8 @@ class Control(ControlServiceServicer):
 
     @setpoint
     def SetVelocityTarget(self, request, context):
+        self.set_flight_mode(telemetry_proto.Mode.MODE_GUIDED, on_velocity=True)
         self.velocity_task.set_target(request.velocity, request.frame)
-        self.set_flight_mode(Control.FlightMode.VELOCITY)
         # angular_vel is intentionally omitted from the setpoint: telemetry
         # never reports a measured angular velocity, so there's nothing to
         # compare a commanded angular_vel setpoint against.
