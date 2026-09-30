@@ -1,16 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/cmusatyalab/steeleagle/core/util"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -25,6 +30,13 @@ const stopTimeout = 10 * time.Second
 // runDir.
 const binaryName = "mission"
 
+// tmpBinaryName is the filename an in-flight upload is streamed into before
+// being atomically renamed to binaryName.
+const tmpBinaryName = "mission.tmp"
+
+// maxMissionSize bounds an uploaded mission binary.
+const maxMissionSize = 128 << 20
+
 // server implements MissionServiceServer, launching an uploaded mission binary
 // as a subprocess and tracking its lifecycle.
 type server struct {
@@ -35,6 +47,7 @@ type server struct {
 
 	mu         sync.Mutex
 	binaryPath string             // set once UploadMission has stored a binary
+	uploading  bool               // true while an UploadMission stream is being received
 	cancel     context.CancelFunc // cancels the running mission's context; nil if nothing is running
 	done       chan struct{}      // closed once the running mission's subprocess exits; nil if nothing is running
 }
@@ -53,27 +66,170 @@ func (s *server) preloadMission(path string) {
 	s.binaryPath = path
 }
 
-// UploadMission stores req's mission binary, replacing any previously
-// uploaded one. Fails if a mission is currently running.
-func (s *server) UploadMission(ctx context.Context, req *missionpb.UploadMissionRequest) (*missionpb.UploadMissionResponse, error) {
-	data := req.GetMission().GetBinary()
-	if len(data) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "mission must be a binary payload")
+// GetMissionInfo reports the architecture this mission service runs on, so an
+// uploader can send the matching binary variant.
+func (s *server) GetMissionInfo(ctx context.Context, req *missionpb.GetMissionInfoRequest) (*missionpb.GetMissionInfoResponse, error) {
+	return missionpb.GetMissionInfoResponse_builder{Arch: runtime.GOARCH}.Build(), nil
+}
+
+// UploadMission receives a streamed mission binary (header, then chunks),
+// verifies it, and atomically replaces any previously uploaded one. A failed
+// or aborted upload never disturbs the previous binary. Fails if a mission is
+// running or another upload is already in flight.
+func (s *server) UploadMission(stream grpc.ClientStreamingServer[missionpb.UploadMissionRequest, missionpb.UploadMissionResponse]) error {
+	first, err := stream.Recv()
+	if err == io.EOF {
+		return status.Error(codes.InvalidArgument, "upload stream was empty; the first message must be a header")
+	}
+	if err != nil {
+		return err
+	}
+	if !first.HasHeader() {
+		return status.Error(codes.InvalidArgument, "the first upload message must be a header")
+	}
+	header := first.GetHeader()
+	if err := validateHeader(header); err != nil {
+		return err
 	}
 
+	if err := s.beginUpload(); err != nil {
+		return err
+	}
+	defer s.endUpload()
+
+	tmp := filepath.Join(s.runDir, tmpBinaryName)
+	if err := receiveBinary(stream, header, tmp); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	path, err := s.commit(tmp)
+	if err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	log.Info().Str("path", path).Uint64("bytes", header.GetSize()).Msg("mission uploaded")
+	return stream.SendAndClose(&missionpb.UploadMissionResponse{})
+}
+
+// validateHeader rejects a header this host can't accept before any chunks
+// are read.
+func validateHeader(h *missionpb.MissionHeader) error {
+	switch {
+	case h.GetSize() == 0:
+		return status.Error(codes.InvalidArgument, "mission size must be positive")
+	case h.GetSize() > maxMissionSize:
+		return status.Errorf(codes.InvalidArgument, "mission size %d exceeds the %d byte limit", h.GetSize(), maxMissionSize)
+	case len(h.GetSha256()) != sha256.Size:
+		return status.Errorf(codes.InvalidArgument, "sha256 must be %d bytes, got %d", sha256.Size, len(h.GetSha256()))
+	case h.GetArch() != runtime.GOARCH:
+		return status.Errorf(codes.InvalidArgument, "mission built for %s, this vehicle is %s", h.GetArch(), runtime.GOARCH)
+	}
+	return nil
+}
+
+// beginUpload marks an upload in flight, refusing if a mission is running or
+// another upload already is.
+func (s *server) beginUpload() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cancel != nil {
-		return nil, status.Error(codes.FailedPrecondition, "cannot upload a new mission while one is running")
+		return status.Error(codes.FailedPrecondition, "cannot upload a new mission while one is running")
 	}
+	if s.uploading {
+		return status.Error(codes.Aborted, "upload already in progress")
+	}
+	s.uploading = true
+	return nil
+}
 
+// endUpload clears the in-flight flag set by beginUpload.
+func (s *server) endUpload() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.uploading = false
+}
+
+// receiveBinary streams the remaining chunks into path, checking the ELF
+// header as soon as enough bytes arrive, and verifies the total size and
+// SHA-256 against header before syncing and marking the file executable.
+func receiveBinary(stream grpc.ClientStreamingServer[missionpb.UploadMissionRequest, missionpb.UploadMissionResponse], header *missionpb.MissionHeader, path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return status.Errorf(codes.Internal, "creating mission file: %v", err)
+	}
+	defer f.Close()
+
+	hash := sha256.New()
+	var received uint64
+	var prefix []byte // leading bytes, kept only until the ELF check runs
+	checked := false
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if !msg.HasChunk() {
+			return status.Error(codes.InvalidArgument, "only the first upload message may be a header")
+		}
+		chunk := msg.GetChunk()
+		received += uint64(len(chunk))
+		if received > header.GetSize() {
+			return status.Errorf(codes.InvalidArgument, "received more than the declared %d bytes", header.GetSize())
+		}
+		if !checked {
+			prefix = append(prefix, chunk...)
+			if len(prefix) >= elfPrefixLen {
+				if err := checkELF(prefix, runtime.GOARCH); err != nil {
+					return err
+				}
+				checked, prefix = true, nil
+			}
+		}
+		hash.Write(chunk)
+		if _, err := f.Write(chunk); err != nil {
+			return status.Errorf(codes.Internal, "writing mission file: %v", err)
+		}
+	}
+	if !checked {
+		if err := checkELF(prefix, runtime.GOARCH); err != nil {
+			return err
+		}
+	}
+	if received != header.GetSize() {
+		return status.Errorf(codes.InvalidArgument, "received %d bytes, header declared %d", received, header.GetSize())
+	}
+	if !bytes.Equal(hash.Sum(nil), header.GetSha256()) {
+		return status.Error(codes.InvalidArgument, "sha256 mismatch: the mission was corrupted in transit")
+	}
+	if err := f.Sync(); err != nil {
+		return status.Errorf(codes.Internal, "syncing mission file: %v", err)
+	}
+	if err := f.Chmod(0o755); err != nil {
+		return status.Errorf(codes.Internal, "marking mission executable: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		return status.Errorf(codes.Internal, "closing mission file: %v", err)
+	}
+	return nil
+}
+
+// commit atomically installs the verified temp file as the mission binary,
+// re-checking that no mission started while the upload was streaming.
+func (s *server) commit(tmp string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancel != nil {
+		return "", status.Error(codes.FailedPrecondition, "a mission started while this upload was in progress")
+	}
 	path := filepath.Join(s.runDir, binaryName)
-	if err := os.WriteFile(path, data, 0o755); err != nil {
-		return nil, status.Errorf(codes.Internal, "writing mission binary: %v", err)
+	if err := os.Rename(tmp, path); err != nil {
+		return "", status.Errorf(codes.Internal, "installing mission binary: %v", err)
 	}
 	s.binaryPath = path
-	log.Info().Str("path", path).Int("bytes", len(data)).Msg("mission uploaded")
-	return &missionpb.UploadMissionResponse{}, nil
+	return path, nil
 }
 
 // StartMission execs the uploaded mission binary as a subprocess, passing it
