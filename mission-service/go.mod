@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/cmusatyalab/steeleagle v1.3.1-0.20260827170245-c7b199bbc4dd
-	github.com/cmusatyalab/steeleagle/api/go v0.1.0
+	github.com/cmusatyalab/steeleagle/api/go v0.2.0
 	github.com/rs/zerolog v1.35.1
 	google.golang.org/grpc v1.83.0
 )
