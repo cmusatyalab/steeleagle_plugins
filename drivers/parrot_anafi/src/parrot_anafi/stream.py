@@ -28,6 +28,8 @@ from olympe.messages.ardrone3.GPSSettingsState import HomeChanged, GPSFixStateCh
 from olympe.messages.ardrone3.GPSState import NumberOfSatelliteChanged
 from olympe.messages.common.CommonState import BatteryStateChanged, LinkSignalQuality
 from olympe.messages.gimbal import attitude
+# Driver imports
+from parrot_anafi import raw_frames
 
 logger = logging.getLogger('parrot-anafi/stream')
 
@@ -52,17 +54,49 @@ class Stream(StreamServiceServicer):
         self.cap = None
         self._latest_frame = None
         self._frame_lock = threading.Lock()
+        self._capture_lock = threading.Lock()
         self._grabber_thread = None
+        # Raw frames go to Gabriel from the start, not only once someone
+        # streams frames, since a flow may take them at any time.
+        self._raw_frames = raw_frames.from_environment(
+            lambda: (self.get_position_info(), self.get_gimbal_info()))
+        if self._raw_frames is not None:
+            self._start_capture()
+
+    def _start_capture(self):
+        """Opens the drone's video stream and starts reading it, once."""
+        with self._capture_lock:
+            if self.cap:
+                return
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp"
+            self.cap = cv2.VideoCapture(
+                    f"rtsp://{self.ip}/live",
+                    cv2.CAP_FFMPEG,
+                    (cv2.CAP_PROP_N_THREADS, 1),
+                )
+            self._grabber_thread = threading.Thread(target=self._grab_frames, daemon=True)
+            self._grabber_thread.start()
 
     def _grab_frames(self):
-        """Continuously read frames so only the newest is ever kept.
+        """Continuously read frames so only the newest is ever kept, and
+        publish each one to Gabriel, if eagled asked for raw frames. The
+        publisher is used only here, on this thread.
         """
-        while self.cap is not None:
-            ret, frame = self.cap.read()
-            if not ret:
-                continue
-            with self._frame_lock:
-                self._latest_frame = frame
+        try:
+            while self.cap is not None:
+                ret, frame = self.cap.read()
+                if not ret:
+                    continue
+                with self._frame_lock:
+                    self._latest_frame = frame
+                if self._raw_frames is not None:
+                    try:
+                        self._raw_frames.publish(frame)
+                    except Exception as e:
+                        logger.warning(f'raw frame could not be published, reason: {e}')
+        finally:
+            if self._raw_frames is not None:
+                self._raw_frames.close()
 
     def _read_latest_frame(self):
         with self._frame_lock:
@@ -244,15 +278,7 @@ class Stream(StreamServiceServicer):
     # TODO: GetVideoStreamURL
 
     def StreamVideoFrames(self, request, context):
-        if not self.cap:
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp"
-            self.cap = cv2.VideoCapture(
-                    f"rtsp://{self.ip}/live",
-                    cv2.CAP_FFMPEG,
-                    (cv2.CAP_PROP_N_THREADS, 1),
-                )
-            self._grabber_thread = threading.Thread(target=self._grab_frames, daemon=True)
-            self._grabber_thread.start()
+        self._start_capture()
 
         framerate = np.clip(request.target_fps, 1, 30) if request.target_fps else 30
         dimensions = RESOLUTION_DIMENSIONS.get(request.resolution)

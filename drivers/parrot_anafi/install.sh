@@ -16,3 +16,8 @@ fi
 buf generate
 uv venv
 uv pip install -e .
+# eagled gives the Gabriel wheel built from its own commit of Gabriel, since
+# the two share memory. Without it, the driver runs without Gabriel.
+if [ -n "${GABRIEL_WHEEL:-}" ]; then
+	uv pip install "$GABRIEL_WHEEL"
+fi
