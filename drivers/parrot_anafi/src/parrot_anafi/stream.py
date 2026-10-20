@@ -37,6 +37,12 @@ logger = logging.getLogger('parrot-anafi/stream')
 # into a local ENU frame for relative_position (equirectangular approximation).
 METERS_PER_DEGREE_LATITUDE = 111320.0
 DEFAULT_GIMBAL_ID = 0
+# Seconds to wait before reopening the drone's video stream, after it failed
+# to open or stopped giving frames.
+CAPTURE_RETRY_DELAY = 1.0
+# Failed reads in a row after which the video stream is reopened. A read fails
+# at once on a broken stream, or after OpenCV's read timeout on a silent one.
+MAX_FAILED_READS = 10
 
 RESOLUTION_DIMENSIONS = {
     stream_proto.RESOLUTION_360P: (640, 360),
@@ -51,7 +57,6 @@ class Stream(StreamServiceServicer):
     def __init__(self, drone, ip):
         self.drone = drone
         self.ip = ip
-        self.cap = None
         self._latest_frame = None
         self._frame_lock = threading.Lock()
         self._capture_lock = threading.Lock()
@@ -64,39 +69,63 @@ class Stream(StreamServiceServicer):
             self._start_capture()
 
     def _start_capture(self):
-        """Opens the drone's video stream and starts reading it, once."""
+        """Starts reading the drone's video stream, once. The stream is opened
+        on the reading thread, so a slow drone delays only the frames, not
+        the driver's start."""
         with self._capture_lock:
-            if self.cap:
+            if self._grabber_thread is not None:
                 return
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp"
-            self.cap = cv2.VideoCapture(
-                    f"rtsp://{self.ip}/live",
-                    cv2.CAP_FFMPEG,
-                    (cv2.CAP_PROP_N_THREADS, 1),
-                )
             self._grabber_thread = threading.Thread(target=self._grab_frames, daemon=True)
             self._grabber_thread.start()
 
+    def _open_capture(self):
+        """Opens the drone's video stream, waiting for it as long as OpenCV
+        does."""
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp"
+        return cv2.VideoCapture(
+                f"rtsp://{self.ip}/live",
+                cv2.CAP_FFMPEG,
+                (cv2.CAP_PROP_N_THREADS, 1),
+            )
+
     def _grab_frames(self):
-        """Continuously read frames so only the newest is ever kept, and
-        publish each one to Gabriel, if eagled asked for raw frames. The
-        publisher is used only here, on this thread.
+        """Reads the drone's video stream for good, reopening it whenever it
+        fails to open or stops giving frames. The publisher is used only here,
+        on this thread.
         """
         try:
-            while self.cap is not None:
-                ret, frame = self.cap.read()
-                if not ret:
-                    continue
-                with self._frame_lock:
-                    self._latest_frame = frame
-                if self._raw_frames is not None:
-                    try:
-                        self._raw_frames.publish(frame)
-                    except Exception as e:
-                        logger.warning(f'raw frame could not be published, reason: {e}')
+            while True:
+                cap = self._open_capture()
+                if cap.isOpened():
+                    self._read_frames(cap)
+                    logger.warning(f'video stream stopped; reopening it in {CAPTURE_RETRY_DELAY} s')
+                else:
+                    logger.warning(f'video stream could not be opened; retrying in {CAPTURE_RETRY_DELAY} s')
+                cap.release()
+                time.sleep(CAPTURE_RETRY_DELAY)
         finally:
             if self._raw_frames is not None:
                 self._raw_frames.close()
+
+    def _read_frames(self, cap):
+        """Reads frames from `cap` so only the newest is ever kept, and
+        publishes each one to Gabriel, if eagled asked for raw frames. Returns
+        once MAX_FAILED_READS reads in a row fail.
+        """
+        failed_reads = 0
+        while failed_reads < MAX_FAILED_READS:
+            ret, frame = cap.read()
+            if not ret:
+                failed_reads += 1
+                continue
+            failed_reads = 0
+            with self._frame_lock:
+                self._latest_frame = frame
+            if self._raw_frames is not None:
+                try:
+                    self._raw_frames.publish(frame)
+                except Exception as e:
+                    logger.warning(f'raw frame could not be published, reason: {e}')
 
     def _read_latest_frame(self):
         with self._frame_lock:
