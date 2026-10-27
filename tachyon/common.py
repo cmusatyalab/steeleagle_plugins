@@ -1,0 +1,9 @@
+SERVER = "patchcore-local"
+EMBED_ENGINE = "patchcore-embed"
+SCORE_ENGINE = "patchcore-score"
+VERIFIER_ENGINE = "verifier"
+PRODUCER = "camera"
+FLOW = "patchcore-local-flow"
+MAX_FRAME_SIZE = 2 * 1024 * 1024
+MAX_EMBED_SIZE = 8 * 1024 * 1024
+REMOTE_ADDR = "128.2.208.248:4433"

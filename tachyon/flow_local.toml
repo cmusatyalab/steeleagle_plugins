@@ -1,0 +1,48 @@
+[[producers]]
+name = "camera"
+tokens = 10
+
+[[engines]]
+name = "patchcore-embed"
+location = "local"
+
+[[engines]]
+name = "patchcore-score"
+location = "local"
+
+[[engines]]
+name = "h264-encode"
+location = "local"
+
+[[engines]]
+name = "h264-decode"
+location = "remote"
+
+[[engines]]
+name = "verifier"
+location = "remote"
+
+[[edges]]
+from = "camera"
+to = "patchcore-embed"
+timeout = "2s"
+
+[[edges]]
+from = "patchcore-embed"
+to = "patchcore-score"
+timeout = "2s"
+
+[[edges]]
+from = "patchcore-score"
+to = "h264-encode"
+timeout = "2s"
+
+[[edges]]
+from = "h264-encode"
+to = "h264-decode"
+timeout = "3s"
+
+[[edges]]
+from = "h264-decode"
+to = "verifier"
+timeout = "2s"

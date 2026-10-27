@@ -1,0 +1,8 @@
+*.pt
+*.pt
+__pycache__/
+*.pyc
+received/
+test/detector_out/
+test/detector_out_rfdetr/
+*.log
