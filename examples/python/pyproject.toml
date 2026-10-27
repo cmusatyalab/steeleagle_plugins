@@ -1,0 +1,7 @@
+[project]
+name = "python-example"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "uriel>=0.2.0",
+]

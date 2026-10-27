@@ -1,0 +1,17 @@
+[plugin]
+name = "Example Engine"
+type = "engine"
+description = "Engine example plugin"
+
+[[args]]
+name = "confidence"
+type = "number"
+description = "Confidence threshold (0.01-1.0)"
+default = 0.75
+
+# ---- Everything under here is ignored for the example ----
+
+[engine]
+type = "detection"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+result = "steeleagle_protocol/v1/messages/result/DetectionResult"

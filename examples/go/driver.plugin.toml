@@ -1,0 +1,52 @@
+[plugin]
+name = "Example Driver"
+type = "driver"
+description = "Driver example plugin"
+
+[[args]]
+name = "message"
+type = "string" 
+description = "Message string the driver outputs on startup"
+default = "Hello World!" 
+
+# ---- Everything under here is ignored for the example ----
+
+[driver]
+type = "copter"
+
+[[driver.cameras]]
+name = "rgb"
+type = "steeleagle_protocol/v1/messages/frame/RawFrame"
+description = "Main RGB camera"
+hres = 1080
+vres = 720
+hfov = 69
+vfov = 43
+fps = 30
+latency = 280
+gimbal = true
+primary = true
+encode = true
+
+[driver.supported]
+services = [
+    "steeleagle_protocol/v1/services/driver/ControlService",
+    "steeleagle_protocol/v1/services/driver/StreamService",
+    "steeleagle_protocol/v1/services/driver/CalibrateService",
+]
+
+[driver.unsupported]
+methods = [
+    "steeleagle_protocol/v1/services/driver/ControlService/Kill",
+]
+fields = [
+    "steeleagle_protocol/v1/services/driver/TakeOffRequest/altitude",
+    "steeleagle_protocol/v1/messages/telemetry/PositionInfo/velocity_body/angular_vel",
+    "steeleagle_protocol/v1/messages/telemetry/PositionInfo/velocity_neu/angular_vel",
+    "steeleagle_protocol/v1/messages/telemetry/GimbalInfo/angular_velocity_body",
+    "steeleagle_protocol/v1/messages/telemetry/GimbalInfo/angular_velocity_neu",
+]
+enums = [
+    "steeleagle_protocol/v1/services/control/ReturnToHomeEndBehavior/RETURN_TO_HOME_END_BEHAVIOR_HOVER",
+    "steeleagle_protocol/v1/services/control/HeadingMode/HEADING_MODE_START",
+]
