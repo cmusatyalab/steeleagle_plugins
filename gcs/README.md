@@ -46,10 +46,10 @@ independently of the flow.
 ## Pixi tasks
 
 Run these in `gcs/`. The package builds on its own: `go.mod` takes `api/go` and
-`config` from steeleagle as pinned versions, and the `uriel` task builds Uriel's
-native library into the Pixi environment.
+`config` from steeleagle as tagged versions, and the `uriel` task downloads Uriel's
+prebuilt native library (the release `go.mod` requires) into the Pixi environment.
 
-- `pixi run build`: build the web UI, liburiel (if missing) and `bin/gcs`.
+- `pixi run build`: build the web UI, install liburiel (if missing) and `bin/gcs`.
 - `pixi run start`: build, then run the server (what the daemon invokes).
 - `pixi run test`: Go tests for the whole module (builds the server and web UI first).
 - `pixi run web-test`: web UI unit tests (vitest).

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Builds liburiel into the Pixi environment, unless the environment already has the build of the
-# gabriel commit that go.mod pins. The stamp records that commit and lives inside the environment,
+# Installs liburiel into the Pixi environment, unless the environment already has the Uriel
+# release that go.mod requires. The stamp records that version and lives inside the environment,
 # so recreating the environment discards it along with the library.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-pin=$(sed -n 's|.*github.com/cmusatyalab/gabriel/go v[^ ]*-\([0-9a-f]\{12\}\)[[:space:]]*$|\1|p' "$here/../go.mod")
-stamp="$CONDA_PREFIX/share/uriel-commit"
+pin=$(sed -n 's|^[[:space:]]*github.com/cmusatyalab/uriel/go \(v[^ ]*\).*|\1|p' "$here/../go.mod")
+stamp="$CONDA_PREFIX/share/uriel-version"
 
 if [[ -n $pin ]] && pkg-config --exists uriel && [[ -f $stamp && $(<"$stamp") == "$pin" ]]; then
-    echo "uriel: $pin is already built"
+    echo "uriel: $pin is already installed"
     exit 0
 fi
 

@@ -2,13 +2,10 @@ module github.com/cmusatyalab/steeleagle_plugins/gcs
 
 go 1.26.5
 
-// api/go and config are pinned to steeleagle's v4_backend_rework commit 7f7b2bcf, which
-// has the EncodedFrame codec/keyframe fields and the flow/driver config the GCS uses but no
-// release yet. Replace these pseudo-versions with the api/go and config tags once cut.
 require (
-	github.com/cmusatyalab/steeleagle/api/go v0.3.2-0.20261027161757-7f7b2bcffc7b
-	github.com/cmusatyalab/steeleagle/config v0.0.3-0.20261027161757-7f7b2bcffc7b
-	github.com/cmusatyalab/uriel/go v0.1.0
+	github.com/cmusatyalab/steeleagle/api/go v0.3.2
+	github.com/cmusatyalab/steeleagle/config v0.0.3
+	github.com/cmusatyalab/uriel/go v0.2.0
 	github.com/pion/rtp v1.10.6
 	github.com/pion/webrtc/v4 v4.2.25
 	github.com/rs/zerolog v1.35.1
@@ -43,5 +40,3 @@ require (
 	golang.org/x/time v0.14.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 )
-
-replace github.com/cmusatyalab/uriel/go => github.com/cmusatyalab/gabriel/go v0.0.0-20261026175819-cba4f5547e14

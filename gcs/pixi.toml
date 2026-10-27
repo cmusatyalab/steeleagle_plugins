@@ -3,9 +3,9 @@
 # are cached, so later starts only rebuild what changed. Run `pixi run build`
 # once after installing the package so the first start is quick.
 #
-# Uriel is linked with cgo. Its native library isn't on conda-forge, so the uriel task builds
-# it from source into this environment (with the environment's Rust and C toolchains), at the
-# commit that the replace in go.mod pins for its Go module. Nothing is installed system-wide.
+# Uriel is linked with cgo. Its native library isn't on conda-forge, so the uriel task
+# downloads the prebuilt release that go.mod requires into this environment. Nothing is
+# installed system-wide.
 [workspace]
 name = "steeleagle-gcs"
 channels = ["conda-forge"]
@@ -20,21 +20,18 @@ c-compiler = "*"
 # Only needed to build the web UI, which the server serves as static files
 nodejs = ">=22"
 pkg-config = "*"
-# Build liburiel (tools/uriel-install.sh)
-git = "*"
-rust = "*"
-cargo-c = "*"
-libclang = "*"
+# Download liburiel (tools/uriel-install.sh)
+curl = "*"
 # Generates the mock harness's video clips (cmd/gcsmock)
 ffmpeg = "*"
 
 [activation.env]
 CGO_ENABLED = "1"
 
-# Builds the native library Uriel's Go bindings link against, into the environment, at the
-# commit go.mod pins. It checks the environment itself, so it is never skipped by Pixi's cache
-# (which would go stale when the environment is recreated). The install script is adapted from
-# steeleagle's tools/uriel/install.sh, to read the pin from this package's go.mod.
+# Installs the native library Uriel's Go bindings link against into the environment, at the
+# version go.mod requires. It checks the environment itself, so it is never skipped by Pixi's
+# cache (which would go stale when the environment is recreated). The install script is copied
+# from steeleagle's tools/uriel/install.sh, to read the version from this package's go.mod.
 [tasks.uriel]
 cmd = "tools/uriel-ensure.sh"
 
