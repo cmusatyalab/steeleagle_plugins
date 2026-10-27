@@ -94,3 +94,18 @@ export function progressPercent(v) {
     if (v.status === 'success') return 100;
     return v.total > 0 ? Math.floor((v.sent * 100) / v.total) : 0;
 }
+
+export const MISSION_NAME_RULE = "mission name must be 1-64 letters, digits, '_', '-' or '.', not starting with '.'";
+
+// Returns null for a valid mission name, else the rule message. Mirrors the
+// GCS's ValidName.
+export function validMissionName(name) {
+    return /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}$/.test(name ?? '') ? null : MISSION_NAME_RULE;
+}
+
+// A mission name from a file name: the extension is dropped and characters the
+// rule doesn't allow become '_'. Empty when nothing usable is left.
+export function defaultMissionName(fileName) {
+    const stem = (fileName ?? '').replace(/\.[^.]*$/, '');
+    return stem.replace(/[^A-Za-z0-9_.-]/g, '_').replace(/^\./, '_').slice(0, 64);
+}

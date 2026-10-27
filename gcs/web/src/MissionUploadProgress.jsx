@@ -7,7 +7,7 @@ const STAGE_LABELS = { building: 'Building mission…', uploading: 'Uploading to
 
 function statusText(v) {
     switch (v.status) {
-        case 'success': return '✓ Uploaded';
+        case 'success': return `✓ ${v.details || 'Uploaded'}`;
         case 'failed': return `✗ ${v.details || 'Failed'}`;
         case 'uploading': return `${progressPercent(v)}%`;
         default: return 'Waiting…';

@@ -59,6 +59,7 @@ type options struct {
 	gcsIP                         string
 	vehicles                      []string
 	noEncoder                     map[string]bool
+	archs                         map[string]string // daemon IP -> architecture
 }
 
 func main() {
@@ -99,6 +100,8 @@ func parseFlags(args []string) (options, error) {
 	vehicles := fs.String("vehicles", "100.64.0.1.alpha,100.64.0.1.bravo,100.64.0.2.charlie",
 		"comma-separated vehicle names, each its daemon's IP, a dot and its own name")
 	noEncoder := fs.String("no-encoder-daemons", "", "comma-separated IPs of daemons without an h264_encoder")
+	archs := fs.String("daemon-arch", "",
+		"comma-separated ip=arch entries (amd64 or arm64) for daemon architectures; others are amd64")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -123,6 +126,14 @@ func parseFlags(args []string) (options, error) {
 	for _, ip := range splitList(*noEncoder) {
 		o.noEncoder[ip] = true
 	}
+	o.archs = map[string]string{}
+	for _, e := range splitList(*archs) {
+		ip, arch, ok := strings.Cut(e, "=")
+		if !ok || ip == "" || (arch != "amd64" && arch != "arm64") {
+			return options{}, fmt.Errorf("daemon-arch entry %q isn't ip=amd64 or ip=arm64", e)
+		}
+		o.archs[ip] = arch
+	}
 	return o, nil
 }
 
@@ -139,7 +150,7 @@ func splitList(s string) []string {
 // topology returns the names the daemon lists: an encoder on each vehicle
 // daemon that isn't excluded.
 func (o options) topology() Topology {
-	top := Topology{GCSIP: o.gcsIP, Vehicles: o.vehicles, EncoderDaemons: map[string]bool{}}
+	top := Topology{GCSIP: o.gcsIP, Vehicles: o.vehicles, EncoderDaemons: map[string]bool{}, Archs: o.archs}
 	for _, ip := range o.daemonIPs() {
 		if !o.noEncoder[ip] {
 			top.EncoderDaemons[ip] = true

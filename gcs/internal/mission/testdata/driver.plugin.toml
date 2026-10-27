@@ -1,0 +1,23 @@
+# Mirrors cmd/gcsmock driverConfig() (daemon.go).
+[plugin]
+  name = "mock_vehicle"
+  type = "driver"
+
+[driver]
+  type = "copter"
+
+  [[driver.cameras]]
+    name = "front"
+    type = "rgb"
+    hres = 1280
+    vres = 720
+    hfov = 90
+    vfov = 60
+    fps = 30
+    latency = 0.0
+    gimbal = false
+    primary = true
+    encode = true
+  [driver.supported]
+    services = ["steeleagle_protocol/v1/services/driver/ControlService", "steeleagle_protocol/v1/services/driver/StreamService"]
+  [driver.unsupported]

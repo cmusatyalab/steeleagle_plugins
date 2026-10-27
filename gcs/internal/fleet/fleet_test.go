@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"reflect"
+	"runtime"
 	"testing"
 
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
@@ -80,8 +81,10 @@ func TestList(t *testing.T) {
 
 func TestListUnavailable(t *testing.T) {
 	d := newFakeDaemon(t)
-	d.unavailable = []*daemonpb.Unavailable{
-		daemonpb.Unavailable_builder{Ip: "100.64.1.7", Hostname: "swap03", Reason: "connection refused"}.Build(),
+	d.remotes = []*daemonpb.Daemon{
+		daemonpb.Daemon_builder{Ip: "100.64.1.7", Hostname: "swap03", Error: "connection refused"}.Build(),
+		// A reachable remote is not unavailable
+		daemonpb.Daemon_builder{Ip: "100.64.1.8", Hostname: "swap04", Arch: "arm64", Os: "linux"}.Build(),
 	}
 	snap, err := List(context.Background(), daemonpb.NewDaemonServiceClient(d.conn()))
 	if err != nil {
@@ -118,5 +121,44 @@ func TestListError(t *testing.T) {
 	d.listErr = status.Error(codes.Unavailable, "down")
 	if _, err := List(context.Background(), daemonpb.NewDaemonServiceClient(d.conn())); err == nil {
 		t.Fatal("got no error")
+	}
+}
+
+func TestListKeepsRawConfig(t *testing.T) {
+	d := newFakeDaemon(t)
+	d.services = []*daemonpb.Service{
+		service("a", daemonpb.ServiceCategory_SERVICE_CATEGORY_VEHICLE, "p", driverConfig, true),
+	}
+	snap, err := List(context.Background(), daemonpb.NewDaemonServiceClient(d.conn()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Vehicles) != 1 || string(snap.Vehicles[0].Config) != driverConfig {
+		t.Errorf("got vehicles %+v, want config %q", snap.Vehicles, driverConfig)
+	}
+}
+
+func TestListSetsArchFromRemotes(t *testing.T) {
+	d := newFakeDaemon(t)
+	d.remotes = []*daemonpb.Daemon{
+		daemonpb.Daemon_builder{Ip: "100.64.1.5", Hostname: "swap03", Arch: "arm64", Os: "linux"}.Build(),
+		daemonpb.Daemon_builder{Ip: "100.64.1.6", Hostname: "old"}.Build(),
+	}
+	d.services = []*daemonpb.Service{
+		service("100.64.1.5.remote", daemonpb.ServiceCategory_SERVICE_CATEGORY_VEHICLE, "p", driverConfig, true),
+		service("100.64.1.9.local", daemonpb.ServiceCategory_SERVICE_CATEGORY_VEHICLE, "p", driverConfig, true),
+		service("100.64.1.6.old", daemonpb.ServiceCategory_SERVICE_CATEGORY_VEHICLE, "p", driverConfig, true),
+	}
+	snap, err := List(context.Background(), daemonpb.NewDaemonServiceClient(d.conn()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, v := range snap.Vehicles {
+		got[v.Name] = v.Arch
+	}
+	want := map[string]string{"100.64.1.5.remote": "arm64", "100.64.1.9.local": runtime.GOARCH, "100.64.1.6.old": ""}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got arches %v, want %v", got, want)
 	}
 }

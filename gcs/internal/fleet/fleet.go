@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"runtime"
 
 	"github.com/cmusatyalab/steeleagle/config"
 
@@ -45,6 +46,14 @@ type Vehicle struct {
 	// could not be read, in which case DriverErr says why.
 	Driver    *config.DriverCap
 	DriverErr error
+	// Config is the vehicle's raw plugin config, as the daemon reported it.
+	Config []byte
+	// Arch is the GOARCH of the daemon the vehicle runs on. A daemon that
+	// the GCS's own daemon lists as a remote reports its own, which is ""
+	// if it does not (an older eagled). A daemon that is not listed is the
+	// GCS's own daemon, which never lists itself and runs on the GCS's
+	// host, so Arch is the GCS's runtime.GOARCH.
+	Arch string
 }
 
 // Unavailable is a remote daemon the daemon could not reach, whose services
@@ -74,6 +83,10 @@ func List(ctx context.Context, c daemonpb.DaemonServiceClient) (Snapshot, error)
 		return Snapshot{}, err
 	}
 	snap := Snapshot{Engines: map[string]bool{}}
+	remoteArch := map[string]string{}
+	for _, r := range resp.GetRemotes() {
+		remoteArch[r.GetIp()] = r.GetArch()
+	}
 	for _, s := range resp.GetServices() {
 		switch s.GetCategory() {
 		case daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE:
@@ -83,7 +96,12 @@ func List(ctx context.Context, c daemonpb.DaemonServiceClient) (Snapshot, error)
 				continue
 			}
 			ip, _ := SplitName(s.GetName())
-			v := Vehicle{Name: s.GetName(), Plugin: s.GetPlugin(), DaemonIP: ip}
+			v := Vehicle{Name: s.GetName(), Plugin: s.GetPlugin(), DaemonIP: ip, Config: s.GetConfig()}
+			if arch, ok := remoteArch[ip]; ok {
+				v.Arch = arch
+			} else {
+				v.Arch = runtime.GOARCH
+			}
 			if conf, err := config.ParsePluginConfigFromBytes(s.GetConfig()); err != nil {
 				v.DriverErr = err
 			} else if conf.Driver == nil {
@@ -94,8 +112,11 @@ func List(ctx context.Context, c daemonpb.DaemonServiceClient) (Snapshot, error)
 			snap.Vehicles = append(snap.Vehicles, v)
 		}
 	}
-	for _, u := range resp.GetUnavailable() {
-		snap.Unavailable = append(snap.Unavailable, Unavailable{IP: u.GetIp(), Hostname: u.GetHostname(), Reason: u.GetReason()})
+	// A remote daemon with an error could not be reached
+	for _, r := range resp.GetRemotes() {
+		if r.GetError() != "" {
+			snap.Unavailable = append(snap.Unavailable, Unavailable{IP: r.GetIp(), Hostname: r.GetHostname(), Reason: r.GetError()})
+		}
 	}
 	return snap, nil
 }

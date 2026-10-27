@@ -3,6 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
+	"slices"
+	"strings"
 	"sync"
 
 	telemetrypb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/telemetry"
@@ -17,6 +23,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"time"
 )
 
@@ -39,6 +46,9 @@ type Topology struct {
 	Vehicles []string
 	// EncoderDaemons are the IPs of the daemons that have an h264 encoder.
 	EncoderDaemons map[string]bool
+	// Archs maps a daemon IP to its architecture, "amd64" or "arm64". An IP
+	// that isn't listed is "amd64".
+	Archs map[string]string
 }
 
 // Daemon is the mock daemon: it lists the topology and serves the vehicle
@@ -48,6 +58,7 @@ type Daemon struct {
 	vehiclepb.UnimplementedDataServiceServer
 	driverpb.UnimplementedControlServiceServer
 	missionpb.UnimplementedMissionServiceServer
+	vehiclepb.UnimplementedLoaderServiceServer
 
 	top   Topology
 	flows FlowApplier
@@ -61,6 +72,10 @@ type Daemon struct {
 type vehicleState struct {
 	v *Vehicle
 
+	loaderMu sync.Mutex // guards the uploaded missions
+	missions map[string]uploadedMission
+	active   string // name of the loaded mission, or ""
+
 	mu   sync.Mutex // held while the flow changes, including while it is applied
 	spec []byte
 }
@@ -69,7 +84,7 @@ type vehicleState struct {
 func NewDaemon(top Topology, vehicles map[string]*Vehicle, flows FlowApplier, log zerolog.Logger) *Daemon {
 	d := &Daemon{top: top, flows: flows, log: log, state: map[string]*vehicleState{}}
 	for n, v := range vehicles {
-		d.state[n] = &vehicleState{v: v}
+		d.state[n] = &vehicleState{v: v, missions: map[string]uploadedMission{}}
 	}
 	return d
 }
@@ -80,6 +95,7 @@ func (d *Daemon) Register(s *grpc.Server) {
 	vehiclepb.RegisterDataServiceServer(s, d)
 	driverpb.RegisterControlServiceServer(s, d)
 	missionpb.RegisterMissionServiceServer(s, d)
+	vehiclepb.RegisterLoaderServiceServer(s, d)
 }
 
 // route returns the vehicle the call's route key names. It mirrors the
@@ -116,7 +132,8 @@ func driverConfig() ([]byte, error) {
 	return pc.ToBytes()
 }
 
-// ListServices lists the vehicles, the encoders and the GCS engine.
+// ListServices lists the vehicles, the encoders and the GCS engine, and the
+// remote daemons with their architectures.
 func (d *Daemon) ListServices(
 	ctx context.Context, req *daemonpb.ListServicesRequest,
 ) (*daemonpb.ListServicesResponse, error) {
@@ -146,7 +163,25 @@ func (d *Daemon) ListServices(
 		Name: d.top.GCSIP + ".gcs", Category: daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE,
 		Plugin: "gcs", Running: true, Auth: "admin",
 	}.Build())
-	return daemonpb.ListServicesResponse_builder{Services: out}.Build(), nil
+	// Like eagled, list the other daemons that have vehicles, but not the
+	// GCS's own
+	var remotes []*daemonpb.Daemon
+	listed := map[string]bool{d.top.GCSIP: true}
+	for _, n := range d.top.Vehicles {
+		ip, _ := fleet.SplitName(n)
+		if listed[ip] {
+			continue
+		}
+		listed[ip] = true
+		arch := d.top.Archs[ip]
+		if arch == "" {
+			arch = "amd64"
+		}
+		remotes = append(remotes, daemonpb.Daemon_builder{
+			Ip: ip, Hostname: "mock-" + ip, Arch: arch, Os: "linux",
+		}.Build())
+	}
+	return daemonpb.ListServicesResponse_builder{Services: out, Remotes: remotes}.Build(), nil
 }
 
 // GetTelemetry returns the vehicle's current telemetry.
@@ -344,4 +379,124 @@ func (d *Daemon) StopMission(
 		return nil, status.Error(codes.FailedPrecondition, "no mission loaded")
 	}
 	return &missionpb.StopMissionResponse{}, nil
+}
+
+// uploadedMission is a mission file a vehicle holds in memory.
+type uploadedMission struct {
+	data []byte
+	hash string // sha256, hex
+	time time.Time
+}
+
+// checkFilename mirrors the real daemon's rule: a plain file name.
+func checkFilename(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`+"\x00") {
+		return status.Errorf(codes.InvalidArgument, "invalid file name %q", name)
+	}
+	return nil
+}
+
+// UploadMission keeps the chunks of a transfer under the first chunk's file
+// name, acknowledging each chunk once it is stored. The error texts are the
+// real daemon's.
+func (d *Daemon) UploadMission(
+	stream grpc.BidiStreamingServer[vehiclepb.UploadMissionRequest, vehiclepb.UploadMissionResponse],
+) error {
+	st, _, err := d.route(stream.Context())
+	if err != nil {
+		return err
+	}
+	req, err := stream.Recv()
+	if errors.Is(err, io.EOF) {
+		return status.Error(codes.InvalidArgument, "transfer has no chunks")
+	}
+	if err != nil {
+		return err
+	}
+	name, total := req.GetFilename(), req.GetTotal()
+	if err := checkFilename(name); err != nil {
+		return err
+	}
+	if total < 1 {
+		return status.Errorf(codes.InvalidArgument, "invalid total of %d chunks", total)
+	}
+	var data []byte
+	for number := int32(1); ; number++ {
+		if req.GetNumber() != number || req.GetTotal() != total {
+			return status.Errorf(codes.InvalidArgument, "expected chunk %d of %d, got chunk %d of %d",
+				number, total, req.GetNumber(), req.GetTotal())
+		}
+		data = append(data, req.GetChunk()...)
+		if number == total {
+			break
+		}
+		if err := stream.Send(vehiclepb.UploadMissionResponse_builder{Received: number}.Build()); err != nil {
+			return err
+		}
+		req, err = stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return status.Errorf(codes.InvalidArgument, "transfer ended after chunk %d of %d", number, total)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	sum := sha256.Sum256(data)
+	st.loaderMu.Lock()
+	st.missions[name] = uploadedMission{data: data, hash: hex.EncodeToString(sum[:]), time: time.Now()}
+	st.loaderMu.Unlock()
+	return stream.Send(vehiclepb.UploadMissionResponse_builder{Received: total}.Build())
+}
+
+// LoadMission makes an uploaded mission the active one.
+func (d *Daemon) LoadMission(
+	ctx context.Context, req *vehiclepb.LoadMissionRequest,
+) (*vehiclepb.LoadMissionResponse, error) {
+	st, _, err := d.route(ctx)
+	if err != nil {
+		return nil, err
+	}
+	name := req.GetName()
+	if err := checkFilename(name); err != nil {
+		return nil, err
+	}
+	st.loaderMu.Lock()
+	defer st.loaderMu.Unlock()
+	if _, ok := st.missions[name]; !ok {
+		return nil, status.Errorf(codes.NotFound, "no mission named %q", name)
+	}
+	if st.v.MissionRunning() {
+		return nil, status.Error(codes.FailedPrecondition, "cannot load a mission while one is running")
+	}
+	st.active = name
+	return &vehiclepb.LoadMissionResponse{}, nil
+}
+
+// GetMissions lists the uploaded missions by name, and the active one.
+func (d *Daemon) GetMissions(
+	ctx context.Context, req *vehiclepb.GetMissionsRequest,
+) (*vehiclepb.GetMissionsResponse, error) {
+	st, _, err := d.route(ctx)
+	if err != nil {
+		return nil, err
+	}
+	st.loaderMu.Lock()
+	defer st.loaderMu.Unlock()
+	names := make([]string, 0, len(st.missions))
+	for n := range st.missions {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+	resp := &vehiclepb.GetMissionsResponse{}
+	var out []*vehiclepb.MissionInfo
+	for _, n := range names {
+		m := st.missions[n]
+		info := vehiclepb.MissionInfo_builder{Name: n, Hash: m.hash, CreationTime: timestamppb.New(m.time)}.Build()
+		out = append(out, info)
+		if n == st.active {
+			resp.SetActiveMission(info)
+		}
+	}
+	resp.SetMissions(out)
+	return resp, nil
 }

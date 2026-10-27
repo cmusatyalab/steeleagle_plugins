@@ -6,7 +6,8 @@ import { Toast } from 'primereact/toast';
 import { InputTextarea } from 'primereact/inputtextarea';
 import { Dialog } from 'primereact/dialog';
 import { MultiSelect } from 'primereact/multiselect';
-import { streamUpload, initialUploadState, applyUploadEvent, isUploadFinished, finishUpload } from './missionUpload.js';
+import { InputText } from 'primereact/inputtext';
+import { streamUpload, initialUploadState, applyUploadEvent, isUploadFinished, finishUpload, validMissionName } from './missionUpload.js';
 import {
     ReactFlow, Background, Controls, MiniMap,
     applyNodeChanges, applyEdgeChanges, addEdge,
@@ -300,6 +301,8 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     const [validationIssues, setValidationIssues] = useState({});
     const [deployDialogVisible, setDeployDialogVisible] = useState(false);
     const [deployTargets, setDeployTargets] = useState([]);
+    const [deployName, setDeployName] = useState('');
+    const deployNameError = validMissionName(deployName);
     const deploying = uploadState != null && !isUploadFinished(uploadState);
 
     // Undo / redo history
@@ -509,7 +512,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
             return;
         }
         setUploadState(initialUploadState(targets));
-        const body = { ...buildMissionRequestBody(), geojson: features, vehicles: targets };
+        const body = { ...buildMissionRequestBody(), geojson: features, vehicles: targets, name: deployName };
         try {
             await streamUpload(getApiUrl('/api/deploy'), {
                 method: 'POST',
@@ -712,9 +715,15 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
             <Dialog header="Deploy mission" visible={deployDialogVisible} style={{ width: '28rem' }}
                 onHide={() => setDeployDialogVisible(false)}
                 footer={
-                    <Button label="Deploy" icon="pi pi-send" disabled={deployTargets.length === 0} onClick={handleDeploy} />
+                    <Button label="Deploy" icon="pi pi-send" disabled={deployTargets.length === 0 || deployNameError !== null} onClick={handleDeploy} />
                 }>
-                <label htmlFor="deploy-targets" className="block mb-2">Target vehicles</label>
+                <label htmlFor="deploy-name" className="block mb-2">Mission name</label>
+                <InputText id="deploy-name" className="w-full" value={deployName}
+                    onChange={e => setDeployName(e.target.value)}
+                    invalid={deployName !== '' && deployNameError !== null}
+                    placeholder="e.g. survey_north" />
+                {deployName !== '' && deployNameError && <small className="block mt-1 p-error">{deployNameError}</small>}
+                <label htmlFor="deploy-targets" className="block mt-3 mb-2">Target vehicles</label>
                 <MultiSelect id="deploy-targets" className="w-full" display="chip"
                     value={deployTargets}
                     options={vehicles.map(v => v.name)}

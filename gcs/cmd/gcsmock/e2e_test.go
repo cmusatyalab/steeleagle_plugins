@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
@@ -20,6 +21,14 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"encoding/binary"
+	"runtime"
+
+	vehiclepb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/vehicle"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 // These tests run the mock and the real GCS as processes. They need liburiel
@@ -61,13 +70,15 @@ type mockRun struct {
 	gcsIP, remoteIP string
 	// alpha and bravo are on the GCS's daemon, charlie on the other.
 	alpha, bravo, charlie string
+	// socket is the mock daemon's gRPC socket.
+	socket string
 }
 
 // startMock builds the mock if needed and starts it with the vehicles alpha
 // and bravo on the GCS's daemon and charlie on another, then waits for the
 // GCS to serve. noEncoderRemote leaves the other daemon
-// without an encoder. The mock is stopped when the test ends.
-func startMock(t *testing.T, noEncoderRemote bool) *mockRun {
+// without an encoder, and extra are more flags for the mock, where {remote} is the other daemon's IP. The mock is stopped when the test ends.
+func startMock(t *testing.T, noEncoderRemote bool, extra ...string) *mockRun {
 	t.Helper()
 	gcs, err := filepath.Abs("../../bin/gcs")
 	if err != nil {
@@ -113,11 +124,12 @@ func startMock(t *testing.T, noEncoderRemote bool) *mockRun {
 	port := freePort(t)
 	r.url = "http://127.0.0.1:" + strconv.Itoa(port)
 
+	r.socket = filepath.Join(t.TempDir(), "mock.sock")
 	args := []string{
 		"-gcs", gcs,
 		"-web", web,
 		"-http", "127.0.0.1:" + strconv.Itoa(port),
-		"-socket", filepath.Join(t.TempDir(), "mock.sock"),
+		"-socket", r.socket,
 		// Clips are generated per test (about 0.2 s each), since their names
 		// carry the per-test IPs
 		"-clips", t.TempDir(),
@@ -126,6 +138,9 @@ func startMock(t *testing.T, noEncoderRemote bool) *mockRun {
 	}
 	if noEncoderRemote {
 		args = append(args, "-no-encoder-daemons", r.remoteIP)
+	}
+	for _, e := range extra {
+		args = append(args, strings.ReplaceAll(e, "{remote}", r.remoteIP))
 	}
 	cmd := exec.Command(mockBinary.path, args...)
 	var output lockedBuffer
@@ -533,4 +548,132 @@ func TestMockNoEncoder(t *testing.T) {
 		}
 		return vs[r.alpha].GCSFlow == "ok", fmt.Sprintf("gcs_flow %q", vs[r.alpha].GCSFlow)
 	})
+}
+
+// fakeELF is a little-endian ELF64 header for machine, zero-padded to 64
+// bytes, with salt after it so builds can differ.
+func fakeELF(machine uint16, salt string) []byte {
+	b := make([]byte, 64)
+	copy(b, "\x7fELF")
+	b[4], b[5], b[6] = 2, 1, 1               // ELFCLASS64, ELFDATA2LSB, EV_CURRENT
+	binary.LittleEndian.PutUint16(b[16:], 2) // ET_EXEC
+	binary.LittleEndian.PutUint16(b[18:], machine)
+	return append(b, salt...)
+}
+
+const (
+	emX86_64  = 62
+	emAArch64 = 183
+)
+
+// upload posts the binary as the mission name to the vehicles, and returns
+// the streamed results by vehicle.
+func (r *mockRun) upload(name string, binary []byte, vehicles ...string) map[string]result {
+	r.t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("files", name)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	fw.Write(binary)
+	for _, v := range vehicles {
+		mw.WriteField("vehicles", v)
+	}
+	mw.WriteField("name", name)
+	mw.Close()
+	resp, err := http.Post(r.url+"/api/upload", mw.FormDataContentType(), &buf)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		r.t.Fatalf("POST /api/upload = %d %s", resp.StatusCode, data)
+	}
+	out := map[string]result{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev struct {
+			Type string `json:"type"`
+			result
+		}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			r.t.Fatalf("upload event %q: %v", line, err)
+		}
+		if ev.Type == "result" {
+			out[ev.Vehicle] = ev.result
+		}
+	}
+	return out
+}
+
+// activeMission returns the name of the vehicle's active mission in the mock
+// daemon, or "".
+func (r *mockRun) activeMission(vehicle string) string {
+	r.t.Helper()
+	conn, err := grpc.NewClient("unix://"+r.socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer conn.Close()
+	ctx := metadata.AppendToOutgoingContext(r.t.Context(), routeHeader, vehicle)
+	resp, err := vehiclepb.NewLoaderServiceClient(conn).GetMissions(ctx, &vehiclepb.GetMissionsRequest{})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return resp.GetActiveMission().GetName()
+}
+
+// startUploadMock starts a mock whose charlie daemon is arm64. The GCS's own
+// daemon takes the GCS binary's architecture, which the tests build for.
+func startUploadMock(t *testing.T) (*mockRun, uint16) {
+	t.Helper()
+	var machine uint16
+	switch runtime.GOARCH {
+	case "amd64":
+		machine = emX86_64
+	case "arm64":
+		machine = emAArch64
+	default:
+		t.Skipf("unsupported test machine architecture %s", runtime.GOARCH)
+	}
+	return startMock(t, false, "-daemon-arch", "{remote}=arm64"), machine
+}
+
+func TestE2EUploadLoads(t *testing.T) {
+	r, machine := startUploadMock(t)
+	res := r.upload("hover", fakeELF(machine, "v1"), r.alpha)
+	if got := res[r.alpha]; !got.Success {
+		t.Fatalf("alpha's upload: %+v", got)
+	}
+	if got := r.activeMission(r.alpha); got != "hover" {
+		t.Errorf("alpha's active mission = %q, want hover", got)
+	}
+}
+
+func TestE2EUploadSkipsSameHash(t *testing.T) {
+	r, machine := startUploadMock(t)
+	bin := fakeELF(machine, "v1")
+	if got := r.upload("hover", bin, r.alpha)[r.alpha]; !got.Success {
+		t.Fatalf("first upload: %+v", got)
+	}
+	got := r.upload("hover", bin, r.alpha)[r.alpha]
+	if !got.Success || got.Details != "identical mission already on vehicle; loaded without re-uploading" {
+		t.Errorf("second upload: %+v, want success with %q", got, "identical mission already on vehicle; loaded without re-uploading")
+	}
+}
+
+func TestE2EUploadNoBinaryForArch(t *testing.T) {
+	r, _ := startUploadMock(t)
+	// Charlie is arm64 and only an amd64 binary is sent
+	got := r.upload("hover", fakeELF(emX86_64, "v1"), r.charlie)[r.charlie]
+	if got.Success || got.Details != "no binary for arm64" {
+		t.Errorf("charlie's upload: %+v, want failure with %q", got, "no binary for arm64")
+	}
 }

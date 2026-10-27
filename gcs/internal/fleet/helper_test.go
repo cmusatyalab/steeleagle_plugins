@@ -26,11 +26,11 @@ type fakeDaemon struct {
 	vehiclepb.UnimplementedDataServiceServer
 
 	services []*daemonpb.Service
-	// unavailable are the remote daemons ListServices lists as unavailable.
-	unavailable []*daemonpb.Unavailable
-	telemetry   map[string]*telemetrypb.Telemetry // by vehicle
-	flows       map[string][]byte                 // by vehicle
-	block       map[string]bool
+	// remotes are the remote daemons ListServices lists, some with an error.
+	remotes   []*daemonpb.Daemon
+	telemetry map[string]*telemetrypb.Telemetry // by vehicle
+	flows     map[string][]byte                 // by vehicle
+	block     map[string]bool
 	// blockTelemetry is like block, but only for GetTelemetry.
 	blockTelemetry map[string]bool
 	listErr        error         // returned by ListServices when set
@@ -98,7 +98,7 @@ func (d *fakeDaemon) ListServices(context.Context, *daemonpb.ListServicesRequest
 	if d.listErr != nil {
 		return nil, d.listErr
 	}
-	return daemonpb.ListServicesResponse_builder{Services: d.services, Unavailable: d.unavailable}.Build(), nil
+	return daemonpb.ListServicesResponse_builder{Services: d.services, Remotes: d.remotes}.Build(), nil
 }
 
 func (d *fakeDaemon) GetFlow(ctx context.Context, _ *vehiclepb.GetFlowRequest) (*vehiclepb.GetFlowResponse, error) {

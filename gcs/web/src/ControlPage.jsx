@@ -5,12 +5,14 @@ import { ButtonGroup } from 'primereact/buttongroup';
 import { Tooltip } from 'primereact/tooltip';
 import { FileUpload } from 'primereact/fileupload';
 import { Dropdown } from 'primereact/dropdown';
+import { Dialog } from 'primereact/dialog';
+import { InputText } from 'primereact/inputtext';
 import React from 'react';
 import { getApiUrl } from './urls.js';
 import Mapbox from './Mapbox.jsx';
 import { toggleVehicleInSquad } from './squadUtils.js';
 import { STYLE_OPTIONS } from './mapStyles.js';
-import { streamUpload, initialUploadState, applyUploadEvent, isUploadFinished, finishUpload } from './missionUpload.js';
+import { streamUpload, initialUploadState, applyUploadEvent, isUploadFinished, finishUpload, validMissionName, defaultMissionName } from './missionUpload.js';
 import { displayName } from './vehicleNames.js';
 import { useVehicleVideo } from './useVehicleVideo.js';
 
@@ -41,9 +43,16 @@ function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, tracking, 
   const noVideoLabel = 'No video: the vehicle isn\'t sending video to the GCS (a mission dataflow may be active; Hold restores it)'
     + (gcsFlow.startsWith('no video:') || gcsFlow.startsWith('error:') ? ` (${gcsFlow})` : '');
   const [mapStyle, setMapStyle] = useState('streets');
+  // The last mission name used, kept as the next upload's default
+  const [missionName, setMissionName] = useState('');
+  // The FileUpload event waiting for its mission name, while the dialog is open
+  const [pendingUpload, setPendingUpload] = useState(null);
+  const missionNameError = validMissionName(missionName);
   const uploadInProgress = uploadState != null && !isUploadFinished(uploadState);
 
-  const uploadHandler = async (event) => {
+  // Asks for the mission name before uploading, prefilled with the last name
+  // or, the first time, the first file's name.
+  const uploadHandler = (event) => {
     if (uploadInProgress) {
       toast.current.show({ severity: 'warn', summary: 'Upload already in progress', detail: `Wait for the current mission upload to finish before starting another.` });
       return;
@@ -52,8 +61,17 @@ function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, tracking, 
       toast.current.show({ severity: 'warn', summary: 'No Vehicles in Squad', detail: `Please select at least one vehicle to control.` });
       return;
     }
+    setMissionName((name) => name || defaultMissionName(event.files[0]?.name ?? ''));
+    setPendingUpload(event);
+  };
+
+  const confirmUpload = async () => {
+    const event = pendingUpload;
+    setPendingUpload(null);
+    if (event == null || missionNameError) return;
     const targets = [...squadList];
     const form = new FormData();
+    form.append('name', missionName);
     for (const file of event.files) form.append('files', file);
     for (const vehicle of targets) form.append('vehicles', vehicle);
     setUploadState(initialUploadState(targets));
@@ -191,6 +209,20 @@ function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, tracking, 
         <div className="my-2" style={{ overflowX: 'auto' }}>
           <Toolbar className="w-full flex-nowrap" start={controlButtons} end={missonControls} />
         </div>
+        <Dialog header="Upload mission" visible={pendingUpload != null} style={{ width: '28rem' }}
+          onHide={() => setPendingUpload(null)}
+          footer={<Button label="Upload" icon="pi pi-cloud-upload" disabled={missionNameError !== null} onClick={confirmUpload} />}>
+          <label htmlFor="upload-name" className="block mb-2">Mission name</label>
+          <InputText id="upload-name" className="w-full" value={missionName} autoFocus
+            onChange={(e) => setMissionName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && missionNameError === null) confirmUpload(); }}
+            invalid={missionName !== '' && missionNameError !== null}
+            placeholder="e.g. survey_north" />
+          {missionName !== '' && missionNameError && <small className="block mt-1 p-error">{missionNameError}</small>}
+          <div className="mt-3">
+            Upload {pendingUpload?.files?.map((f) => f.name).join(', ')} to {squadList?.map(displayName).join(', ')}
+          </div>
+        </Dialog>
       </div>
     </div>
   );

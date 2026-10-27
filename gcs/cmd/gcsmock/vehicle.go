@@ -206,6 +206,13 @@ func (v *Vehicle) StopMission() (wasRunning bool) {
 	return wasRunning
 }
 
+// MissionRunning reports whether the pattern is running.
+func (v *Vehicle) MissionRunning() bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.missionRunning
+}
+
 // control disarms the dead man's switch. Callers hold v.mu.
 func (v *Vehicle) control() {
 	v.dmsArmed = false

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
     splitNdjson, readNdjson, streamUpload, initialUploadState,
     applyUploadEvent, isUploadFinished, progressPercent, finishUpload,
+    validMissionName, defaultMissionName,
 } from './missionUpload.js';
 
 const streamOf = (...parts) => new Response(new ReadableStream({
@@ -112,5 +113,34 @@ describe('finishUpload', () => {
         let s = initialUploadState(['d1']);
         s = applyUploadEvent(s, { type: 'error', detail: 'Build failed' });
         expect(finishUpload(s)).toBe(s);
+    });
+});
+
+describe('validMissionName', () => {
+    const message = "mission name must be 1-64 letters, digits, '_', '-' or '.', not starting with '.'";
+
+    it('accepts names the rule allows', () => {
+        for (const ok of ['survey_north', 'a', 'm-1.v2', 'a'.repeat(64)]) {
+            expect(validMissionName(ok), ok).toBeNull();
+        }
+    });
+
+    it('rejects the rest with the rule message', () => {
+        for (const bad of ['', '.hidden', 'a b', 'a/b', '..', 'a'.repeat(65), 'é', undefined]) {
+            expect(validMissionName(bad), String(bad)).toBe(message);
+        }
+    });
+});
+
+describe('defaultMissionName', () => {
+    it('drops the extension and replaces disallowed characters', () => {
+        expect(defaultMissionName('mission-arm64.bin')).toBe('mission-arm64');
+        expect(defaultMissionName('my mission.dslb')).toBe('my_mission');
+    });
+
+    it('gives a valid name or nothing', () => {
+        expect(validMissionName(defaultMissionName('.hidden.bin'))).toBeNull();
+        expect(defaultMissionName('a'.repeat(80) + '.bin').length).toBe(64);
+        expect(defaultMissionName('')).toBe('');
     });
 });

@@ -188,8 +188,8 @@ func TestVehiclesFlowStatus(t *testing.T) {
 // gone.
 func unavailable(d *fakeDaemon) {
 	d.services = []*daemonpb.Service{}
-	d.unavailable = []*daemonpb.Unavailable{
-		daemonpb.Unavailable_builder{Ip: "100.64.1.5", Hostname: "swap03", Reason: "connection refused"}.Build(),
+	d.remotes = []*daemonpb.Daemon{
+		daemonpb.Daemon_builder{Ip: "100.64.1.5", Hostname: "swap03", Error: "connection refused"}.Build(),
 	}
 }
 
@@ -218,7 +218,7 @@ func TestVehiclesDaemonUnavailable(t *testing.T) {
 	}
 
 	// The daemon is gone entirely: its vehicles are dropped
-	d.unavailable = nil
+	d.remotes = nil
 	_, out, _ = getVehicles(t, h)
 	if len(out) != 0 {
 		t.Errorf("out %+v, want no vehicles", out)
@@ -238,7 +238,7 @@ func TestVehiclesDaemonBackWithoutVehicle(t *testing.T) {
 	unavailable(d)
 	getVehicles(t, h)
 	// The daemon is back, running only v1: v2 is dropped
-	d.unavailable = nil
+	d.remotes = nil
 	d.services = []*daemonpb.Service{
 		service(v1, daemonpb.ServiceCategory_SERVICE_CATEGORY_VEHICLE, "quadcopter", driverConfig, true),
 	}
@@ -266,7 +266,7 @@ func TestVehiclesLogsUnavailableOnce(t *testing.T) {
 		t.Errorf("log %q lacks the daemon's IP and hostname", logs)
 	}
 	// A new reason is logged again
-	d.unavailable[0].SetReason("timed out")
+	d.remotes[0].SetError("timed out")
 	getVehicles(t, h)
 	if n := strings.Count(buf.String(), "timed out"); n != 1 {
 		t.Errorf("logged the new reason %d times, want once:\n%s", n, buf.String())

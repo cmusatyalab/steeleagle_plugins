@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/control"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/rtc"
 	"github.com/rs/zerolog"
 )
@@ -68,7 +70,7 @@ func TestHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, web, zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), web, zerolog.Nop()))
 	defer server.Close()
 
 	for path, want := range map[string]string{
@@ -117,7 +119,7 @@ func TestHandlerWithoutWeb(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/streams")
 	if err != nil {
@@ -137,7 +139,7 @@ func TestHandlerWithoutDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/remote/vehicles")
 	if err != nil {
@@ -147,5 +149,78 @@ func TestHandlerWithoutDaemon(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), `{"detail":"the GCS has no connection to the daemon"}`) {
 		t.Errorf("GET /api/remote/vehicles = %d %q, want 503 and the detail", resp.StatusCode, body)
+	}
+}
+
+// testMissions returns mission routes for a GCS with no daemon and an
+// unavailable compiler.
+func testMissions() missionRoutes {
+	svc := mission.NewService(unavailableCompiler{errors.New("no go")}, mission.CompilerConfig{}, zerolog.Nop())
+	return missionRoutes{svc: svc, upload: noDaemonHandler(), deploy: noDaemonHandler()}
+}
+
+// TestParseArgsCompiler ensures that the compiler's config is read from the
+// plugin args.
+func TestParseArgsCompiler(t *testing.T) {
+	a, err := parseArgs(`{"compiler":{"timeout_s":60,"imports":[{"path":"x/y"}]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Compiler.TimeoutS != 60 || len(a.Compiler.Imports) != 1 || a.Compiler.Imports[0].Path != "x/y" {
+		t.Errorf("Compiler = %+v, want timeout_s 60 and import x/y", a.Compiler)
+	}
+}
+
+// TestNoDaemonMissionRoutes ensures that uploading and deploying say when the
+// GCS has no connection to the daemon.
+func TestNoDaemonMissionRoutes(t *testing.T) {
+	hub, err := rtc.NewHub(rtc.Options{}, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	defer server.Close()
+	for _, path := range []string{"/api/upload", "/api/deploy"} {
+		resp, err := http.Post(server.URL+path, "application/json", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "the GCS has no connection to the daemon") {
+			t.Errorf("POST %s = %d %q, want 503 and the detail", path, resp.StatusCode, body)
+		}
+	}
+}
+
+// TestCompilerRoutesRegistered ensures that the compiler routes are served
+// even when the compiler is unavailable, and say why.
+func TestCompilerRoutesRegistered(t *testing.T) {
+	hub, err := rtc.NewHub(rtc.Options{}, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	defer server.Close()
+	resp, err := http.Get(server.URL + "/api/schema")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "FSM compiler unavailable: no go") {
+		t.Errorf("GET /api/schema = %d %q, want 503 and the reason", resp.StatusCode, body)
+	}
+	for _, path := range []string{"/api/compile", "/api/render_dsl", "/api/parse_dsl", "/api/build"} {
+		resp, err := http.Post(server.URL+path, "application/json", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			t.Errorf("POST %s = 404, want it registered", path)
+		}
 	}
 }

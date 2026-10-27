@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"slices"
 	"sync"
@@ -305,5 +307,172 @@ func TestGetTelemetry(t *testing.T) {
 	want := h.vehicles[bravoName].Telemetry(time.Now()).GetPositionInfo().GetGlobalPosition().GetLatitude()
 	if got := resp.GetTelemetry()[0].GetPositionInfo().GetGlobalPosition().GetLatitude(); got != want {
 		t.Errorf("lat = %v, want %v", got, want)
+	}
+}
+
+func upload(t *testing.T, h *harness, vehicle, name string, chunks ...string) error {
+	t.Helper()
+	stream, err := vehiclepb.NewLoaderServiceClient(h.conn).UploadMission(routed(vehicle))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, c := range chunks {
+		err := stream.Send(vehiclepb.UploadMissionRequest_builder{
+			Filename: name, Chunk: []byte(c), Number: int32(i + 1), Total: int32(len(chunks)),
+		}.Build())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ack, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+		if ack.GetReceived() != int32(i+1) {
+			t.Fatalf("ack %d, want %d", ack.GetReceived(), i+1)
+		}
+	}
+	return stream.CloseSend()
+}
+
+func getMissions(t *testing.T, h *harness, vehicle string) *vehiclepb.GetMissionsResponse {
+	t.Helper()
+	resp, err := vehiclepb.NewLoaderServiceClient(h.conn).GetMissions(routed(vehicle), &vehiclepb.GetMissionsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestLoaderUploadThenGetMissions(t *testing.T) {
+	h := newHarness(t)
+	if err := upload(t, h, alphaName, "m1", "he", "llo"); err != nil {
+		t.Fatal(err)
+	}
+	resp := getMissions(t, h, alphaName)
+	if len(resp.GetMissions()) != 1 {
+		t.Fatalf("missions = %v", resp.GetMissions())
+	}
+	m := resp.GetMissions()[0]
+	sum := sha256.Sum256([]byte("hello"))
+	if m.GetName() != "m1" || m.GetHash() != hex.EncodeToString(sum[:]) || m.GetCreationTime().AsTime().IsZero() {
+		t.Errorf("mission = %v", m)
+	}
+	if resp.HasActiveMission() {
+		t.Error("nothing is loaded yet")
+	}
+	if got := getMissions(t, h, bravoName).GetMissions(); len(got) != 0 {
+		t.Errorf("bravo has %v", got)
+	}
+}
+
+func TestLoaderUploadReplacesSameName(t *testing.T) {
+	h := newHarness(t)
+	for _, c := range []string{"one", "two"} {
+		if err := upload(t, h, alphaName, "m1", c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ms := getMissions(t, h, alphaName).GetMissions()
+	sum := sha256.Sum256([]byte("two"))
+	if len(ms) != 1 || ms[0].GetHash() != hex.EncodeToString(sum[:]) {
+		t.Errorf("missions = %v", ms)
+	}
+}
+
+func TestLoaderLoadSetsActive(t *testing.T) {
+	h := newHarness(t)
+	upload(t, h, alphaName, "m1", "x")
+	if _, err := vehiclepb.NewLoaderServiceClient(h.conn).LoadMission(routed(alphaName),
+		vehiclepb.LoadMissionRequest_builder{Name: "m1"}.Build()); err != nil {
+		t.Fatal(err)
+	}
+	if a := getMissions(t, h, alphaName).GetActiveMission(); a.GetName() != "m1" {
+		t.Errorf("active = %v", a)
+	}
+}
+
+func TestLoaderLoadRefusedWhileMissionRunning(t *testing.T) {
+	h := newHarness(t)
+	upload(t, h, alphaName, "m1", "x")
+	if _, err := missionpb.NewMissionServiceClient(h.conn).StartMission(routed(alphaName), &missionpb.StartMissionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := vehiclepb.NewLoaderServiceClient(h.conn).LoadMission(routed(alphaName),
+		vehiclepb.LoadMissionRequest_builder{Name: "m1"}.Build())
+	if status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != "cannot load a mission while one is running" {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestLoaderLoadMissingIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	_, err := vehiclepb.NewLoaderServiceClient(h.conn).LoadMission(routed(alphaName),
+		vehiclepb.LoadMissionRequest_builder{Name: "nope"}.Build())
+	if status.Code(err) != codes.NotFound {
+		t.Errorf("err = %v", err)
+	}
+	_, err = vehiclepb.NewLoaderServiceClient(h.conn).LoadMission(routed(alphaName),
+		vehiclepb.LoadMissionRequest_builder{Name: "../x"}.Build())
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("bad name: err = %v", err)
+	}
+}
+
+func TestLoaderRejectsBadChunkNumbering(t *testing.T) {
+	h := newHarness(t)
+	stream, err := vehiclepb.NewLoaderServiceClient(h.conn).UploadMission(routed(alphaName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream.Send(vehiclepb.UploadMissionRequest_builder{Filename: "m1", Chunk: []byte("a"), Number: 2, Total: 2}.Build())
+	_, err = stream.Recv()
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("err = %v", err)
+	}
+	if got := getMissions(t, h, alphaName).GetMissions(); len(got) != 0 {
+		t.Errorf("a failed transfer left %v", got)
+	}
+}
+
+func TestListServicesRemotes(t *testing.T) {
+	h := newHarness(t)
+	resp, err := daemonpb.NewDaemonServiceClient(h.conn).ListServices(context.Background(), &daemonpb.ListServicesRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]*daemonpb.Daemon{}
+	for _, r := range resp.GetRemotes() {
+		got[r.GetIp()] = r
+	}
+	// The harness's GCS is on 100.64.0.9, which has no vehicles
+	if len(got) != 3 {
+		t.Fatalf("got remotes %v, want the 3 vehicle daemons", resp.GetRemotes())
+	}
+	for _, ip := range []string{"100.64.0.1", "100.64.0.2", "100.64.0.3"} {
+		r := got[ip]
+		if r == nil || r.GetArch() != "amd64" || r.GetOs() != "linux" || r.GetHostname() != "mock-"+ip {
+			t.Errorf("remote %s = %v", ip, r)
+		}
+	}
+}
+
+func TestListServicesRemotesArchAndGCSExcluded(t *testing.T) {
+	top := Topology{
+		GCSIP:    "100.64.0.1",
+		Vehicles: []string{alphaName, bravoName, charlieName},
+		Archs:    map[string]string{"100.64.0.3": "arm64"},
+	}
+	d := NewDaemon(top, nil, &recordingFlows{}, zerolog.Nop())
+	resp, err := d.ListServices(context.Background(), &daemonpb.ListServicesRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range resp.GetRemotes() {
+		got[r.GetIp()] = r.GetArch()
+	}
+	want := map[string]string{"100.64.0.2": "amd64", "100.64.0.3": "arm64"}
+	if len(got) != len(want) || got["100.64.0.2"] != "amd64" || got["100.64.0.3"] != "arm64" {
+		t.Errorf("remotes = %v, want %v (the GCS's own daemon is never listed)", got, want)
 	}
 }

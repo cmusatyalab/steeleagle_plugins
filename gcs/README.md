@@ -24,7 +24,7 @@ http_addr = ":8002"
 The daemon passes the plugin args in `STEELEAGLE_PLUGIN_ARGS`, the service's
 Uriel engine name in `ICEORYX_SERVICE`, and its socket in `CLIENT_SOCKET`. See
 `config/examples/config.toml` and `gcs.plugin.toml` (args: `http_addr`,
-`ice_servers`, `webrtc_ports`, `max_input_size`).
+`ice_servers`, `webrtc_ports`, `max_input_size`, `compiler`).
 
 ### Encoder service
 
@@ -42,6 +42,34 @@ GCS path. Without those edges the GCS shows no video (and gets no telemetry over
 the WebRTC data channel) until the vehicle is put on hold, which restores the GCS
 flow. The vehicle list is unaffected: it reads telemetry from the daemon,
 independently of the flow.
+
+## Missions
+
+The GCS compiles missions (`/api/schema`, `compile`, `render_dsl`, `parse_dsl`,
+`build`) and uploads or deploys them to vehicles through the daemon (`/api/upload`,
+`/api/deploy`, which need a daemon socket). Compiling is configured by the
+`compiler` plugin arg:
+
+```toml
+[services.plugin.args.compiler]
+timeout_s = 120
+modules = [{ path = "example.com/mymodule", version = "v1.0.0" }]
+imports = [{ path = "example.com/mymodule/actions", alias = "myactions" }]
+```
+
+- `modules`: extra Go modules to build missions with (`path`, `version`, and an
+  optional `override` of the module's location);
+- `imports`: packages whose actions and events missions may use (`path`, and an
+  optional `alias`);
+- `timeout_s`: how long one compile may take;
+- `sdk_version`: the steeleagle SDK version missions are built against.
+
+Compiling runs `go build`, so the first build needs network access (`GOPROXY`)
+or a warm Go module cache. If the config is invalid, or the compiler can't
+start, the server still runs and the compiler routes answer 503 with the reason.
+
+The end-to-end compiler test is opt-in: `GCS_COMPILER_E2E=1 pixi run go test
+./internal/mission/` builds a real mission, which needs the same access.
 
 ## Pixi tasks
 
@@ -89,6 +117,7 @@ Flags (`./bin/gcsmock -h`; `pixi run mock` passes `-gcs` and `-web`):
 | `-gcs-ip` | `100.64.0.1` | the IP of the GCS's daemon |
 | `-vehicles` | `100.64.0.1.alpha,100.64.0.1.bravo,100.64.0.2.charlie` | vehicle names: each a daemon IP, a dot and a name |
 | `-no-encoder-daemons` | none | daemon IPs without an `h264_encoder` |
+| `-daemon-arch` | `amd64` for every daemon | `ip=arch[,ip=arch]` (`amd64` or `arm64`): the architecture a daemon reports. Only daemons other than `-gcs-ip` are reported as remotes, as with real eagled. E.g. `-daemon-arch 100.64.0.2=arm64` tests "no binary for arm64" |
 
 Uriel names are shared by every process on the machine, so two mocks (or a mock
 and a real daemon) running at once need different `-gcs-ip`, `-vehicles` and
