@@ -59,9 +59,10 @@ type harness struct {
 	conn     *grpc.ClientConn
 	vehicles map[string]*Vehicle
 	flows    *recordingFlows
+	d        *Daemon
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T, tweaks ...func(*Topology)) *harness {
 	t.Helper()
 	names := []string{alphaName, bravoName, charlieName}
 	vehicles := map[string]*Vehicle{}
@@ -73,6 +74,9 @@ func newHarness(t *testing.T) *harness {
 		GCSIP:          "100.64.0.9",
 		Vehicles:       names,
 		EncoderDaemons: map[string]bool{"100.64.0.1": true, "100.64.0.3": true},
+	}
+	for _, tweak := range tweaks {
+		tweak(&top)
 	}
 	d := NewDaemon(top, vehicles, flows, zerolog.Nop())
 	ln := bufconn.Listen(1 << 20)
@@ -87,7 +91,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	return &harness{conn, vehicles, flows}
+	return &harness{conn, vehicles, flows, d}
 }
 
 func routed(key string) context.Context {

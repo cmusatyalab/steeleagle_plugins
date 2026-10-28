@@ -15,8 +15,9 @@ require (
 	google.golang.org/protobuf v1.36.12
 )
 
+require github.com/BurntSushi/toml v1.6.0
+
 require (
-	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/alecthomas/participle/v2 v2.1.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect

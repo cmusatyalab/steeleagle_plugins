@@ -50,7 +50,10 @@ function PluginsTab({ daemon, toast, onRestarted }) {
     return (
         <DataTable
             value={daemon.services}
-            emptyMessage={daemon.error ? `Daemon is unavailable: ${daemon.error}` : 'This daemon runs no services.'}
+            emptyMessage={{
+                services_failed: `This daemon's services failed to start: ${daemon.error}. Fix its config with Configure.`,
+                unreachable: `Daemon is unavailable: ${daemon.error}`,
+            }[daemon.state] ?? 'This daemon runs no services.'}
             size="small"
             dataKey="name"
             sortField="bare"

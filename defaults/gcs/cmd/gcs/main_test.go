@@ -15,6 +15,7 @@ import (
 
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/control"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/daemons"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/rtc"
 	"github.com/rs/zerolog"
@@ -221,7 +222,8 @@ func TestNoDaemonMissionRoutes(t *testing.T) {
 			t.Errorf("POST %s = %d %q, want 503 and the detail", path, resp.StatusCode, body)
 		}
 	}
-	for _, req := range [][2]string{{"GET", "/api/daemons"}, {"POST", "/api/daemons/restart_service"}} {
+	for _, pattern := range daemons.Patterns {
+		req := strings.SplitN(pattern, " ", 2)
 		r, _ := http.NewRequest(req[0], server.URL+req[1], strings.NewReader("{}"))
 		resp, err := http.DefaultClient.Do(r)
 		if err != nil {
@@ -354,5 +356,5 @@ func TestDaemonHostname(t *testing.T) {
 }
 
 func testDaemons() daemonRoutes {
-	return daemonRoutes{list: noDaemonHandler(), restart: noDaemonHandler()}
+	return noDaemonRoutes()
 }

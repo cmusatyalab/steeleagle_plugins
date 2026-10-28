@@ -61,6 +61,7 @@ type options struct {
 	vehicles                      []string
 	noEncoder                     map[string]bool
 	noYolo                        map[string]bool
+	denyConfig                    map[string]bool
 	archs                         map[string]string // daemon IP -> architecture
 }
 
@@ -104,6 +105,7 @@ func parseFlags(args []string) (options, error) {
 		"comma-separated vehicle names, each its daemon's IP, a dot and its own name")
 	noEncoder := fs.String("no-encoder-daemons", "", "comma-separated IPs of daemons without an h264_encoder")
 	noYolo := fs.String("no-yolo-daemons", "", "comma-separated IPs of daemons without a yolo engine")
+	denyConfig := fs.String("deny-config-daemons", "", "comma-separated IPs of daemons that refuse config, restart and package changes with PermissionDenied")
 	archs := fs.String("daemon-arch", "",
 		"comma-separated ip=arch entries (amd64 or arm64) for daemon architectures; others are amd64")
 	if err := fs.Parse(args); err != nil {
@@ -129,6 +131,10 @@ func parseFlags(args []string) (options, error) {
 	o.noEncoder = map[string]bool{}
 	for _, ip := range splitList(*noEncoder) {
 		o.noEncoder[ip] = true
+	}
+	o.denyConfig = map[string]bool{}
+	for _, ip := range splitList(*denyConfig) {
+		o.denyConfig[ip] = true
 	}
 	o.noYolo = map[string]bool{}
 	for _, ip := range splitList(*noYolo) {
@@ -158,7 +164,7 @@ func splitList(s string) []string {
 // topology returns the names the daemon lists: an encoder and a yolo engine
 // on each vehicle daemon that isn't excluded.
 func (o options) topology() Topology {
-	top := Topology{GCSIP: o.gcsIP, Vehicles: o.vehicles, EncoderDaemons: map[string]bool{}, Archs: o.archs, YoloDaemons: map[string]bool{}}
+	top := Topology{GCSIP: o.gcsIP, Vehicles: o.vehicles, EncoderDaemons: map[string]bool{}, Archs: o.archs, YoloDaemons: map[string]bool{}, DenyConfig: o.denyConfig}
 	for _, ip := range o.daemonIPs() {
 		if !o.noEncoder[ip] {
 			top.EncoderDaemons[ip] = true

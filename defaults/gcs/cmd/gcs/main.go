@@ -197,10 +197,10 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 		missions.catalog = http.HandlerFunc(flows.NewCatalogHandler(daemonpb.NewDaemonServiceClient(conn), gcsIP, gcsHostname).ServeCatalog)
 	}
 
-	daemonsRoutes := daemonRoutes{list: noDaemonHandler(), restart: noDaemonHandler()}
+	daemonsRoutes := noDaemonRoutes()
 	if conn != nil {
 		h := daemons.NewHandler(daemonpb.NewDaemonServiceClient(conn), daemons.Self{IP: gcsIP, Hostname: gcsHostname, Arch: runtime.GOARCH, OS: runtime.GOOS, Engine: engine}, log)
-		daemonsRoutes = daemonRoutes{list: http.HandlerFunc(h.ServeList), restart: http.HandlerFunc(h.ServeRestart)}
+		daemonsRoutes = h.Routes()
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -343,8 +343,15 @@ type missionRoutes struct {
 }
 
 // daemonRoutes are the Orchestrate page's routes.
-type daemonRoutes struct {
-	list, restart http.Handler
+type daemonRoutes map[string]http.Handler
+
+// noDaemonRoutes answers every daemon route with 503.
+func noDaemonRoutes() daemonRoutes {
+	routes := daemonRoutes{}
+	for _, p := range daemons.Patterns {
+		routes[p] = noDaemonHandler()
+	}
+	return routes
 }
 
 // uiConfig is the web UI's settings from the plugin's args, served at
@@ -378,8 +385,9 @@ func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Hand
 	mux.Handle("POST /api/deploy", missions.deploy)
 	mux.Handle("GET /api/flows/catalog", missions.catalog)
 	mux.HandleFunc("POST /api/flows/from_toml", flows.ServeFromTOML)
-	mux.Handle("GET /api/daemons", orchestration.list)
-	mux.Handle("POST /api/daemons/restart_service", orchestration.restart)
+	for pattern, h := range orchestration {
+		mux.Handle(pattern, h)
+	}
 	mux.HandleFunc("/api/", http.NotFound)
 	if _, err := os.Stat(filepath.Join(web, "index.html")); err != nil {
 		log.Warn().Err(err).Str("web", web).Msg("no web UI to serve; serving only the API")

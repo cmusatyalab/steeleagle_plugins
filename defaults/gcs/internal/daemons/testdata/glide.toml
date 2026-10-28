@@ -1,0 +1,32 @@
+[daemon]
+  port = 9000
+  lcs = 9001
+  hostname = "glide"
+  cert = ""
+
+[simulator]
+  package = "https://github.com/cmusatyalab/steeleagle_plugins//simulator@v4_backend_rework"
+
+[[services]]
+  name = "decoder"
+  type = "engine"
+  [services.plugin]
+    plugin = "decoder"
+    package = "https://github.com/cmusatyalab/steeleagle_plugins//defaults/h264@v4_backend_rework"
+
+[[services]]
+  name = "encoder"
+  type = "engine"
+  [services.plugin]
+    plugin = "encoder"
+    package = "https://github.com/cmusatyalab/steeleagle_plugins//defaults/h264@v4_backend_rework"
+
+[[services]]
+  name = "gcs"
+  type = "engine"
+  auth = "admin"
+  [services.plugin]
+    plugin = "gcs"
+    package = "https://github.com/cmusatyalab/steeleagle_plugins//defaults/gcs@v4_backend_rework"
+  [services.plugin.args]
+    mapbox = "pk.test"

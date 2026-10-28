@@ -1,320 +1,343 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Dialog } from 'primereact/dialog';
 import { Button } from 'primereact/button';
-import { Dropdown } from 'primereact/dropdown';
+import { Checkbox } from 'primereact/checkbox';
 import { InputNumber } from 'primereact/inputnumber';
 import { InputText } from 'primereact/inputtext';
 import { InputTextarea } from 'primereact/inputtextarea';
 import { Message } from 'primereact/message';
 import { SelectButton } from 'primereact/selectbutton';
 import { TabPanel, TabView } from 'primereact/tabview';
-import { confirmDialog } from 'primereact/confirmdialog';
-import InstanceEditor from './InstanceEditor.jsx';
-import { daemonRequest, describeFailure, query } from './daemonApi.js';
+import KeyValueEditor from './KeyValueEditor.jsx';
+import ServiceEditor from './ServiceEditor.jsx';
+import { applyConfig, checkConfig, convertConfig, daemonName, fetchConfig, fetchPackages } from './daemonsApi.js';
 import {
-    CATEGORIES,
-    CATEGORY_LABELS,
-    SETTINGS,
-    duplicateInstance,
+    applyOutcome,
+    duplicateService,
     formToState,
+    guards,
     hasErrors,
-    newInstance,
+    newService,
+    restartWarning,
     stateToForm,
 } from './configForm.js';
 
 const MODES = [{ label: 'Form', value: 'form' }, { label: 'Raw TOML', value: 'raw' }];
-const BOOLEAN_OPTIONS = [{ label: 'Not set', value: null }, { label: 'Yes', value: true }, { label: 'No', value: false }];
-const NO_ERRORS = { settings: {}, instances: {} };
+const DAEMON_FIELDS = [
+    { key: 'hostname', label: 'Hostname', type: 'text' },
+    { key: 'port', label: 'Port', type: 'port' },
+    { key: 'lcs', label: 'LCS port', type: 'port' },
+    { key: 'orchestrator', label: 'Orchestrator', type: 'text', placeholder: 'host:port; empty for none' },
+    { key: 'cert', label: 'Cert', type: 'text' },
+];
 
 // Edits a daemon's whole config and applies it with Configure, which
 // replaces the config and restarts the daemon and every service it runs.
-// The Form and Raw TOML views convert through /api/daemons/config/convert;
-// the form is merged into the raw text it came from (`baseRaw`), so
-// comments and anything the form doesn't show survive. Saves carry the
-// config_hash read at load, so a concurrent change is a conflict, not an
-// overwrite. `focus` ({ category, name }) opens on that service's tab with
-// its card expanded.
-function ConfigureDialog({ daemon, focus, onHide, onDone }) {
+// The form's plugin args come from the daemon's installed packages. Apply
+// checks the config first (validation, packages the daemon lacks), then asks
+// for confirmation with the restart warning. The load's config_hash makes a
+// concurrent change a conflict rather than an overwrite.
+function ConfigureDialog({ daemon, onHide, onApplied }) {
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState(null);
     const [notice, setNotice] = useState(null);
-    const [configHash, setConfigHash] = useState(null);
+    const [loaded, setLoaded] = useState(null); // {configHash, own, selfService, original}
+    const [packages, setPackages] = useState([]);
     const [mode, setMode] = useState('form');
     const [state, setState] = useState(null);
     const [raw, setRaw] = useState('');
-    const [baseRaw, setBaseRaw] = useState('');
     const [expanded, setExpanded] = useState(() => new Set());
-    const [tab, setTab] = useState(0);
-    const tabsRef = useRef(null);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState(null);
+    const [errorList, setErrorList] = useState(null);
     const [conflict, setConflict] = useState(false);
     const [showErrors, setShowErrors] = useState(false);
+    // The confirmation step: the check's result and the guards' confirmations
+    const [confirm, setConfirm] = useState(null);
+    const [ticked, setTicked] = useState(() => new Set());
+
+    const name = daemonName(daemon);
 
     const load = useCallback(async () => {
         setLoading(true);
         setLoadError(null);
         setNotice(null);
         setError(null);
+        setErrorList(null);
         setConflict(false);
         setShowErrors(false);
-        const res = await daemonRequest('GET', `/api/daemons/config?${query({ address: daemon.address })}`);
-        if (res.body?.raw_toml == null) {
-            setLoadError(describeFailure(res) ?? 'Could not load the config');
-            setLoading(false);
+        setConfirm(null);
+        const [cfg, pkgs] = await Promise.all([fetchConfig(daemon.ip), fetchPackages(daemon.ip)]);
+        setLoading(false);
+        if (cfg.error) {
+            setLoadError(cfg.error);
             return;
         }
-        setConfigHash(res.body.config_hash);
-        setRaw(res.body.raw_toml);
-        setBaseRaw(res.body.raw_toml);
-        let open = new Set();
-        if (res.body.form) {
-            const loaded = formToState(res.body.form);
-            setState(loaded);
+        const list = pkgs.packages ?? [];
+        setPackages(list);
+        const notices = [];
+        if (pkgs.error) notices.push(`Couldn't list this daemon's packages (${pkgs.error}); plugin args show as free-form rows.`);
+        const { config } = cfg;
+        setRaw(config.raw_toml);
+        if (config.form) {
+            setState(formToState(config.form, list));
             setMode('form');
-            const target = focus && loaded.instances[focus.category]?.find((i) => i.name === focus.name);
-            if (target) {
-                open = new Set([target.key]);
-                setTab(CATEGORIES.indexOf(focus.category) + 1);
-            }
         } else {
-            // A config the form can't represent opens in Raw TOML for repair.
             setState(null);
             setMode('raw');
-            setNotice(res.body.error);
+            notices.push(`This config can't be shown as a form (${config.form_error}); edit it as raw TOML.`);
         }
-        setExpanded(open);
-        setLoading(false);
-    }, [daemon.address, focus]);
+        setLoaded({
+            configHash: config.config_hash,
+            own: config.own,
+            selfService: config.self_service,
+            original: config.form ? formToState(config.form, list) : null,
+        });
+        setNotice(notices.length ? notices.join(' ') : null);
+    }, [daemon.ip]);
 
-    // The tab strip scrolls, and doesn't follow a tab chosen in code (opening
-    // on a focused service's category), so bring the active tab into view.
-    useEffect(() => {
-        tabsRef.current?.querySelector('.p-tabview-nav li.p-highlight')
-            ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    }, [tab, mode, loading]);
-
-    // Loading the config from the daemon is the effect's whole job; the
-    // setState calls inside load() are the intended sync, not a cascade.
     useEffect(() => {
         // eslint-disable-next-line react-hooks/set-state-in-effect
         load();
     }, [load]);
 
-    const { form, errors } = state ? stateToForm(state) : { form: null, errors: NO_ERRORS };
-    const shownErrors = showErrors ? errors : NO_ERRORS;
-
-    const setSetting = (key, value) => setState((s) => ({ ...s, settings: { ...s.settings, [key]: value } }));
-    const updateInstance = (category, key, patch) => setState((s) => ({
-        ...s,
-        instances: { ...s.instances, [category]: s.instances[category].map((i) => (i.key === key ? { ...i, ...patch } : i)) },
-    }));
-    const insertInstance = (category, inst, afterKey) => {
-        setState((s) => {
-            const list = [...s.instances[category]];
-            const at = afterKey ? list.findIndex((i) => i.key === afterKey) + 1 : list.length;
-            list.splice(at, 0, inst);
-            return { ...s, instances: { ...s.instances, [category]: list } };
-        });
-        setExpanded((e) => new Set(e).add(inst.key));
-    };
-    const removeInstance = (category, key) => setState((s) => ({
-        ...s,
-        instances: { ...s.instances, [category]: s.instances[category].filter((i) => i.key !== key) },
-    }));
-    const toggle = (key) => setExpanded((e) => {
-        const next = new Set(e);
-        if (next.has(key)) next.delete(key);
-        else next.add(key);
-        return next;
-    });
+    const { form, errors } = state ? stateToForm(state) : { form: null, errors: {} };
+    const shown = showErrors ? errors : {};
+    const guard = state && loaded?.original
+        ? guards(state, loaded.original, { own: loaded.own, selfService: loaded.selfService, host: name })
+        : { confirmations: [], fieldWarnings: {} };
 
     const switchMode = async (next) => {
         if (!next || next === mode) return;
         setError(null);
+        setBusy(true);
         if (next === 'raw') {
             if (hasErrors(errors)) {
                 setShowErrors(true);
-                setError('Fix the highlighted fields first.');
+                setError('Fix the errors in the form first.');
+                setBusy(false);
                 return;
             }
-            const res = await daemonRequest('POST', '/api/daemons/config/convert', { to: 'raw', form, base_toml: baseRaw });
-            const failure = describeFailure(res);
-            if (failure) {
-                setError(failure);
-                return;
+            const { result, error: err } = await convertConfig({ to: 'raw', form });
+            if (err) setError(err);
+            else {
+                setRaw(result.raw_toml);
+                setMode('raw');
             }
-            setRaw(res.body.raw_toml);
         } else {
-            const res = await daemonRequest('POST', '/api/daemons/config/convert', { to: 'form', raw_toml: raw });
-            const failure = describeFailure(res);
-            if (failure) {
-                setError(failure);
-                return;
+            const { result, error: err } = await convertConfig({ to: 'form', raw_toml: raw });
+            if (err) setError(err);
+            else {
+                setState(formToState(result.form, packages));
+                setMode('form');
             }
-            setState(formToState(res.body.form));
-            setBaseRaw(raw);
-            setExpanded(new Set());
-            setNotice(null);
         }
-        setMode(next);
-    };
-
-    const apply = async (payload) => {
-        setBusy(true);
-        const res = await daemonRequest('PUT', '/api/daemons/config', { address: daemon.address, config_hash: configHash, ...payload });
         setBusy(false);
-        if (res.body?.conflict) {
-            setConflict(true);
-            return;
-        }
-        const failure = describeFailure(res);
-        if (failure) {
-            setError(failure);
-            return;
-        }
-        onDone();
     };
 
-    const confirmApply = () => {
+    const payload = () => (mode === 'form' ? { form } : { raw_toml: raw });
+
+    // Apply, step one: check the config and show the confirmation
+    const review = async () => {
         setError(null);
-        let payload;
-        if (mode === 'raw') {
-            payload = { raw_toml: raw };
-        } else {
-            if (hasErrors(errors)) {
-                setShowErrors(true);
-                setError('Fix the highlighted fields first.');
-                return;
-            }
-            payload = { form };
+        setErrorList(null);
+        if (mode === 'form' && hasErrors(errors)) {
+            setShowErrors(true);
+            return;
         }
-        confirmDialog({
-            header: 'Restart Daemon?',
-            icon: 'pi pi-exclamation-triangle',
-            message: (
-                <div className="flex flex-column gap-2" style={{ maxWidth: '32rem' }}>
-                    <span>Applying this configuration restarts the daemon on <b>{daemon.name}</b>. Every service it runs will stop and restart, including its vehicles.</span>
-                    <span className="font-semibold">Do not apply while any of its vehicles is flying or running a mission.</span>
-                </div>
-            ),
-            acceptLabel: 'Apply and Restart',
-            rejectLabel: 'Cancel',
-            acceptClassName: 'p-button-danger',
-            accept: () => apply(payload),
-        });
+        setBusy(true);
+        const { result, error: err } = await checkConfig(daemon.ip, payload());
+        setBusy(false);
+        if (err) {
+            setError(err);
+            return;
+        }
+        if (result.errors.length) {
+            setErrorList(result.errors);
+            return;
+        }
+        setTicked(new Set());
+        setConfirm({ ...result, confirmations: mode === 'form' ? guard.confirmations : [] });
     };
 
-    const ready = !loading && !loadError;
-    const tabErrorCount = (category) => state.instances[category].filter((i) => shownErrors.instances[i.key]).length;
-
-    const settingField = ({ key, label, type }) => {
-        const value = state.settings[key];
-        const err = shownErrors.settings[key];
-        let input;
-        if (type === 'text') {
-            input = <InputText value={value ?? ''} onChange={(e) => setSetting(key, e.target.value)} disabled={busy} placeholder="not set" />;
-        } else if (type === 'port') {
-            input = (
-                <InputNumber value={value} onValueChange={(e) => setSetting(key, e.value ?? null)} useGrouping={false} min={1} max={65535} disabled={busy} invalid={!!err} placeholder="not set" />
-            );
-        } else {
-            input = <Dropdown value={value} options={BOOLEAN_OPTIONS} onChange={(e) => setSetting(key, e.value)} disabled={busy} />;
+    // Apply, step two: send it
+    const apply = async () => {
+        setBusy(true);
+        const result = await applyConfig(daemon.ip, loaded.configHash, payload());
+        setBusy(false);
+        const outcome = applyOutcome(result, { own: loaded.own });
+        if (outcome === 'applied' || outcome === 'restarting') {
+            onApplied(daemon.ip, outcome);
+            return;
         }
+        setConfirm(null);
+        if (outcome === 'conflict') setConflict(true);
+        else if (outcome === 'refused') {
+            setError(result.error);
+            setErrorList(result.errors);
+        } else setError(result.error);
+    };
+
+    const updateService = (key, svc) => setState((s) => ({ ...s, services: s.services.map((x) => (x.key === key ? svc : x)) }));
+    const toggle = (key) => setExpanded((prev) => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+    });
+    const addService = (svc) => {
+        setState((s) => ({ ...s, services: [...s.services, svc] }));
+        setExpanded((prev) => new Set(prev).add(svc.key));
+    };
+
+    const serviceErrors = (key) => {
+        const prefix = `services.${key}.`;
+        return Object.fromEntries(Object.entries(shown).filter(([k]) => k.startsWith(prefix)).map(([k, v]) => [k.slice(prefix.length), v]));
+    };
+
+    const daemonField = ({ key, label, type, placeholder }) => {
+        const err = shown[`daemon.${key}`];
+        const warn = guard.fieldWarnings[`daemon.${key}`];
+        const value = state.daemon[key];
+        const set = (v) => setState((s) => ({ ...s, daemon: { ...s.daemon, [key]: v } }));
         return (
-            <div key={key} className="flex flex-column gap-1" style={{ width: '14rem' }}>
+            <div key={key} className="flex flex-column gap-1" style={{ minWidth: '14rem' }}>
                 <label className="text-sm">{label}</label>
-                {input}
+                {type === 'port' ? (
+                    <InputNumber value={value} onValueChange={(e) => set(e.value ?? null)} useGrouping={false} disabled={busy} invalid={!!err} />
+                ) : (
+                    <InputText value={value ?? ''} placeholder={placeholder} onChange={(e) => set(e.target.value === '' ? null : e.target.value)} disabled={busy} invalid={!!err} />
+                )}
                 {err && <small className="p-error">{err}</small>}
+                {warn && <small style={{ color: 'var(--orange-500)' }}>{warn}</small>}
             </div>
         );
     };
 
-    const categoryPanel = (category) => {
-        const list = state.instances[category];
-        const count = tabErrorCount(category);
-        return (
-            <TabPanel key={category} header={`${CATEGORY_LABELS[category]} (${list.length})${count ? ' ⚠' : ''}`}>
-                <div className="flex flex-column gap-2">
-                    {list.length === 0 && <div className="text-color-secondary text-sm">None configured.</div>}
-                    {list.map((inst) => (
-                        <InstanceEditor
-                            key={inst.key}
-                            inst={inst}
-                            errors={shownErrors.instances[inst.key]}
-                            expanded={expanded.has(inst.key)}
-                            onToggle={() => toggle(inst.key)}
-                            onChange={(patch) => updateInstance(category, inst.key, patch)}
-                            onRemove={() => removeInstance(category, inst.key)}
-                            onDuplicate={() => insertInstance(category, duplicateInstance(inst), inst.key)}
-                            disabled={busy}
-                        />
-                    ))}
-                    <div>
-                        <Button label={`Add ${category}`} icon="pi pi-plus" size="small" text onClick={() => insertInstance(category, newInstance(category))} disabled={busy} />
-                    </div>
-                </div>
-            </TabPanel>
-        );
-    };
-
-    const footer = (
-        <div className="flex justify-content-between align-items-center gap-2">
-            <span className="text-sm text-color-secondary">{busy ? 'Applying; the daemon is restarting...' : ''}</span>
-            <div className="flex gap-2">
-                <Button label="Cancel" text size="small" onClick={onHide} disabled={busy} />
-                <Button label="Apply" icon={busy ? 'pi pi-spin pi-spinner' : 'pi pi-check'} severity="danger" size="small" onClick={confirmApply} disabled={busy || !ready || conflict} />
-            </div>
+    const footer = confirm ? (
+        <div className="flex justify-content-end gap-2">
+            <Button label="Back" text onClick={() => setConfirm(null)} disabled={busy} />
+            <Button
+                label={busy ? 'Applying...' : 'Apply and restart'}
+                severity="danger"
+                icon="pi pi-refresh"
+                onClick={apply}
+                disabled={busy || confirm.blocking || confirm.confirmations.some((_, i) => !ticked.has(i))}
+            />
+        </div>
+    ) : (
+        <div className="flex justify-content-end gap-2">
+            <Button label="Cancel" text onClick={onHide} disabled={busy} />
+            <Button label="Apply..." icon="pi pi-check" onClick={review} disabled={busy || loading || !!loadError || conflict} />
         </div>
     );
 
     return (
-        <Dialog
-            header={`Configure ${daemon.name}`}
-            visible
-            onHide={() => { if (!busy) onHide(); }}
-            closable={!busy}
-            style={{ width: '60rem', maxWidth: '95vw' }}
-            contentStyle={{ minHeight: '28rem' }}
-            footer={footer}
-        >
-            {loading && <div className="text-color-secondary">Loading config...</div>}
+        <Dialog header={`Configure ${name}`} visible onHide={onHide} footer={footer} style={{ width: 'min(60rem, 95vw)' }} maximizable modal>
+            {loading && <div className="text-color-secondary">Loading the config...</div>}
             {loadError && <Message severity="error" text={loadError} className="w-full" />}
-            {ready && (
+            {!loading && !loadError && confirm && (
                 <div className="flex flex-column gap-3">
+                    <Message severity="warn" text={restartWarning({ own: loaded.own })} className="w-full" />
+                    {confirm.blocking && (
+                        <Message severity="error" className="w-full" text={`This can't be applied to the GCS's own daemon: it would take the GCS down with it. ${confirm.warnings.join('; ')}`} />
+                    )}
+                    {!confirm.blocking && confirm.warnings.map((w) => <Message key={w} severity="warn" text={w} className="w-full" />)}
+                    {Object.values(guard.fieldWarnings).filter((w, i, a) => a.indexOf(w) === i).map((w) => (
+                        <Message key={w} severity="warn" text={w} className="w-full" />
+                    ))}
+                    {confirm.confirmations.map((c, i) => (
+                        <div key={c} className="flex align-items-center gap-2">
+                            <Checkbox
+                                inputId={`confirm-${i}`}
+                                checked={ticked.has(i)}
+                                onChange={(e) => setTicked((prev) => {
+                                    const next = new Set(prev);
+                                    if (e.checked) next.add(i);
+                                    else next.delete(i);
+                                    return next;
+                                })}
+                            />
+                            <label htmlFor={`confirm-${i}`} className="text-sm">{c}</label>
+                        </div>
+                    ))}
+                </div>
+            )}
+            {!loading && !loadError && !confirm && (
+                <div className="flex flex-column gap-3">
+                    {notice && <Message severity="warn" text={notice} className="w-full" />}
                     {conflict && (
-                        <div className="flex align-items-center gap-2 p-2 border-round" style={{ backgroundColor: 'var(--yellow-100)', color: 'var(--yellow-900)' }}>
-                            <i className="pi pi-exclamation-triangle" />
-                            <span className="flex-1 text-sm">The config changed on the daemon since you opened this. Reload to see the current version (your edits will be discarded).</span>
-                            <Button label="Reload" size="small" onClick={load} />
+                        <div className="flex align-items-center gap-2">
+                            <Message severity="error" text="The config changed on the daemon since it was loaded." className="flex-1" />
+                            <Button label="Reload" icon="pi pi-refresh" size="small" onClick={load} />
                         </div>
                     )}
-                    {notice && <Message severity="warn" text={notice} className="w-full" />}
-                    <SelectButton value={mode} options={MODES} onChange={(e) => switchMode(e.value)} disabled={busy} allowEmpty={false} />
-                    {mode === 'form' && state ? (
-                        <div ref={tabsRef}>
-                        <TabView scrollable activeIndex={tab} onTabChange={(e) => setTab(e.index)}>
-                            <TabPanel header={`Daemon${Object.keys(shownErrors.settings).length ? ' ⚠' : ''}`}>
+                    {error && <Message severity="error" text={error} className="w-full" />}
+                    {errorList && errorList.map((e) => <Message key={e} severity="error" text={e} className="w-full" />)}
+                    <SelectButton value={mode} options={MODES} onChange={(e) => switchMode(e.value)} disabled={busy} />
+                    {mode === 'raw' && (
+                        <InputTextarea value={raw} onChange={(e) => setRaw(e.target.value)} rows={24} disabled={busy} style={{ fontFamily: 'monospace', width: '100%' }} />
+                    )}
+                    {mode === 'form' && state && (
+                        <TabView>
+                            <TabPanel header="Daemon">
+                                <div className="flex flex-wrap gap-3">{DAEMON_FIELDS.map(daemonField)}</div>
+                            </TabPanel>
+                            <TabPanel header="Simulator">
                                 <div className="flex flex-column gap-3">
-                                    <small className="text-color-secondary">Daemon-wide settings only take effect the first time a daemon is configured.</small>
-                                    <div className="flex flex-wrap gap-3">{SETTINGS.map(settingField)}</div>
+                                    <div className="flex align-items-center gap-2">
+                                        <Checkbox
+                                            inputId="sim-present"
+                                            checked={state.simulator.present}
+                                            onChange={(e) => setState((s) => ({ ...s, simulator: { ...s.simulator, present: !!e.checked } }))}
+                                            disabled={busy}
+                                        />
+                                        <label htmlFor="sim-present" className="text-sm">This daemon runs a simulator</label>
+                                    </div>
+                                    {state.simulator.present && (
+                                        <>
+                                            <div className="flex flex-column gap-1">
+                                                <label className="text-sm">Package</label>
+                                                <InputText
+                                                    value={state.simulator.package}
+                                                    placeholder="repo[//subdir][@version]"
+                                                    onChange={(e) => setState((s) => ({ ...s, simulator: { ...s.simulator, package: e.target.value } }))}
+                                                    disabled={busy}
+                                                />
+                                            </div>
+                                            <span className="font-semibold text-sm">Simulator args</span>
+                                            <KeyValueEditor
+                                                rows={state.simulator.argRows}
+                                                onChange={(argRows) => setState((s) => ({ ...s, simulator: { ...s.simulator, argRows } }))}
+                                                disabled={busy}
+                                            />
+                                        </>
+                                    )}
                                 </div>
                             </TabPanel>
-                            {CATEGORIES.map(categoryPanel)}
+                            <TabPanel header={`Services (${state.services.length})${Object.keys(shown).some((k) => k.startsWith('services.')) ? ' ⚠' : ''}`}>
+                                <div className="flex flex-column gap-2">
+                                    {state.services.map((svc) => (
+                                        <ServiceEditor
+                                            key={svc.key}
+                                            svc={svc}
+                                            packages={packages}
+                                            errors={serviceErrors(svc.key)}
+                                            expanded={expanded.has(svc.key)}
+                                            onToggle={() => toggle(svc.key)}
+                                            onChange={(next) => updateService(svc.key, next)}
+                                            onRemove={() => setState((s) => ({ ...s, services: s.services.filter((x) => x.key !== svc.key) }))}
+                                            onDuplicate={() => addService(duplicateService(svc))}
+                                            disabled={busy}
+                                        />
+                                    ))}
+                                    <div>
+                                        <Button label="Add service" icon="pi pi-plus" text size="small" onClick={() => addService(newService())} disabled={busy} />
+                                    </div>
+                                </div>
+                            </TabPanel>
                         </TabView>
-                        </div>
-                    ) : (
-                        <InputTextarea
-                            value={raw}
-                            onChange={(e) => setRaw(e.target.value)}
-                            rows={22}
-                            disabled={busy}
-                            className="w-full"
-                            placeholder="Empty config (see cmd/eagled/defaults/new_config.toml)"
-                            style={{ fontFamily: 'monospace', fontSize: '0.85rem' }}
-                        />
                     )}
-                    {error && <small className="p-error" style={{ whiteSpace: 'pre-wrap' }}>{error}</small>}
                 </div>
             )}
         </Dialog>

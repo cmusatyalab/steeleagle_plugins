@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -52,6 +53,10 @@ type Topology struct {
 	// YoloDaemons are the IPs of the vehicle daemons that list a mock "yolo"
 	// engine. Nothing runs it in Uriel; it's only listed.
 	YoloDaemons map[string]bool
+	// DenyConfig are the IPs of the daemons that refuse Configure, Restart
+	// and package changes with PermissionDenied, as a daemon does for a GCS
+	// without admin auth.
+	DenyConfig map[string]bool
 }
 
 const (
@@ -91,6 +96,7 @@ type Daemon struct {
 	flows FlowApplier
 	log   zerolog.Logger
 	state map[string]*vehicleState
+	store *daemonStore
 
 	remoteOnce sync.Once
 }
@@ -109,7 +115,12 @@ type vehicleState struct {
 
 // NewDaemon returns a daemon serving vehicles, keyed by full name.
 func NewDaemon(top Topology, vehicles map[string]*Vehicle, flows FlowApplier, log zerolog.Logger) *Daemon {
-	d := &Daemon{top: top, flows: flows, log: log, state: map[string]*vehicleState{}}
+	store, err := newDaemonStore(top)
+	if err != nil {
+		// The seed configs are built from constants, so this is a bug
+		panic(fmt.Sprintf("seed mock daemon configs: %v", err))
+	}
+	d := &Daemon{top: top, flows: flows, log: log, state: map[string]*vehicleState{}, store: store}
 	for n, v := range vehicles {
 		d.state[n] = &vehicleState{v: v, missions: map[string]uploadedMission{}}
 	}
@@ -160,8 +171,40 @@ func driverConfig() ([]byte, error) {
 }
 
 // ListServices lists the vehicles, the encoders and the GCS engine, and the
-// remote daemons with their architectures.
+// remote daemons with their architectures. A daemon that is restarting, or
+// whose config names a package it doesn't have, lists no services: the
+// GCS's own fails the call, a remote is listed with the reason as its error.
 func (d *Daemon) ListServices(
+	ctx context.Context, req *daemonpb.ListServicesRequest,
+) (*daemonpb.ListServicesResponse, error) {
+	if why := d.store.down(d.top.GCSIP); why == "restarting" {
+		return nil, status.Error(codes.Unavailable, "daemon is restarting")
+	} else if why != "" {
+		return nil, status.Error(codes.FailedPrecondition, why)
+	}
+	resp, err := d.listAll(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	down := map[string]string{}
+	for _, r := range resp.GetRemotes() {
+		if why := d.store.down(r.GetIp()); why != "" {
+			down[r.GetIp()] = why
+			r.SetError(why)
+		}
+	}
+	var services []*daemonpb.Service
+	for _, s := range resp.GetServices() {
+		if ip, _ := fleet.SplitName(s.GetName()); down[ip] == "" {
+			services = append(services, s)
+		}
+	}
+	resp.SetServices(services)
+	return resp, nil
+}
+
+// listAll lists every service and remote of the topology, up or not.
+func (d *Daemon) listAll(
 	ctx context.Context, req *daemonpb.ListServicesRequest,
 ) (*daemonpb.ListServicesResponse, error) {
 	conf, err := driverConfig()

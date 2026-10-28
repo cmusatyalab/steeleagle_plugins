@@ -110,6 +110,41 @@ The end-to-end tests are opt-in: `GCS_COMPILER_E2E=1 pixi run go test
 ./internal/mission/ ./cmd/gcsmock/` builds real missions (including one with a
 flow, and a mock Deploy that sends it), which needs the same access.
 
+## Orchestrate page
+
+The Orchestrate page lists every daemon the GCS's daemon knows of: itself and
+the remote daemons that use it as their orchestrator. A green dot is up, orange
+is up but its services failed to start (it can still be configured, which is
+how it is fixed), red is unreachable. Every call for a daemon goes through the
+GCS's daemon with that daemon's IP as its route key.
+
+For the selected daemon:
+
+- **Configure...** opens its whole config as a form (daemon settings, the
+  simulator, and its services) or as raw TOML. A service's plugin is picked from
+  the packages installed on that daemon, and its args are prefilled from the
+  plugin's TOML (`[[args]]`: type, description, default). Args already in the
+  config are always kept; others are written only if changed from their default.
+  Keys the form doesn't know are kept, but the form doesn't keep TOML comments;
+  raw TOML is sent exactly as typed.
+- **Apply** checks the config first: the daemon's own validation, and warnings
+  for services whose package isn't installed there (a daemon with such a service
+  starts none of its services). On the GCS's own daemon those block Apply,
+  because a daemon whose services fail takes the GCS down with it, and it can
+  then only be fixed with `eagle configure` on the host. Removing or renaming
+  the GCS's own service needs an extra confirmation.
+- **Restart Daemon** restarts the daemon and every service on it.
+- **Packages** lists the installed packages and their plugins, and installs (by
+  URI, `repo[//subdir][@version]`) or removes them. Changes take effect when the
+  daemon next restarts.
+
+Configure, Restart Daemon and package changes need the GCS service to have
+`auth = "admin"` (see above); without it the daemon refuses them, and the page
+says so. On a remote daemon they also need that daemon to trust its
+orchestrator's address. After an Apply or a restart, the page follows the daemon
+until it is back, or reports that its services failed or that it didn't come
+back within a minute.
+
 ## Pixi tasks
 
 Run these in `gcs/`. The package builds on its own: `go.mod` takes `api/go` and
@@ -135,6 +170,11 @@ prebuilt native library (the release `go.mod` requires) into the Pixi environmen
 - lists a `yolo` detection engine (RawFrame in, DetectionResult out) on every
   vehicle daemon, so the flow catalog has an engine to offer. Nothing runs it:
   it is only listed. Every listed engine carries a real engine plugin config;
+- keeps a config and packages for each daemon: Configure validates and stores
+  the config, and the daemon then lists no services for 3 s, as if restarting;
+  a config naming a package the daemon doesn't have makes its services "fail to
+  start" until it is fixed. Package installs take effect at once. The listed
+  services still come from the flags, not the config;
 - runs the real `bin/gcs` as its child, as the daemon runs an engine plugin.
 
 Run it in `gcs/` and open <http://localhost:8002>:
@@ -160,6 +200,7 @@ Flags (`./bin/gcsmock -h`; `pixi run mock` passes `-gcs` and `-web`):
 | `-vehicles` | `100.64.0.1.alpha,100.64.0.1.bravo,100.64.0.2.charlie` | vehicle names: each a daemon IP, a dot and a name |
 | `-no-encoder-daemons` | none | daemon IPs without an `h264_encoder` |
 | `-no-yolo-daemons` | none | daemon IPs without a `yolo` engine |
+| `-deny-config-daemons` | none | daemon IPs that refuse Configure, Restart and package changes with PermissionDenied, as a daemon does for a GCS without admin auth |
 | `-daemon-arch` | `amd64` for every daemon | `ip=arch[,ip=arch]` (`amd64` or `arm64`): the architecture a daemon reports. Only daemons other than `-gcs-ip` are reported as remotes, as with real eagled. E.g. `-daemon-arch 100.64.0.2=arm64` tests "no binary for arm64" |
 
 Uriel names are shared by every process on the machine, so two mocks (or a mock
