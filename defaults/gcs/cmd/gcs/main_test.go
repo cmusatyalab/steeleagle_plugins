@@ -73,7 +73,7 @@ func TestHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), web, zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), web, zerolog.Nop()))
 	defer server.Close()
 
 	for path, want := range map[string]string{
@@ -122,7 +122,7 @@ func TestHandlerWithoutWeb(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/streams")
 	if err != nil {
@@ -142,7 +142,7 @@ func TestHandlerWithoutDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/remote/vehicles")
 	if err != nil {
@@ -182,7 +182,7 @@ func TestNoDaemonMissionRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	for _, path := range []string{"/api/upload", "/api/deploy"} {
 		resp, err := http.Post(server.URL+path, "application/json", strings.NewReader("{}"))
@@ -195,6 +195,18 @@ func TestNoDaemonMissionRoutes(t *testing.T) {
 			t.Errorf("POST %s = %d %q, want 503 and the detail", path, resp.StatusCode, body)
 		}
 	}
+	for _, req := range [][2]string{{"GET", "/api/daemons"}, {"POST", "/api/daemons/restart_service"}} {
+		r, _ := http.NewRequest(req[0], server.URL+req[1], strings.NewReader("{}"))
+		resp, err := http.DefaultClient.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "the GCS has no connection to the daemon") {
+			t.Errorf("%s %s = %d %q, want 503 and the detail", req[0], req[1], resp.StatusCode, body)
+		}
+	}
 }
 
 // TestCompilerRoutesRegistered ensures that the compiler routes are served
@@ -205,7 +217,7 @@ func TestCompilerRoutesRegistered(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/schema")
 	if err != nil {
@@ -236,7 +248,7 @@ func TestCatalogRoute503WithoutDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/flows/catalog")
 	if err != nil {
@@ -313,4 +325,8 @@ func TestDaemonHostname(t *testing.T) {
 			}
 		})
 	}
+}
+
+func testDaemons() daemonRoutes {
+	return daemonRoutes{list: noDaemonHandler(), restart: noDaemonHandler()}
 }

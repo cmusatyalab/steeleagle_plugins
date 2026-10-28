@@ -526,3 +526,14 @@ func TestListServicesEnginesHaveConfigs(t *testing.T) {
 		t.Error("-no-yolo-daemons left yolo on 100.64.0.3")
 	}
 }
+
+func TestRestartService(t *testing.T) {
+	d := NewDaemon(Topology{GCSIP: "100.64.0.9"}, nil, nil, zerolog.Nop())
+	ctx := context.Background()
+	if _, err := d.RestartService(ctx, daemonpb.RestartServiceRequest_builder{ServiceNames: "100.64.0.9.gcs"}.Build()); err != nil {
+		t.Errorf("restart gcs: %v", err)
+	}
+	if _, err := d.RestartService(ctx, daemonpb.RestartServiceRequest_builder{ServiceNames: "nope"}.Build()); status.Code(err) != codes.NotFound {
+		t.Errorf("restart nope: %v", err)
+	}
+}

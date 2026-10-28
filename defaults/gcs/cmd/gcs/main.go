@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,6 +28,7 @@ import (
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
 	"github.com/cmusatyalab/steeleagle/config"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/control"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/daemons"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/feed"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
@@ -186,6 +188,12 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 		missions.catalog = http.HandlerFunc(flows.NewCatalogHandler(daemonpb.NewDaemonServiceClient(conn), gcsIP, gcsHostname).ServeCatalog)
 	}
 
+	daemonsRoutes := daemonRoutes{list: noDaemonHandler(), restart: noDaemonHandler()}
+	if conn != nil {
+		h := daemons.NewHandler(daemonpb.NewDaemonServiceClient(conn), daemons.Self{IP: gcsIP, Hostname: gcsHostname, Arch: runtime.GOARCH, OS: runtime.GOOS, Engine: engine}, log)
+		daemonsRoutes = daemonRoutes{list: http.HandlerFunc(h.ServeList), restart: http.HandlerFunc(h.ServeRestart)}
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -193,7 +201,7 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: newHandler(hub, controller, vehicles, missions, web, log), ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{Handler: newHandler(hub, controller, vehicles, missions, daemonsRoutes, web, log), ReadHeaderTimeout: 10 * time.Second}
 	errs := make(chan error, 2)
 	go func() {
 		log.Info().Str("addr", ln.Addr().String()).Msg("serving web UI")
@@ -309,9 +317,15 @@ type missionRoutes struct {
 	catalog http.Handler
 }
 
+// daemonRoutes are the Orchestrate page's routes.
+type daemonRoutes struct {
+	list, restart http.Handler
+}
+
 // newHandler serves the API, and the web UI from the directory web. vehicles
-// serves the vehicle list, and missions the mission routes.
-func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Handler, missions missionRoutes, web string, log zerolog.Logger) http.Handler {
+// serves the vehicle list, missions the mission routes, and orchestration
+// the daemon routes.
+func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Handler, missions missionRoutes, orchestration daemonRoutes, web string, log zerolog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/webrtc/offer", hub.ServeOffer)
 	mux.HandleFunc("GET /api/streams", hub.ServeStreams)
@@ -329,6 +343,8 @@ func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Hand
 	mux.Handle("POST /api/deploy", missions.deploy)
 	mux.Handle("GET /api/flows/catalog", missions.catalog)
 	mux.HandleFunc("POST /api/flows/from_toml", flows.ServeFromTOML)
+	mux.Handle("GET /api/daemons", orchestration.list)
+	mux.Handle("POST /api/daemons/restart_service", orchestration.restart)
 	mux.HandleFunc("/api/", http.NotFound)
 	if _, err := os.Stat(filepath.Join(web, "index.html")); err != nil {
 		log.Warn().Err(err).Str("web", web).Msg("no web UI to serve; serving only the API")

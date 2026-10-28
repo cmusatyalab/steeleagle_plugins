@@ -225,6 +225,24 @@ func (d *Daemon) ListServices(
 	return daemonpb.ListServicesResponse_builder{Services: out, Remotes: remotes}.Build(), nil
 }
 
+// RestartService pretends to restart one of the services ListServices lists,
+// and is NotFound for any other name, as the daemon is.
+func (d *Daemon) RestartService(
+	ctx context.Context, req *daemonpb.RestartServiceRequest,
+) (*daemonpb.RestartServiceResponse, error) {
+	resp, err := d.ListServices(ctx, &daemonpb.ListServicesRequest{})
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range resp.GetServices() {
+		if s.GetName() == req.GetServiceNames() {
+			d.log.Info().Str("service", s.GetName()).Msg("restarted service")
+			return &daemonpb.RestartServiceResponse{}, nil
+		}
+	}
+	return nil, status.Errorf(codes.NotFound, "no service %q", req.GetServiceNames())
+}
+
 // GetTelemetry returns the vehicle's current telemetry.
 func (d *Daemon) GetTelemetry(
 	ctx context.Context, req *vehiclepb.GetTelemetryRequest,
