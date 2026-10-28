@@ -1,0 +1,13 @@
+syntax = "proto3";
+package patchcore_pipeline.v1.h264;
+
+message EncodedVideoFrame {
+  uint64 frame_number = 1;
+  bool keyframe = 2;
+  bytes data = 3;
+}
+
+message DecodeResult {
+  bool decoded = 1;
+  bool keyframe_needed = 2;
+}

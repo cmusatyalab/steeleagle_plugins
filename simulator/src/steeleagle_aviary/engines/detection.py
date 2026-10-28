@@ -106,7 +106,7 @@ class DetectionEngine(Engine):
             engine.close()
 
     def start(self):
-        self.qualifier = os.getenv('STEELEAGLE_SIMULATOR_QUALIFIER', '')
+        self.qualifier = os.getenv('STEELEAGLE_LOCAL_QUALIFIER', '')
         # The daemon serves the engine on Uriel by its qualified name
         self.qualified_name = f'{self.qualifier}.{self.name}'
 

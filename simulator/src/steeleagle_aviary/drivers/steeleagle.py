@@ -92,7 +92,7 @@ class SteelEagle(Driver):
     """Control interface wrapper."""
     def start(self):
         runtime_path = os.getenv('STEELEAGLE_SIMULATOR_DIR', None)
-        qualifier = os.getenv('STEELEAGLE_SIMULATOR_QUALIFIER', '')
+        qualifier = os.getenv('STEELEAGLE_LOCAL_QUALIFIER', '')
         if not runtime_path:
             raise ValueError('Runtime directory not set')
         # NOTE: the simulator doesn't callout so no client is created
