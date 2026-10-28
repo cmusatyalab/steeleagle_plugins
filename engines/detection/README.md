@@ -6,8 +6,8 @@ A SteelEagle engine plugin that detects objects in camera frames with YOLO26 or 
 
 | Arg | Default | Description |
 | --- | --- | --- |
-| `model` | `yolo26n.pt` | Model file in the daemon's models directory. `.pt` is Ultralytics YOLO (`yolo26n/s/m/l/x.pt` are downloaded if absent); `.pth` is RF-DETR; `rfdetr` is the stock pretrained RF-DETR. |
-| `rfdetr_size` | `medium` | RF-DETR size (`nano`, `small`, `medium`, `large`); a `.pth` file does not record it. |
+| `model` | `yolo26x.pt` | Model file in the daemon's models directory. `.pt` is Ultralytics YOLO (`yolo26n/s/m/l/x.pt` are downloaded if absent); `.pth` is RF-DETR; `rfdetr` is the stock pretrained RF-DETR. |
+| `rfdetr_size` | `large` | RF-DETR size (`nano`, `small`, `medium`, `large`); a `.pth` file does not record it. |
 | `rfdetr_labels` | `[]` | Class names of a custom RF-DETR checkpoint, in id order. |
 | `only_classes` | `[]` | Class names to report, ignoring case. Empty reports all. |
 | `confidence` | `0.5` | Confidence threshold. |
@@ -18,7 +18,28 @@ Transfer models and the KML to the daemon with its `TransferService`.
 
 ## Location estimate
 
-The geofence tests where the object is, not where the vehicle is. The bottom center of the box is cast as a ray through a pinhole camera, rotated by the gimbal pitch and vehicle heading, and intersected with flat ground at the vehicle's height. A frame without a gimbal pose falls back to the vehicle's position. The estimate assumes a level vehicle and flat terrain, and ignores gimbal roll.
+The geofence tests where the *object* is, not where the vehicle is, so the plugin estimates each detection's position on the ground:
+
+1. Take the bottom center of the box, where the object most likely meets the ground.
+2. Turn that pixel into a line of sight with a pinhole camera model, using `hfov` and `vfov`.
+3. Aim the line of sight with the gimbal pitch (0° level, -90° straight down) and the vehicle heading (clockwise from north).
+4. Follow it down to the ground, assumed flat at the vehicle's start height. From 30 m up with the gimbal 45° down, that is 30 m ahead.
+5. Move that distance and bearing from the vehicle's GPS position to get a latitude and longitude, which is tested against the KML polygons.
+
+```
+   drone ●  30 m up
+         |\
+         | \  line of sight, 45° down
+         |  \
+ ground -+---●-- estimated object position
+         <30 m>
+```
+
+Edge cases:
+- **No gimbal pose in the frame:** the vehicle's own position is used.
+- **Line of sight never reaches the ground** (at or above the horizon): there is no estimate, so the detection is dropped when a geofence is set and kept otherwise.
+
+Accuracy assumes a level vehicle (the telemetry has no vehicle pitch or roll), flat terrain, no gimbal roll, and correct `hfov`/`vfov`. It is best at moderate distances on flat ground.
 
 ## Development
 

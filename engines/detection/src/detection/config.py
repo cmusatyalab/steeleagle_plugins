@@ -3,8 +3,8 @@
 import json
 from dataclasses import dataclass, field, fields
 
-DEFAULT_MODEL = "yolo26n.pt"
-DEFAULT_RFDETR_SIZE = "medium"
+DEFAULT_MODEL = "yolo26x.pt"
+DEFAULT_RFDETR_SIZE = "large"
 DEFAULT_CONFIDENCE = 0.5
 # The field of view of the cameras the old engine assumed.
 DEFAULT_HFOV_DEG = 69.0

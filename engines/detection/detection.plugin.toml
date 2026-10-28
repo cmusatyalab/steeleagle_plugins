@@ -7,7 +7,7 @@ description = "Detects objects in camera frames with YOLO26 or RF-DETR, optional
 name = "model"
 type = "string"
 description = "Model file in the daemon's models directory: a .pt file is Ultralytics YOLO (e.g. yolo26n.pt; yolo26n/s/m/l/x are downloaded if absent) and a .pth file is RF-DETR. \"rfdetr\" is the stock pretrained RF-DETR of rfdetr_size"
-default = "yolo26x"
+default = "yolo26x.pt"
 
 [[args]]
 name = "rfdetr_size"

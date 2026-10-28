@@ -1,8 +1,12 @@
 import json
+import tomllib
+from pathlib import Path
 
 import pytest
 
 from detection.config import Config, ConfigError, parse_args
+
+MANIFEST = Path(__file__).parent.parent / "detection.plugin.toml"
 
 
 def test_unset_args_take_their_defaults():
@@ -71,3 +75,14 @@ def test_config_is_a_dataclass_with_every_arg():
         "hfov",
         "vfov",
     } <= set(Config.__dataclass_fields__)
+
+
+def test_the_manifest_defaults_are_the_config_defaults():
+    with open(MANIFEST, "rb") as f:
+        manifest = tomllib.load(f)
+    defaults = {arg["name"]: arg["default"] for arg in manifest["args"]}
+    assert defaults == {name: getattr(Config(), name) for name in defaults}
+
+
+def test_the_default_model_is_accepted():
+    parse_args(json.dumps({"model": Config().model}))
