@@ -60,7 +60,7 @@ inputs = ["go.mod", "go.sum", "**/*.go"]
 outputs = ["bin/gcs"]
 
 # The start task is what the plugin runner invokes; the plugin's args come in
-# STEELEAGLE_PLUGIN_ARGS, and its Uriel engine name in ICEORYX_SERVICE
+# STEELEAGLE_PLUGIN_ARGS, and its Uriel engine name in STEELEAGLE_ENGINE_ENDPOINT
 [tasks.start]
 cmd = "./bin/gcs -web web/dist"
 depends-on = ["build"]

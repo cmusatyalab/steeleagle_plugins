@@ -12,6 +12,8 @@ github.com/cmusatyalab/steeleagle/config v0.0.3 h1:Mh3MWxT/FLj7Pv3le+3Ow1PHBnHWz
 github.com/cmusatyalab/steeleagle/config v0.0.3/go.mod h1:ufbS1yFbr6eExvEp9JRqNMsXuqmh7QfR/CTqCyRwDLk=
 github.com/cmusatyalab/steeleagle/sdk v0.0.0-20261027210222-81f3071fc925 h1:JKt5lyHcFsPbG0ULtzArRguGViovwSNLM2ymLJJDAsw=
 github.com/cmusatyalab/steeleagle/sdk v0.0.0-20261027210222-81f3071fc925/go.mod h1:3LBY+6wwLL66I613Ubqh1Rj9uwYhcXcMJr0qD2sAA1A=
+github.com/cmusatyalab/steeleagle/sdk v0.1.0 h1:LYQmNJC/MA3r2QqA7VAgkZJ9/c2ZfULXHiMfduYB8YY=
+github.com/cmusatyalab/steeleagle/sdk v0.1.0/go.mod h1:P0hGltNSNDxNRpgCVKPJUl3PFKEKVSxDJctro2dSZ4k=
 github.com/cmusatyalab/uriel/go v0.2.0 h1:MBTxDfvui9zQFZtN/BqXHAVzQ6eaNIxezfEtFJOuL6Q=
 github.com/cmusatyalab/uriel/go v0.2.0/go.mod h1:Ck8FmU/kdWH7wX/XK6848bReGfpzHahsRASbP8yWetg=
 github.com/golang/protobuf v1.5.4 h1:i7eJL8qZTpSEXOPTxNKhASYpMn+8e5Q6AdndVa1dWek=

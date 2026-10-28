@@ -22,7 +22,7 @@ http_addr = ":8002"
 ```
 
 The daemon passes the plugin args in `STEELEAGLE_PLUGIN_ARGS`, the service's
-Uriel engine name in `ICEORYX_SERVICE`, and its socket in `CLIENT_SOCKET`. See
+Uriel engine name in `STEELEAGLE_ENGINE_ENDPOINT`, and its socket in `STEELEAGLE_CLIENT_SOCKET`. See
 `config/examples/config.toml` and `gcs.plugin.toml` (args: `http_addr`,
 `ice_servers`, `webrtc_ports`, `max_input_size`, `compiler`).
 

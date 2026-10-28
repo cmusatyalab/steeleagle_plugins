@@ -3,8 +3,8 @@
 // browsers over WebRTC, and it serves the web UI.
 //
 // The daemon passes the plugin's args as JSON in STEELEAGLE_PLUGIN_ARGS (see
-// gcs.plugin.toml), the name of its Uriel engine in ICEORYX_SERVICE, and the
-// socket the GCS calls it on, to control vehicles, in CLIENT_SOCKET.
+// gcs.plugin.toml), the name of its Uriel engine in STEELEAGLE_ENGINE_ENDPOINT, and the
+// socket the GCS calls it on, to control vehicles, in STEELEAGLE_CLIENT_SOCKET.
 package main
 
 import (
@@ -37,8 +37,8 @@ import (
 
 const (
 	argsEnv   = "STEELEAGLE_PLUGIN_ARGS"
-	engineEnv = "ICEORYX_SERVICE"
-	daemonEnv = "CLIENT_SOCKET"
+	engineEnv = "STEELEAGLE_ENGINE_ENDPOINT"
+	daemonEnv = "STEELEAGLE_CLIENT_SOCKET"
 	// shutdownTimeout is how long requests may take to finish on shutdown.
 	shutdownTimeout = 5 * time.Second
 )

@@ -56,7 +56,7 @@ def main():
     args = json.loads(os.getenv('STEELEAGLE_PLUGIN_ARGS') or '{}')
     ip = args.get('ip', DEFAULT_IP)
 
-    listen_address = os.getenv('LISTEN_SOCKET')
+    listen_address = os.getenv('STEELEAGLE_LISTEN_SOCKET')
     if not listen_address:
         raise ValueError('no listen socket address provided!')
 

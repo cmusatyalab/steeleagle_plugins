@@ -383,8 +383,8 @@ func runChild(o options, engine string, signals <-chan os.Signal, log zerolog.Lo
 	}
 	cmd := exec.Command(o.gcs, "-web", o.web)
 	cmd.Env = append(os.Environ(),
-		"ICEORYX_SERVICE="+engine,
-		"CLIENT_SOCKET="+o.socket,
+		"STEELEAGLE_ENGINE_ENDPOINT="+engine,
+		"STEELEAGLE_CLIENT_SOCKET="+o.socket,
 		"STEELEAGLE_PLUGIN_ARGS="+string(pluginArgs))
 	stdout, stderr := newPrefixWriter(os.Stdout, "[gcs] "), newPrefixWriter(os.Stderr, "[gcs] ")
 	cmd.Stdout, cmd.Stderr = stdout, stderr
