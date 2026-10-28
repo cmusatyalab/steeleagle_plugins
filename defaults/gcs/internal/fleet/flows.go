@@ -201,40 +201,45 @@ func (f *Flows) check(v Vehicle, snap Snapshot, attempt int) {
 		return
 	}
 	f.mu.Lock()
-	armed := f.state(v.Name).armed
-	f.mu.Unlock()
-	if !armed {
-		return // a mission started meanwhile
-	}
-	if !f.isGCSFlow(resp.GetToml(), v, snap) {
-		f.log.Debug().Str("vehicle", v.Name).Msg("vehicle runs another flow; not pushing the GCS flow")
+	st := f.state(v.Name)
+	if !st.armed {
+		f.mu.Unlock()
+		f.log.Info().Str("vehicle", v.Name).Msg("mission started; not pushing the GCS flow")
 		return
 	}
-	if attempt > 1 {
-		f.log.Info().Str("vehicle", v.Name).Int("attempt", attempt).
-			Msg("vehicle's data isn't arriving; pushing the GCS flow again")
+	other := f.otherFlow(resp.GetToml(), v, snap)
+	if other != "" {
+		st.status = "not pushed: " + other
 	}
+	f.mu.Unlock()
+	if other != "" {
+		f.log.Warn().Str("vehicle", v.Name).Str("reason", other).Bytes("flow", resp.GetToml()).
+			Msg("not pushing the GCS flow")
+		return
+	}
+	f.log.Info().Str("vehicle", v.Name).Int("attempt", attempt).
+		Msg("vehicle's data isn't arriving; pushing the GCS flow")
 	f.push(v.Name)
 }
 
-// isGCSFlow reports whether toml is empty or a GCS flow: one whose engines
-// are only the GCS engine and the encoder on the vehicle's daemon. Any other
-// flow is a mission's, which a check leaves alone.
-func (f *Flows) isGCSFlow(toml []byte, v Vehicle, snap Snapshot) bool {
+// otherFlow says why toml is not a GCS flow, or returns "" if it is: if it is
+// empty, or its engines are only the GCS engine and the encoder on the
+// vehicle's daemon. Any other flow is a mission's, which a check leaves alone.
+func (f *Flows) otherFlow(toml []byte, v Vehicle, snap Snapshot) string {
 	if len(toml) == 0 {
-		return true
+		return ""
 	}
 	flow, err := config.ParseFlowConfigFromBytes(toml)
 	if err != nil {
-		return false
+		return fmt.Sprintf("vehicle runs a flow that can't be parsed: %v", err)
 	}
 	encoder, hasEncoder := snap.Encoders[v.DaemonIP]
 	for _, e := range flow.Engines {
 		if e.Name != f.spec.Engine && (!hasEncoder || e.Name != encoder) {
-			return false
+			return "vehicle runs another flow, with engine " + e.Name
 		}
 	}
-	return true
+	return ""
 }
 
 // PushAfterHold pushes the GCS flow to each vehicle in the background, and
@@ -311,6 +316,7 @@ func (f *Flows) pushOnce(name string) string {
 		}
 	}
 	if vehicle == nil {
+		f.log.Warn().Str("vehicle", name).Msg("can't push the GCS flow: vehicle is not running")
 		return "error: vehicle is not running"
 	}
 	flow, noVideo := BuildFlow(*vehicle, snap, f.spec)
@@ -328,6 +334,7 @@ func (f *Flows) pushOnce(name string) string {
 		f.log.Warn().Err(err).Str("vehicle", name).Msg("could not set the vehicle's flow")
 		return "error: " + status.Convert(err).Message()
 	}
+	f.log.Info().Str("vehicle", name).Str("no_video", noVideo).Msg("set the vehicle's flow to the GCS flow")
 	if noVideo != "" {
 		return "no video: " + noVideo
 	}

@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,8 +108,8 @@ func TestObservePushesWhenEmpty(t *testing.T) {
 	if s := f.Status(v1); s != "ok" {
 		t.Errorf("Status(v1) = %q, want ok", s)
 	}
-	if s := f.Status(v2); s != "" {
-		t.Errorf("Status(v2) = %q, want empty", s)
+	if s := f.Status(v2); !strings.HasPrefix(s, "not pushed: vehicle runs a flow that can't be parsed") {
+		t.Errorf("Status(v2) = %q, want not pushed", s)
 	}
 }
 
@@ -334,6 +335,9 @@ timeout = "2s"
 	}
 	if string(d.flows[v1]) != string(mission) {
 		t.Errorf("flow = %s, want the mission's", d.flows[v1])
+	}
+	if s, want := f.Status(v1), "not pushed: vehicle runs another flow, with engine 100.64.1.5.yolo"; s != want {
+		t.Errorf("Status = %q, want %q", s, want)
 	}
 }
 
