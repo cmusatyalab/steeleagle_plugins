@@ -17,7 +17,7 @@ packages = ["src/h264"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [tool.pixi.dependencies]
 python = "3.14.*"
