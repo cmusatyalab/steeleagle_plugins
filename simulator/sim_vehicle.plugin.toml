@@ -1,0 +1,32 @@
+[plugin]
+name = "Aviary Vehicle"
+type = "driver"
+description = "Simulated copter run by the Aviary simulator, configured through the simulator's args"
+
+[driver]
+type = "copter"
+
+[[driver.cameras]]
+name = "rgb"
+type = "steeleagle_protocol/v1/messages/frame/RawFrame"
+description = "Simulated RGB camera on the gimbal"
+hres = 1280
+vres = 720
+hfov = 128
+vfov = 72
+fps = 30
+gimbal = true
+primary = true
+encode = true
+
+[driver.supported]
+services = [
+    "steeleagle_protocol/v1/services/driver/ControlService",
+    "steeleagle_protocol/v1/services/driver/StreamService",
+]
+
+[driver.unsupported]
+methods = [
+    "steeleagle_protocol/v1/services/driver/ControlService/Stand",
+    "steeleagle_protocol/v1/services/driver/ControlService/Sit",
+]

@@ -2,7 +2,7 @@ version: v2
 clean: true
 inputs:
   - git_repo: https://github.com/cmusatyalab/steeleagle.git
-    branch: v4.0-beta
+    branch: v4_backend_rework
     subdir: api
     recurse_submodules: true
 plugins:

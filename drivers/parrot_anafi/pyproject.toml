@@ -1,19 +1,32 @@
 [project]
 name = "parrot-anafi"
-version = "0.1.7"
-requires-python = ">=3.10,<=3.11"
+version = "0.2.0"
+# Uriel needs 3.11, and Olympe's pinned protobuf is no newer
+requires-python = ">=3.11,<3.12"
 dependencies = [
-    "grpcio==1.50.0",
+    # Newer than the 1.50 stubs in steeleagle_protocol, which still run on it,
+    # since 1.50 has no aarch64 wheels for Python 3.11; grpcio itself doesn't
+    # depend on protobuf
+    "grpcio>=1.51.1",
     "opencv-python-headless>=5.0.0.93",
-    "parrot-olympe>=7.7.5,<8.0.0",
+    # On aarch64, Olympe is the wheel bundled here, which is versioned 0.0.0
+    "parrot-olympe>=7.7.5,<8.0.0; platform_machine != 'aarch64'",
+    "parrot-olympe; platform_machine == 'aarch64'",
     "protobuf==3.19.4",
     "steeleagle-protocol",
+    "uriel>=0.2.0",
 ]
 
 [project.scripts]
-parrot-anafi = "parrot_anafi:main"
+start = "parrot_anafi:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
 
 [tool.uv.sources]
+# Generated for protobuf 3.19.4, which Olympe pins (see buf.gen.yaml), since
+# the published steeleagle-protocol needs a newer protobuf
 steeleagle-protocol = {path = "./steeleagle_protocol", editable = true}
 parrot-olympe = { path = "./parrot_olympe-0.0.0-py3-none-manylinux_2_31_aarch64.whl", marker = "platform_machine == 'aarch64'" }
 
@@ -27,3 +40,36 @@ dev = [
 log_cli = true
 log_cli_level = "INFO"
 log_cli_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+# Both Olympe wheels are manylinux_2_31
+platforms = [
+    { name = "linux-64-glibc-2-31", platform = "linux-64", glibc = "2.31" },
+    { name = "linux-aarch64-glibc-2-31", platform = "linux-aarch64", glibc = "2.31" },
+]
+
+[tool.pixi.dependencies]
+python = "3.11.*"
+
+[tool.pixi.pypi-dependencies]
+parrot-anafi = { path = ".", editable = true }
+steeleagle-protocol = { path = "./steeleagle_protocol", editable = true }
+
+[tool.pixi.target.linux-aarch64.pypi-dependencies]
+parrot-olympe = { path = "./parrot_olympe-0.0.0-py3-none-manylinux_2_31_aarch64.whl" }
+
+[tool.pixi.feature.generate.dependencies]
+buf = "*"
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+generate = { features = ["generate"], no-default-feature = true }
+
+[tool.pixi.feature.generate.tasks]
+# Regenerates the protocol in steeleagle_protocol/src, which is committed so
+# that installing needs no network beyond the package indexes
+generate = "buf generate"
+
+[tool.pixi.tasks] # start is defined under project.scripts

@@ -1,0 +1,13 @@
+[plugin]
+name = "Aviary Detector"
+type = "engine"
+description = "Simulated object detector run by the Aviary simulator, which detects the simulator's actors"
+
+# Args are ignored for simulated services; set them in the simulator's args
+# instead (simulator.args.engines.args), e.g. range = 20.0 for the detection
+# range in meters
+
+[engine]
+type = "detection"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+result = "steeleagle_protocol/v1/messages/result/DetectionResult"

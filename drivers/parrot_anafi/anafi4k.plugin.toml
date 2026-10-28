@@ -1,0 +1,74 @@
+[plugin]
+# Name of the plugin
+name = "Parrot Anafi 4K"
+# Plugin type: (driver, engine, monitor, simulator, extra)
+type = "driver"
+# Description of the plugin (optional)
+description = "Parrot Anafi 4K quadcopter driver, connecting through Olympe"
+
+[[args]] # Plugin arguments (can be empty)
+# Name of the argument
+name = "ip"
+# JSON type: (string, object, boolean, array, number)
+type = "string"
+# Description of the argument (optional)
+description = "IP the driver connects to (192.168.42.1 directly over Wi-Fi, 192.168.53.1 through a Skycontroller)"
+# Default value (optional)
+default = "192.168.42.1"
+
+[driver]
+# Driver type: (copter, legged, wheeled, boat)
+type = "copter"
+
+[[driver.cameras]] # Driver cameras (can be empty)
+# Name of the camera
+name = "rgb"
+# Type of input it creates
+type = "steeleagle_protocol/v1/messages/frame/RawFrame"
+# Description of which camera it is on the device (optional)
+description = "Main RGB camera on the gimbal, as its 720p live stream"
+# Resolution and frame rate of the live stream (recording is up to 4K, but
+# the live stream is 720p); the 69 degree horizontal FOV gives a 42 degree
+# vertical one at 16:9
+hres = 1280
+vres = 720
+hfov = 69
+vfov = 42
+fps = 30
+# Average latency of frame capture (optional)
+latency = 280
+# Whether or not the camera is on the main gimbal
+gimbal = true
+# Whether or not the camera is a primary camera; primary cameras
+# cannot be streamed alongside other primary cameras, enforced at
+# dataflow creation
+primary = true
+# Whether or not the camera stream is encodeable; some raw cameras
+# do not output encodeable frames
+encode = true
+
+[driver.supported]
+# Services hosted by this driver (optional)
+services = [
+    "steeleagle_protocol/v1/services/driver/ControlService",
+    "steeleagle_protocol/v1/services/driver/StreamService",
+    "steeleagle_protocol/v1/services/driver/CalibrateService",
+]
+
+[driver.unsupported]
+# Unsupported types, methods, and enums by this driver (optional)
+methods = [
+    "steeleagle_protocol/v1/services/driver/ControlService/Stand",
+    "steeleagle_protocol/v1/services/driver/ControlService/Sit",
+]
+fields = [
+    "steeleagle_protocol/v1/services/driver/TakeOffRequest/altitude",
+    "steeleagle_protocol/v1/messages/telemetry/PositionInfo/velocity_body/angular_vel",
+    "steeleagle_protocol/v1/messages/telemetry/PositionInfo/velocity_neu/angular_vel",
+    "steeleagle_protocol/v1/messages/telemetry/GimbalInfo/angular_velocity_body",
+    "steeleagle_protocol/v1/messages/telemetry/GimbalInfo/angular_velocity_neu",
+    "steeleagle_protocol/v1/services/driver/SetGimbalVelocityTargetResponse/setpoint/yaw_vel",
+]
+enums = [
+    "steeleagle_protocol/v1/services/driver/CalibrateRequest/Sensor/SENSOR_GYRO",
+]

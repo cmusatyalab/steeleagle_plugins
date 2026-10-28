@@ -4,7 +4,6 @@ import threading
 import time
 import logging
 from math import sin, cos, radians, degrees
-import numpy as np
 import cv2
 # Protocol imports
 import steeleagle_protocol.v1.common.common_pb2 as common_proto
@@ -29,7 +28,8 @@ from olympe.messages.ardrone3.GPSState import NumberOfSatelliteChanged
 from olympe.messages.common.CommonState import BatteryStateChanged, LinkSignalQuality
 from olympe.messages.gimbal import attitude
 # Driver imports
-from parrot_anafi import raw_frames
+from parrot_anafi.raw_frames import RawFramePublisher
+from parrot_anafi.publisher import Publisher
 
 logger = logging.getLogger('parrot-anafi/stream')
 
@@ -43,6 +43,14 @@ CAPTURE_RETRY_DELAY = 1.0
 # Failed reads in a row after which the video stream is reopened. A read fails
 # at once on a broken stream, or after OpenCV's read timeout on a silent one.
 MAX_FAILED_READS = 10
+# Name of the drone's camera, matching anafi4k.plugin.toml
+CAMERA_NAME = 'rgb'
+# Rate at which telemetry is published
+TELEMETRY_FPS = 30
+# Uriel payload type of telemetry, as named in plugin configs
+TELEMETRY_TYPE = 'steeleagle_protocol/v1/messages/telemetry/Telemetry'
+# Room in an input for telemetry to grow, e.g. once a setpoint or alert is set
+TELEMETRY_HEADROOM = 4 << 10
 
 RESOLUTION_DIMENSIONS = {
     stream_proto.RESOLUTION_360P: (640, 360),
@@ -57,21 +65,21 @@ class Stream(StreamServiceServicer):
     def __init__(self, drone, ip):
         self.drone = drone
         self.ip = ip
-        self._latest_frame = None
-        self._frame_lock = threading.Lock()
         self._capture_lock = threading.Lock()
         self._grabber_thread = None
-        # Raw frames go to Gabriel from the start, not only once someone
-        # streams frames, since a flow may take them at any time.
-        self._raw_frames = raw_frames.from_environment(
-            lambda: (self.get_position_info(), self.get_gimbal_info()))
-        if self._raw_frames is not None:
-            self._start_capture()
+        # The camera stream the vehicle asked for, as (uri, dimensions), or
+        # None. The reading thread publishes it, since the publisher must
+        # stay on one thread, so it is only handed over here.
+        self._camera_request = None
+        self._raw_frames = None
+        # Telemetry streams replace those started before them, under this lock
+        self._telemetry_lock = threading.Lock()
+        self._telemetry_publisher = None
 
     def _start_capture(self):
         """Starts reading the drone's video stream, once. The stream is opened
         on the reading thread, so a slow drone delays only the frames, not
-        the driver's start."""
+        the StreamCameras call."""
         with self._capture_lock:
             if self._grabber_thread is not None:
                 return
@@ -107,10 +115,27 @@ class Stream(StreamServiceServicer):
             if self._raw_frames is not None:
                 self._raw_frames.close()
 
+    def _update_publisher(self):
+        """Replaces the publisher if the vehicle asked for another camera
+        stream since the last frame, or closes it if it asked for none."""
+        request = self._camera_request
+        current = None
+        if self._raw_frames is not None:
+            current = (self._raw_frames.uri, self._raw_frames.dimensions)
+        if request == current:
+            return
+        if self._raw_frames is not None:
+            self._raw_frames.close()
+            self._raw_frames = None
+        if request is not None:
+            uri, dimensions = request
+            self._raw_frames = RawFramePublisher(
+                uri, dimensions, lambda: (self.get_position_info(), self.get_gimbal_info()))
+
     def _read_frames(self, cap):
-        """Reads frames from `cap` so only the newest is ever kept, and
-        publishes each one to Gabriel, if eagled asked for raw frames. Returns
-        once MAX_FAILED_READS reads in a row fail.
+        """Reads frames from `cap`, and publishes each one to Uriel, if the
+        vehicle asked for the camera. Returns once MAX_FAILED_READS reads in
+        a row fail.
         """
         failed_reads = 0
         while failed_reads < MAX_FAILED_READS:
@@ -119,21 +144,12 @@ class Stream(StreamServiceServicer):
                 failed_reads += 1
                 continue
             failed_reads = 0
-            with self._frame_lock:
-                self._latest_frame = frame
+            self._update_publisher()
             if self._raw_frames is not None:
                 try:
                     self._raw_frames.publish(frame)
                 except Exception as e:
                     logger.warning(f'raw frame could not be published, reason: {e}')
-
-    def _read_latest_frame(self):
-        with self._frame_lock:
-            frame = self._latest_frame
-            self._latest_frame = None
-        if frame is None:
-            return False, None
-        return True, frame
 
     def get_position_info(self) -> telemetry_proto.PositionInfo:
         """Get position info from the drone."""
@@ -304,76 +320,55 @@ class Stream(StreamServiceServicer):
             compass_warning=compass_warning,
         )
 
-    # TODO: GetVideoStreamURL
-
-    def StreamVideoFrames(self, request, context):
-        self._start_capture()
-
-        framerate = np.clip(request.target_fps, 1, 30) if request.target_fps else 30
-        dimensions = RESOLUTION_DIMENSIONS.get(request.resolution)
-        frame_id = 0
+    def get_telemetry(self):
+        """Get telemetry from the drone."""
         ts = Timestamp()
-        next_frame_time = time.monotonic()
-        while True:
-            try:
-                ret, cv_frame = self._read_latest_frame()
-                if not ret:
-                    time.sleep(1.0 / framerate)
-                    continue
-                if dimensions is not None and cv_frame.shape[1::-1] != dimensions:
-                    cv_frame = cv2.resize(cv_frame, dimensions, interpolation=cv2.INTER_AREA)
-                success, encoded_img = cv2.imencode('.jpg', cv_frame)
-                if not success:
-                    logger.warning('frame could not be decoded')
-                    time.sleep(1.0 / framerate)
-                    continue
-                ts.GetCurrentTime()
-                frame = telemetry_proto.EncodedFrame(
-                    timestamp=ts,
-                    id=frame_id,
-                    encoded_data=encoded_img.tobytes(),
-                    position_info=self.get_position_info(),
-                    gimbal_info=self.get_gimbal_info(),
-                )
-                frame_id += 1
-                yield stream_proto.StreamVideoFramesResponse(frame=frame)
-                next_frame_time += 1.0 / framerate
-                sleep_time = next_frame_time - time.monotonic()
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                else:
-                    # Processing overran the period
-                    next_frame_time = time.monotonic()
-            except Exception as e:
-                logger.warning(f'frame could not be read, reason: {e}')
-                time.sleep(1.0 / framerate)
-                next_frame_time = time.monotonic()
+        ts.GetCurrentTime()
+        return telemetry_proto.Telemetry(
+            timestamp=ts,
+            battery_info=self.get_battery_info(),
+            gps_info=self.get_gps_info(),
+            position_info=self.get_position_info(),
+            gimbal_info=self.get_gimbal_info(),
+            alert_info=self.get_alert_info(),
+            motion_status=self.get_motion_status(),
+            mode=self.get_mode(),
+        )
+
+    def StreamCameras(self, request, context):
+        # The drone has one camera, so it is streamed if it is requested, and
+        # stopped otherwise. Any other camera is an error.
+        requests = list(request.secondaries)
+        if request.HasField('primary'):
+            requests.append(request.primary)
+        unknown = [r.id for r in requests if r.id != CAMERA_NAME]
+        if unknown:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f'unknown cameras {unknown}, only {CAMERA_NAME!r} exists',
+            )
+        if not requests:
+            self._camera_request = None
+            return stream_proto.StreamCamerasResponse()
+        camera = requests[0]
+        dimensions = None
+        if camera.HasField('target_resolution'):
+            dimensions = RESOLUTION_DIMENSIONS.get(camera.target_resolution)
+        self._camera_request = (camera.uri, dimensions)
+        self._start_capture()
+        return stream_proto.StreamCamerasResponse()
 
     def StreamTelemetry(self, request, context):
-        framerate = np.clip(request.target_fps, 1, 60) if request.target_fps else 30
-        ts = Timestamp()
-        next_frame_time = time.monotonic()
-        while True:
-            try:
-                ts.GetCurrentTime()
-                telemetry = telemetry_proto.Telemetry(
-                    timestamp=ts,
-                    battery_info=self.get_battery_info(),
-                    gps_info=self.get_gps_info(),
-                    position_info=self.get_position_info(),
-                    gimbal_info=self.get_gimbal_info(),
-                    alert_info=self.get_alert_info(),
-                    motion_status=self.get_motion_status(),
-                    mode=self.get_mode(),
-                )
-                yield stream_proto.StreamTelemetryResponse(telemetry=telemetry)
-                next_frame_time += 1.0 / framerate
-                sleep_time = next_frame_time - time.monotonic()
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                else:
-                    next_frame_time = time.monotonic()
-            except Exception as e:
-                logger.warning(f'telemetry frame could not be generated, reason: {e}')
-                time.sleep(1.0 / framerate)
-                next_frame_time = time.monotonic()
+        if not request.uri:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, 'no telemetry uri given')
+        with self._telemetry_lock:
+            if self._telemetry_publisher is not None:
+                self._telemetry_publisher.stop()
+            self._telemetry_publisher = Publisher(
+                request.uri,
+                TELEMETRY_TYPE,
+                TELEMETRY_FPS,
+                lambda: self.get_telemetry().SerializeToString(),
+                headroom=TELEMETRY_HEADROOM,
+            )
+        return stream_proto.StreamTelemetryResponse()
