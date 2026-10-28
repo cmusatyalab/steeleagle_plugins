@@ -1,0 +1,94 @@
+# Pixi workspace of the GCS plugin. The daemon starts the plugin with
+# `pixi run start`, which builds the web UI and the server first; both builds
+# are cached, so later starts only rebuild what changed. Run `pixi run build`
+# once after installing the package so the first start is quick.
+#
+# Uriel is linked with cgo. Its native library isn't on conda-forge, so the uriel task
+# downloads the prebuilt release that go.mod requires into this environment. Nothing is
+# installed system-wide.
+[workspace]
+name = "steeleagle-gcs"
+channels = ["conda-forge"]
+# Uriel only supports Linux
+platforms = ["linux-64", "linux-aarch64"]
+
+[dependencies]
+# Builds the server; it also compiles missions at runtime, which runs `go build`
+go = ">=1.26.5"
+go-cgo = "*"
+c-compiler = "*"
+# Only needed to build the web UI, which the server serves as static files
+nodejs = ">=22"
+pkg-config = "*"
+# Download liburiel (tools/uriel-install.sh)
+curl = "*"
+# Generates the mock harness's video clips (cmd/gcsmock)
+ffmpeg = "*"
+
+[activation.env]
+CGO_ENABLED = "1"
+
+# Installs the native library Uriel's Go bindings link against into the environment, at the
+# version go.mod requires. It checks the environment itself, so it is never skipped by Pixi's
+# cache (which would go stale when the environment is recreated). The install script is copied
+# from steeleagle's tools/uriel/install.sh, to read the version from this package's go.mod.
+[tasks.uriel]
+cmd = "tools/uriel-ensure.sh"
+
+[tasks.web-deps]
+cmd = "npm ci --no-audit --no-fund"
+cwd = "web"
+inputs = ["web/package.json", "web/package-lock.json"]
+outputs = ["web/node_modules/.package-lock.json"]
+
+# The web UI's local settings (e.g. its Mapbox token), which aren't checked in
+[tasks.web-config]
+cmd = "test -f src/config.js || cp src/config.js.template src/config.js"
+cwd = "web"
+
+[tasks.web-build]
+cmd = "npm run build"
+cwd = "web"
+depends-on = ["web-deps", "web-config"]
+inputs = ["web/package.json", "web/index.html", "web/vite.config.js", "web/src/**", "web/public/**"]
+outputs = ["web/dist/**"]
+
+[tasks.build]
+cmd = "go build -trimpath -o bin/gcs ./cmd/gcs"
+depends-on = ["web-build", "uriel"]
+inputs = ["go.mod", "go.sum", "**/*.go"]
+outputs = ["bin/gcs"]
+
+# The start task is what the plugin runner invokes; the plugin's args come in
+# STEELEAGLE_PLUGIN_ARGS, and its Uriel engine name in ICEORYX_SERVICE
+[tasks.start]
+cmd = "./bin/gcs -web web/dist"
+depends-on = ["build"]
+
+# The mock harness: a fake daemon with simulated vehicles, which runs the GCS as
+# its child (see cmd/gcsmock)
+[tasks.build-mock]
+cmd = "go build -trimpath -o bin/gcsmock ./cmd/gcsmock"
+depends-on = ["uriel"]
+inputs = ["go.mod", "go.sum", "**/*.go"]
+outputs = ["bin/gcsmock"]
+
+[tasks.mock]
+cmd = "./bin/gcsmock -gcs bin/gcs -web web/dist"
+depends-on = ["build", "build-mock"]
+
+# The mock harness's end-to-end test runs bin/gcs, so the server is built first
+[tasks.test]
+cmd = "go test ./..."
+depends-on = ["build"]
+
+[tasks.web-test]
+cmd = "npm test"
+cwd = "web"
+depends-on = ["web-deps"]
+
+# Serves the web UI with live reload, against a GCS server running on :8002
+[tasks.web-dev]
+cmd = "npm run dev"
+cwd = "web"
+depends-on = ["web-deps"]

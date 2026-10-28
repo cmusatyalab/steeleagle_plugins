@@ -1,0 +1,7 @@
+/bin/
+.pixi/*
+!.pixi/config.toml
+/web/dist/
+/web/node_modules/
+# The web UI's local settings (its Mapbox token); web-config creates it from the template
+/web/src/config.js

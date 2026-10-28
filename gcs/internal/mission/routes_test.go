@@ -1,0 +1,471 @@
+package mission
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/rs/zerolog"
+)
+
+// fakeCompiler is a Compiler double, like the Python backend's FakeEaglecClient.
+type fakeCompiler struct {
+	mu          sync.Mutex
+	registry    map[string]any
+	registryErr error
+	buildErr    func(BuildRequest) error
+	binaries    map[string][]byte
+	registryN   int
+	builds      []BuildRequest
+}
+
+func (f *fakeCompiler) Registry(context.Context) (map[string]any, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.registryN++
+	return f.registry, f.registryErr
+}
+
+func (f *fakeCompiler) Build(_ context.Context, req BuildRequest) ([]byte, error) {
+	f.mu.Lock()
+	f.builds = append(f.builds, req)
+	f.mu.Unlock()
+	if f.buildErr != nil {
+		if err := f.buildErr(req); err != nil {
+			return nil, err
+		}
+	}
+	if b, ok := f.binaries[req.Arch]; ok {
+		return b, nil
+	}
+	return []byte("ELF-" + req.Arch), nil
+}
+
+func testConfig(t testing.TB) CompilerConfig {
+	t.Helper()
+	cfg, err := ResolveConfig(CompilerConfig{SDKVersion: "v0.0.0-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func newFake(t testing.TB) *fakeCompiler {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/registry.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &fakeCompiler{registry: jsonMap(t, string(raw))}
+}
+
+func newService(t testing.TB, f *fakeCompiler) *Service {
+	t.Helper()
+	return NewService(f, testConfig(t), zerolog.Nop())
+}
+
+func graphBody(t testing.TB, mutate func(map[string]any)) []byte {
+	t.Helper()
+	b, err := json.Marshal(exGraph(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if mutate != nil {
+		mutate(m)
+	}
+	out, _ := json.Marshal(m)
+	return out
+}
+
+func do(h http.HandlerFunc, method, target string, body []byte) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(method, target, bytes.NewReader(body)))
+	return rec
+}
+
+func decodeMap(t testing.TB, rec *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatalf("body %q: %v", rec.Body.String(), err)
+	}
+	return m
+}
+
+func TestSchemaIsTranslatedAndListsImports(t *testing.T) {
+	s := newService(t, newFake(t))
+	rec := do(s.ServeSchema, "GET", "/api/schema", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	m := decodeMap(t, rec)
+	patrol := m["actions"].(map[string]any)["Patrol"].(map[string]any)
+	if patrol["type"] != "actions.Patrol" {
+		t.Errorf("Patrol type = %v", patrol["type"])
+	}
+	first := m["imports"].([]any)[0].(map[string]any)
+	if !strings.HasSuffix(first["path"].(string), "/sdk/dsl/actions") {
+		t.Errorf("first import = %v", first)
+	}
+	if _, ok := m["default_role"]; ok {
+		t.Error("schema has default_role")
+	}
+}
+
+func TestSchemaRefreshReloads(t *testing.T) {
+	f := newFake(t)
+	s := newService(t, f)
+	if rec := do(s.ServeSchema, "GET", "/api/schema?refresh=1", nil); rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if f.registryN != 2 {
+		t.Errorf("registry loads = %d, want 2", f.registryN)
+	}
+}
+
+func TestSetupFailureIs503(t *testing.T) {
+	f := newFake(t)
+	f.registryErr = errors.New("building eaglec needs the go toolchain on PATH")
+	s := newService(t, f)
+	rec := do(s.ServeSchema, "GET", "/api/schema", nil)
+	if rec.Code != 503 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	want := "FSM compiler unavailable: building eaglec needs the go toolchain on PATH"
+	if got := decodeMap(t, rec)["detail"]; got != want {
+		t.Errorf("detail = %v, want %v", got, want)
+	}
+	if rec := do(s.ServeCompile, "POST", "/api/compile", graphBody(t, nil)); rec.Code != 503 {
+		t.Errorf("compile status %d", rec.Code)
+	}
+}
+
+func TestCompileOkCompilesAmd64WithoutGeoJSON(t *testing.T) {
+	f := newFake(t)
+	s := newService(t, f)
+	rec := do(s.ServeCompile, "POST", "/api/compile", graphBody(t, nil))
+	if rec.Code != 200 || !reflect.DeepEqual(decodeMap(t, rec), map[string]any{"ok": true}) {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if len(f.builds) != 1 {
+		t.Fatalf("builds = %d", len(f.builds))
+	}
+	b := f.builds[0]
+	want := exAST(t)
+	if !reflect.DeepEqual(b.Ast["Actions"], want["Actions"]) || !reflect.DeepEqual(b.Ast["Mission"], want["Mission"]) {
+		t.Errorf("ast = %v", b.Ast)
+	}
+	if b.GeoJSON != nil || b.Arch != "amd64" || b.Plugin != nil {
+		t.Errorf("request = geojson %q arch %q plugin %q", b.GeoJSON, b.Arch, b.Plugin)
+	}
+}
+
+func TestCompilePassesDrawnFeatures(t *testing.T) {
+	f := newFake(t)
+	s := newService(t, f)
+	body := graphBody(t, func(m map[string]any) { m["geojson"] = exPolyGeoJSON })
+	if rec := do(s.ServeCompile, "POST", "/api/compile", body); rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if got := string(f.builds[0].GeoJSON); got != exPolyGeoJSON {
+		t.Errorf("geojson = %q", got)
+	}
+}
+
+func TestCompileIgnoresUnknownFields(t *testing.T) {
+	s := newService(t, newFake(t))
+	body := graphBody(t, func(m map[string]any) { m["frontend_extra"] = 1 })
+	if rec := do(s.ServeCompile, "POST", "/api/compile", body); rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCompileStructuralErrorsSkipCompiler(t *testing.T) {
+	f := newFake(t)
+	s := newService(t, f)
+	body := graphBody(t, func(m map[string]any) { m["start_id"] = nil })
+	rec := do(s.ServeCompile, "POST", "/api/compile", body)
+	want := `{"errors":[{"node_id":null,"event_id":null,"message":"No start state: right-click a node and set it as the start state"}]}`
+	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != want {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if len(f.builds) != 0 {
+		t.Error("compiler was called")
+	}
+}
+
+func TestCompileFeatureNameErrorsSkipCompiler(t *testing.T) {
+	f := newFake(t)
+	s := newService(t, f)
+	bad := strings.Replace(exPolyGeoJSON, `"Poly"`, `"Area B"`, 1)
+	rec := do(s.ServeCompile, "POST", "/api/compile", graphBody(t, func(m map[string]any) { m["geojson"] = bad }))
+	want := `{"errors":[{"node_id":null,"event_id":null,"message":"Map feature 'Area B' can only contain letters, digits and underscores"}]}`
+	if strings.TrimSpace(rec.Body.String()) != want {
+		t.Fatalf("body %s", rec.Body)
+	}
+	if len(f.builds) != 0 {
+		t.Error("compiler was called")
+	}
+}
+
+func TestCompileErrorsMapDeclsToNodesAndEvents(t *testing.T) {
+	f := newFake(t)
+	f.buildErr = func(BuildRequest) error {
+		return &CompileErrors{Errors: []DeclError{
+			{Decl: "patrol", Message: "no field Altitud"},
+			{Decl: "low", Message: "bad comparator"},
+			{Message: "go build failed"},
+		}}
+	}
+	s := newService(t, f)
+	rec := do(s.ServeCompile, "POST", "/api/compile", graphBody(t, nil))
+	want := `{"errors":[{"node_id":"patrol","event_id":null,"message":"no field Altitud"},` +
+		`{"node_id":null,"event_id":"low","message":"bad comparator"},` +
+		`{"node_id":null,"event_id":null,"message":"go build failed"}]}`
+	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != want {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCompilerFailureIs500(t *testing.T) {
+	f := newFake(t)
+	f.buildErr = func(BuildRequest) error { return errors.New("eaglec exited with status 2\nusage: ...") }
+	s := newService(t, f)
+	rec := do(s.ServeCompile, "POST", "/api/compile", graphBody(t, nil))
+	if rec.Code != 500 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	d := decodeMap(t, rec)["detail"].(string)
+	if !strings.Contains(d, "status 2") || !strings.Contains(d, "usage: ...") {
+		t.Errorf("detail = %q", d)
+	}
+}
+
+func TestCompileRejectsNonIdentifierNamesAndReservedDone(t *testing.T) {
+	f := newFake(t)
+	s := newService(t, f)
+	body := graphBody(t, func(m map[string]any) {
+		m["nodes"].([]any)[0].(map[string]any)["instance_id"] = "land here"
+		m["events"].([]any)[0].(map[string]any)["instance_id"] = "done"
+	})
+	rec := do(s.ServeCompile, "POST", "/api/compile", body)
+	out := rec.Body.String()
+	for _, want := range []string{
+		`"node_id":"land here","event_id":null,"message":"Node name 'land here' can only contain letters, digits and underscores, and can't start with a digit"`,
+		`"node_id":null,"event_id":"done","message":"Event name 'done' is reserved for the action-finished transition"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s in %s", want, out)
+		}
+	}
+	if len(f.builds) != 0 {
+		t.Error("compiler was called")
+	}
+}
+
+func TestRenderDSL(t *testing.T) {
+	s := newService(t, newFake(t))
+	rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", graphBody(t, nil))
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	dsl := decodeMap(t, rec)["dsl"].(string)
+	for _, want := range []string{
+		"    actions.Patrol patrol(Area=params.Polygon_Poly, Altitude=15.0, Pattern=actions.PatrolModeSurvey)\n",
+		"    Start takeoff\n",
+	} {
+		if !strings.Contains(dsl, want) {
+			t.Errorf("dsl lacks %q:\n%s", want, dsl)
+		}
+	}
+	if strings.Contains(dsl, "Role") {
+		t.Error("dsl has a Role")
+	}
+}
+
+func TestRenderDSLWithoutStart(t *testing.T) {
+	s := newService(t, newFake(t))
+	rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", graphBody(t, func(m map[string]any) { m["start_id"] = nil }))
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if dsl := decodeMap(t, rec)["dsl"].(string); strings.Contains(dsl, "Mission:") {
+		t.Errorf("dsl has a Mission:\n%s", dsl)
+	}
+}
+
+func TestParseDSLReturnsGraphAndWarnsAboutExtraImports(t *testing.T) {
+	s := newService(t, newFake(t))
+	dsl := strings.Replace(exDSL, "Actions:\n", "    \"example.com/x/actions\"\n\nActions:\n", 1)
+	body, _ := json.Marshal(map[string]string{"dsl": dsl})
+	rec := do(s.ServeParseDSL, "POST", "/api/parse_dsl", body)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	m := decodeMap(t, rec)
+	if m["start_id"] != "takeoff" {
+		t.Errorf("start_id = %v", m["start_id"])
+	}
+	if len(m["nodes"].([]any)) != 4 {
+		t.Errorf("nodes = %v", m["nodes"])
+	}
+	want := []any{"Imports not in the GCS configuration are ignored when compiling: example.com/x/actions"}
+	if !reflect.DeepEqual(m["warnings"], want) {
+		t.Errorf("warnings = %v", m["warnings"])
+	}
+}
+
+func TestParseDSLUpgradesTheLegacyImportHeader(t *testing.T) {
+	s := newService(t, newFake(t))
+	legacy, err := os.ReadFile("testdata/legacy_import.dsl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]string{"dsl": string(legacy)})
+	rec := do(s.ServeParseDSL, "POST", "/api/parse_dsl", body)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	w := decodeMap(t, rec)["warnings"].([]any)
+	if len(w) == 0 || w[0] != "Converted the old Import: header to Imports:" {
+		t.Errorf("warnings = %v", w)
+	}
+}
+
+func TestParseDSLSyntaxErrorIs422(t *testing.T) {
+	s := newService(t, newFake(t))
+	body, _ := json.Marshal(map[string]string{"dsl": "Actions:\n  x"})
+	rec := do(s.ServeParseDSL, "POST", "/api/parse_dsl", body)
+	if rec.Code != 422 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if d := decodeMap(t, rec)["detail"].(string); d == "" {
+		t.Error("empty detail")
+	}
+}
+
+func TestBuildReturnsTheBinary(t *testing.T) {
+	f := newFake(t)
+	f.binaries = map[string][]byte{"arm64": []byte("\x7fELF-arm")}
+	s := newService(t, f)
+	rec := do(s.ServeBuild, "POST", "/api/build", graphBody(t, func(m map[string]any) { m["arch"] = "arm64" }))
+	if rec.Code != 200 || rec.Body.String() != "\x7fELF-arm" {
+		t.Fatalf("status %d: %q", rec.Code, rec.Body)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("content type %q", ct)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); cd != `attachment; filename="mission-arm64"` {
+		t.Errorf("content disposition %q", cd)
+	}
+	if len(f.builds) != 1 || f.builds[0].Arch != "arm64" {
+		t.Errorf("builds = %v", f.builds)
+	}
+}
+
+func TestBuildCompileErrorsAre422(t *testing.T) {
+	f := newFake(t)
+	f.buildErr = func(BuildRequest) error {
+		return &CompileErrors{Errors: []DeclError{{Decl: "patrol", Message: "bad area"}}}
+	}
+	s := newService(t, f)
+	rec := do(s.ServeBuild, "POST", "/api/build", graphBody(t, func(m map[string]any) { m["arch"] = "amd64" }))
+	if rec.Code != 422 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if d := decodeMap(t, rec)["detail"]; d != "Build failed for amd64: bad area" {
+		t.Errorf("detail = %v", d)
+	}
+}
+
+func TestBuildRejectsUnknownArch(t *testing.T) {
+	s := newService(t, newFake(t))
+	rec := do(s.ServeBuild, "POST", "/api/build", graphBody(t, func(m map[string]any) { m["arch"] = "riscv" }))
+	if rec.Code != 422 {
+		t.Fatalf("status %d", rec.Code)
+	}
+}
+
+func TestCompileGraphPrefixesGroupErrors(t *testing.T) {
+	f := newFake(t)
+	f.buildErr = func(req BuildRequest) error {
+		errs := []DeclError{{Message: "Y"}}
+		if req.Arch == "amd64" {
+			errs = append([]DeclError{{Message: "X"}}, errs...)
+		}
+		return &CompileErrors{Errors: errs}
+	}
+	s := newService(t, f)
+	_, errs, err := s.CompileGraph(context.Background(), exGraph(t), []BuildTarget{
+		{Key: "alpha, bravo", Arch: "amd64"},
+		{Key: "charlie", Arch: "arm64"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msgs []string
+	for _, e := range errs {
+		msgs = append(msgs, e.Message)
+	}
+	if want := []string{"alpha, bravo: X", "Y"}; !reflect.DeepEqual(msgs, want) {
+		t.Errorf("messages = %q, want %q", msgs, want)
+	}
+}
+
+func TestCompileGraphSingleTargetNeverPrefixes(t *testing.T) {
+	f := newFake(t)
+	f.buildErr = func(BuildRequest) error {
+		return &CompileErrors{Errors: []DeclError{{Decl: "patrol", Message: "X"}}}
+	}
+	s := newService(t, f)
+	_, errs, _ := s.CompileGraph(context.Background(), exGraph(t), []BuildTarget{{Key: "alpha", Arch: "amd64"}})
+	if len(errs) != 1 || errs[0].Message != "X" || errs[0].NodeID == nil || *errs[0].NodeID != "patrol" {
+		t.Errorf("errs = %+v", errs)
+	}
+}
+
+func TestCompileGraphKeysByTarget(t *testing.T) {
+	f := newFake(t)
+	s := newService(t, f)
+	bins, errs, err := s.CompileGraph(context.Background(), exGraph(t), []BuildTarget{
+		{Key: "one", Arch: "amd64", Plugin: []byte("p1")},
+		{Key: "two", Arch: "arm64"},
+		{Key: "three", Arch: "amd64"},
+	})
+	if err != nil || len(errs) != 0 {
+		t.Fatalf("err %v errs %v", err, errs)
+	}
+	want := map[string][]byte{"one": []byte("ELF-amd64"), "two": []byte("ELF-arm64"), "three": []byte("ELF-amd64")}
+	if !reflect.DeepEqual(bins, want) {
+		t.Errorf("bins = %q", bins)
+	}
+	plugins := map[string]string{}
+	for _, b := range f.builds {
+		plugins[b.Arch+string(b.Plugin)] = "x"
+	}
+	if plugins["amd64p1"] == "" {
+		t.Error("plugin was not passed to its target's build")
+	}
+}
+
+func TestCompileGraphCompilerFailureIsAnError(t *testing.T) {
+	f := newFake(t)
+	f.buildErr = func(BuildRequest) error { return errors.New("timed out after 300 s") }
+	s := newService(t, f)
+	_, errs, err := s.CompileGraph(context.Background(), exGraph(t), []BuildTarget{{Key: "a", Arch: "amd64"}})
+	if err == nil || len(errs) != 0 || err.Error() != "timed out after 300 s" {
+		t.Errorf("err = %v, errs = %v", err, errs)
+	}
+}
