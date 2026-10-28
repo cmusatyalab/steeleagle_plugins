@@ -34,9 +34,9 @@ def decode_image(frame):
         raise FrameError(
             f"{len(frame.data)} bytes is not a {width}x{height} frame of {frame.channels} channels"
         )
-    return np.frombuffer(frame.data, dtype=np.uint8).reshape(
-        height, width, RGB_CHANNELS
-    )
+    pixels = np.frombuffer(frame.data, dtype=np.uint8)
+    # frombuffer is read-only, which PyTorch warns about
+    return pixels.reshape(height, width, RGB_CHANNELS).copy()
 
 
 def detect(frame, predictor, classes, geofence, camera):
