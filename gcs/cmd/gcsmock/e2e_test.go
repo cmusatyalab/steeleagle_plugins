@@ -80,6 +80,9 @@ type mockRun struct {
 // without an encoder, and extra are more flags for the mock, where {remote} is the other daemon's IP. The mock is stopped when the test ends.
 func startMock(t *testing.T, noEncoderRemote bool, extra ...string) *mockRun {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("end-to-end test skipped in -short mode")
+	}
 	gcs, err := filepath.Abs("../../bin/gcs")
 	if err != nil {
 		t.Fatal(err)

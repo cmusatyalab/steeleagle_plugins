@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: 2025 Carnegie Mellon University
+# SPDX-License-Identifier: 0BSD
+
+repos:
+  - repo: meta
+    hooks:
+      - id: check-hooks-apply
+      - id: check-useless-excludes
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.0
+    hooks:
+      - id: ruff-check
+        args: [ --fix ]
+      - id: ruff-format
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.33.1
+    hooks:
+      - id: typos
+
+  # Go formatting, for every Go module in the repository
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: go-fmt
+
+  # The GCS builds with cgo against liburiel, so its checks run in its Pixi
+  # environment (the uriel task installs liburiel there if it's missing)
+  - repo: local
+    hooks:
+      - id: gcs-go-vet
+        name: go vet (gcs)
+        entry: bash -c 'cd gcs && pixi=$(command -v pixi || echo "$HOME/.pixi/bin/pixi") && "$pixi" run -q uriel >/dev/null && "$pixi" run go vet ./...'
+        language: system
+        files: ^gcs/.*\.go$|^gcs/go\.(mod|sum)$
+        pass_filenames: false
+        require_serial: true
+      - id: gcs-go-unit-tests
+        name: go unit tests (gcs)
+        entry: bash -c 'cd gcs && pixi=$(command -v pixi || echo "$HOME/.pixi/bin/pixi") && "$pixi" run -q uriel >/dev/null && "$pixi" run go test -short -timeout 120s ./...'
+        language: system
+        files: ^gcs/.*\.go$|^gcs/go\.(mod|sum)$
+        pass_filenames: false
+        require_serial: true
+      - id: gcs-eslint
+        name: eslint (gcs/web)
+        entry: bash -c 'cd gcs/web && pixi=$(command -v pixi || echo "$HOME/.pixi/bin/pixi") && "$pixi" run -q web-deps >/dev/null && "$pixi" run npx --no-install eslint --no-warn-ignored "${@#gcs/web/}"' --
+        language: system
+        files: ^gcs/web/src/.*\.jsx?$
+
+#  - repo: https://github.com/fsfe/reuse-tool
+#    rev: v1.0.0
+#    hooks:
+#      - id: reuse
+#        name: Check SPDX license tags
