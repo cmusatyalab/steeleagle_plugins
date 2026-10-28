@@ -46,10 +46,15 @@ class Vehicle:
 
         # Target positions
         self.mode = Mode.POSITION
-        self.pose_mode = PoseMode.ANGLE
         self.position_target = self.sim_origin
         self.velocity_target = LPoint3f(0.0, 0.0, 0.0) # x_vel, y_vel, z_vel
-        self.pose_target = LPoint3f(0.0, 0.0, 0.0) # yaw, pitch, roll
+        # The vehicle's heading and the gimbal's pitch and roll are targeted
+        # separately, so that e.g. the vehicle can yaw at a rate while the
+        # gimbal pitches at another. Both are in raw simulator angles.
+        self.heading_mode = PoseMode.ANGLE
+        self.heading_target = 0.0
+        self.gimbal_mode = PoseMode.ANGLE
+        self.gimbal_target = LVector3f(0.0, 0.0, 0.0) # unused, pitch, roll
         self.speed_target = DEFAULT_SPEED
         self.waypoints = deque()
 
@@ -199,9 +204,9 @@ class Vehicle:
             bool: true if pose reached, false otherwise
         """
         rotation = self.camera.camera.getHpr()
-        return self.angle_reached(rotation.x, self.pose_target.x) and \
-                self.angle_reached(rotation.y, self.pose_target.y) and \
-                self.angle_reached(rotation.z, self.pose_target.z)
+        return self.heading_reached() and \
+                self.angle_reached(rotation.y, self.gimbal_target.y) and \
+                self.angle_reached(rotation.z, self.gimbal_target.z)
 
     def heading_reached(self) -> bool:
         """Checks if heading component of target pose is equal to current pose heading.
@@ -209,7 +214,7 @@ class Vehicle:
         Returns:
             bool: true if heading reached, false otherwise
         """
-        return self.angle_reached(self.camera.camera.getH(), self.pose_target.x)
+        return self.angle_reached(self.camera.camera.getH(), self.heading_target)
 
     def angle_reached(self, a1: float, a2: float) -> bool:
         """Checks if two angles are equal.
@@ -327,21 +332,49 @@ class Vehicle:
             self.velocity_target = forward + right + up
         self.mode = Mode.VELOCITY
 
-    def set_pose_target(self, vector: LVector3f, mode: PoseMode):
-        """Set a pose target for the camera.
+    def set_heading_target(self, heading: float, mode: PoseMode):
+        """Set a heading target for the vehicle.
 
         Args:
-            vector (LVector3f): target pose
+            heading (float): target heading, heading offset, or yaw rate
+                in degrees (per second)
             mode (PoseMode): pose mode
         """
         if mode == PoseMode.ANGLE:
-            self.pose_target = LVector3f(convert_angle_heading(vector.x), vector.y, vector.z)
+            self.heading_target = convert_angle_heading(heading)
         elif mode == PoseMode.OFFSET:
-            pose = self.current_pose() + vector
-            self.pose_target = LVector3f(convert_angle_heading(pose.x), pose.y, pose.z)
+            self.heading_target = convert_angle_heading(self.current_pose().x + heading)
         else:
-            self.pose_target = LVector3f(-vector.x, vector.y, vector.z)
-        self.pose_mode = mode
+            self.heading_target = -heading
+        self.heading_mode = mode
+
+    def set_gimbal_target(self, pitch: float, roll: float, mode: PoseMode):
+        """Set a pitch and roll target for the gimbal.
+
+        Args:
+            pitch (float): target pitch, pitch offset, or pitch rate in
+                degrees (per second)
+            roll (float): target roll, roll offset, or roll rate in
+                degrees (per second)
+            mode (PoseMode): pose mode
+        """
+        target = LVector3f(0, pitch, roll)
+        if mode == PoseMode.OFFSET:
+            rot = self.current_rotation()
+            target += LVector3f(0, rot.y, rot.z)
+        self.gimbal_target = target
+        self.gimbal_mode = mode
+
+    def heading_setpoint(self) -> float:
+        """Get the heading the vehicle is turning to.
+
+        Returns:
+            float: target heading in degrees, or the current heading
+                if the vehicle is turning at a rate
+        """
+        if self.heading_mode == PoseMode.VELOCITY:
+            return self.current_pose().x
+        return convert_angle_heading(self.heading_target)
 
     def get_velocity(self, dt: float) -> LVector3f:
         """Get current velocity.
@@ -431,28 +464,32 @@ class Vehicle:
         Returns:
             LVector3f: scaled angular velocity vector
         """
-        rot = LVector3f(0, 0, 0)
-        if self.pose_mode == PoseMode.ANGLE or self.pose_mode == PoseMode.OFFSET:
-            # OFFSET stores an absolute target pose in pose_target (current +
-            # offset, computed once in set_pose_target), so it converges the
-            # same way ANGLE does rather than being treated as a rate like
-            # VELOCITY mode below.
-            current = self.current_rotation()
-            diff = self.pose_target - current
-            if diff.x >= 180.0:
-                diff.x -= 360.0 # Rotate in the opposite direction if it's faster
-            if diff.x <= -180.0:
-                diff.x += 360.0
-
-            rot += diff
-            if rot.length() > 0:
-                rot.normalize()
-                rot *= DEFAULT_ANGULAR_SPEED * dt
-            if rot.length() > diff.length():
-                rot *= diff.length() / rot.length()
+        current = self.current_rotation()
+        # OFFSET stores an absolute target (current + offset, computed once
+        # when the target is set), so it converges the same way ANGLE does
+        # rather than being treated as a rate like VELOCITY mode.
+        if self.heading_mode == PoseMode.VELOCITY:
+            heading = self.heading_target * dt
         else:
-            rot = self.pose_target * dt
-        return rot
+            diff = self.heading_target - current.x
+            if diff >= 180.0:
+                diff -= 360.0 # Rotate in the opposite direction if it's faster
+            if diff <= -180.0:
+                diff += 360.0
+            step = DEFAULT_ANGULAR_SPEED * dt
+            heading = max(-step, min(step, diff))
+
+        if self.gimbal_mode == PoseMode.VELOCITY:
+            gimbal = self.gimbal_target * dt
+        else:
+            diff = LVector3f(0, self.gimbal_target.y - current.y, self.gimbal_target.z - current.z)
+            gimbal = LVector3f(diff)
+            if gimbal.length() > 0:
+                gimbal.normalize()
+                gimbal *= DEFAULT_ANGULAR_SPEED * dt
+            if gimbal.length() > diff.length():
+                gimbal = diff
+        return LVector3f(heading, gimbal.y, gimbal.z)
 
     def move(self, dt):
         """Move based on current velocity.

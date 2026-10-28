@@ -154,7 +154,8 @@ class Control(ControlServiceServicer):
     def Hold(self, request, context):
         self.motion_info.set_flight_mode(telemetry_proto.Mode.MODE_LOITER)
         self.vehicle.set_velocity_target(LVector3f(0, 0, 0))
-        self.vehicle.set_pose_target(LVector3f(0, 0, 0), PoseMode.VELOCITY)
+        self.vehicle.set_heading_target(0, PoseMode.VELOCITY)
+        self.vehicle.set_gimbal_target(0, 0, PoseMode.VELOCITY)
         return control_proto.HoldResponse(
             expected_mode=telemetry_proto.Mode.MODE_LOITER,
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,
@@ -167,7 +168,8 @@ class Control(ControlServiceServicer):
         # stops wherever it is
         current = self.vehicle.current_position()
         self.vehicle.set_position_target(LPoint3f(current.x, current.y, self.vehicle.sim_origin.z), speed=KILL_FALL_SPEED)
-        self.vehicle.set_pose_target(LVector3f(0, 0, 0), PoseMode.VELOCITY)
+        self.vehicle.set_heading_target(0, PoseMode.VELOCITY)
+        self.vehicle.set_gimbal_target(0, 0, PoseMode.VELOCITY)
         return control_proto.KillResponse(
             expected_mode=telemetry_proto.Mode.MODE_EMERGENCY,
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_STOPPED,
@@ -185,7 +187,7 @@ class Control(ControlServiceServicer):
                 target.latitude,
                 target.longitude,
                 )
-        self.vehicle.set_pose_target(LVector3f(bearing, 0, 0), PoseMode.ANGLE)
+        self.vehicle.set_heading_target(bearing, PoseMode.ANGLE)
 
         altitude = request.min_return_altitude + self.vehicle.sim_origin.z
         if request.min_return_altitude < position.z:
@@ -217,7 +219,6 @@ class Control(ControlServiceServicer):
         self.motion_info.set_flight_mode(telemetry_proto.Mode.MODE_GUIDED)
         theta = radians(self.vehicle.current_rotation().x)
         offset = LVector3f(request.position.x, request.position.y, request.position.z)
-        pose = LPoint3f(request.position.angle, 0, 0)
         if request.frame <= 1: # Body-aligned
             self.vehicle.set_relative_position_target(offset, body_aligned=True, speed=request.speed or DEFAULT_SPEED)
             north, east = rotate_body_to_neu(request.position.x, request.position.y, theta)
@@ -233,7 +234,7 @@ class Control(ControlServiceServicer):
             neu_offset = LVector3f(request.position.y, request.position.x, request.position.z)
             self.vehicle.set_relative_position_target(neu_offset, body_aligned=False, speed=request.speed or DEFAULT_SPEED)
             setpoint = request.position
-        self.vehicle.set_pose_target(pose, mode=PoseMode.OFFSET)
+        self.vehicle.set_heading_target(request.position.angle, PoseMode.OFFSET)
         return control_proto.SetRelativePositionTargetResponse(
             setpoint=setpoint,
             expected_status=telemetry_proto.MotionStatus.MOTION_STATUS_HOLDING,
@@ -273,7 +274,7 @@ class Control(ControlServiceServicer):
                     )
         else:
             heading = request.position.heading
-        self.vehicle.set_pose_target(LVector3f(heading, 0, 0), PoseMode.ANGLE)
+        self.vehicle.set_heading_target(heading, PoseMode.ANGLE)
 
         setpoint = common_proto.GlobalPosition(
             latitude=request.position.latitude,
@@ -296,7 +297,7 @@ class Control(ControlServiceServicer):
             # (x=north, y=east), so the axes are swapped here.
             vector = LVector3f(request.velocity.y_vel, request.velocity.x_vel, request.velocity.z_vel)
         self.vehicle.set_velocity_target(vector, body_aligned=(request.frame <= 1))
-        self.vehicle.set_pose_target(LVector3f(request.velocity.angular_vel, 0, 0), PoseMode.VELOCITY)
+        self.vehicle.set_heading_target(request.velocity.angular_vel, PoseMode.VELOCITY)
         if request.frame <= 1: # Body-aligned
             theta = radians(self.vehicle.current_rotation().x)
             north_vel, east_vel = rotate_body_to_neu(request.velocity.x_vel, request.velocity.y_vel, theta)
@@ -315,35 +316,46 @@ class Control(ControlServiceServicer):
 
     @setpoint
     def SetGimbalAngleTarget(self, request, context):
-        # Frame of reference (body/NEU) doesn't change the simulated gimbal's
-        # behavior, since there's no physical yaw axis to reference.
         if request.angle_mode == control_proto.AngleMode.ANGLE_MODE_OFFSET:
             pose_mode = PoseMode.OFFSET
         else:
             pose_mode = PoseMode.ANGLE
-        self.vehicle.set_pose_target(LVector3f(
-                request.pose.yaw,
-                max(-90, min(90, request.pose.pitch)),
-                request.pose.roll
-                ), pose_mode
+        self.vehicle.set_gimbal_target(
+                request.pose.pitch,
+                request.pose.roll,
+                pose_mode
                 )
-        return control_proto.SetGimbalAngleTargetResponse(
-            setpoint=common_proto.Pose(
-                yaw=self.vehicle.pose_target.x,
-                pitch=self.vehicle.pose_target.y,
-                roll=self.vehicle.pose_target.z,
-            ),
+        # Clamp after any offset is applied, so the gimbal can't pass straight
+        # down or up
+        self.vehicle.gimbal_target.y = max(-90, min(90, self.vehicle.gimbal_target.y))
+        setpoint = common_proto.Pose(
+            pitch=self.vehicle.gimbal_target.y,
+            roll=self.vehicle.gimbal_target.z,
         )
+        # The simulated gimbal has no yaw axis of its own, since the camera is
+        # the vehicle, so yaw relative to the body is always zero and a body
+        # frame yaw is ignored; a NEU yaw is a heading, so turns the vehicle
+        if request.frame == control_proto.ReferenceFrame.REFERENCE_FRAME_NEU:
+            self.vehicle.set_heading_target(request.pose.yaw, pose_mode)
+            setpoint.yaw = self.vehicle.heading_setpoint()
+        return control_proto.SetGimbalAngleTargetResponse(setpoint=setpoint)
 
     @setpoint
     def SetGimbalVelocityTarget(self, request, context):
-        self.vehicle.set_pose_target(LVector3f(
-                request.pose_velocity.yaw_vel,
+        # Gimbal velocities are relative to the body, and the simulated gimbal
+        # has no yaw axis of its own, so yaw is ignored rather than turning
+        # the vehicle
+        self.vehicle.set_gimbal_target(
                 request.pose_velocity.pitch_vel,
-                request.pose_velocity.roll_vel
-                ), PoseMode.VELOCITY
+                request.pose_velocity.roll_vel,
+                PoseMode.VELOCITY
                 )
-        return control_proto.SetGimbalVelocityTargetResponse(setpoint=request.pose_velocity)
+        return control_proto.SetGimbalVelocityTargetResponse(
+            setpoint=common_proto.PoseVelocity(
+                pitch_vel=request.pose_velocity.pitch_vel,
+                roll_vel=request.pose_velocity.roll_vel,
+            ),
+        )
 
 class Publisher:
     """Publishes on a Uriel producer from its own thread.
@@ -420,6 +432,9 @@ class Stream(StreamServiceServicer):
         vel = self.vehicle.get_velocity(1.0)
         vel_body = self.vehicle.to_body(vel)
         angular_vel = self.vehicle.get_angular_velocity(1.0)
+        # Simulator angles turn counter-clockwise but headings clockwise, so
+        # the yaw rate is negated to match the heading
+        yaw_vel = -angular_vel.x
         pose = self.vehicle.current_pose()
         pose_body = self.vehicle.current_pose_body()
 
@@ -452,13 +467,13 @@ class Stream(StreamServiceServicer):
         velocity_body.x_vel = vel_body.x
         velocity_body.y_vel = vel_body.y
         velocity_body.z_vel = vel_body.z
-        velocity_body.angular_vel = angular_vel.x
+        velocity_body.angular_vel = yaw_vel
         # NEU velocity; sim space is ENU (x=east, y=north)
         velocity_neu = common_proto.Velocity()
         velocity_neu.x_vel = vel.y
         velocity_neu.y_vel = vel.x
         velocity_neu.z_vel = vel.z
-        velocity_neu.angular_vel = angular_vel.x
+        velocity_neu.angular_vel = yaw_vel
         setpoint = Any()
         if self.motion_info.setpoint:
             setpoint.Pack(self.motion_info.setpoint)
@@ -485,7 +500,7 @@ class Stream(StreamServiceServicer):
         gimbal_velocity_body.pitch_vel = angular_vel.y
         gimbal_velocity_body.roll_vel = angular_vel.z
         gimbal_velocity_neu = common_proto.PoseVelocity()
-        gimbal_velocity_neu.yaw_vel = angular_vel.x
+        gimbal_velocity_neu.yaw_vel = yaw_vel
         gimbal_velocity_neu.pitch_vel = angular_vel.y
         gimbal_velocity_neu.roll_vel = angular_vel.z
         gimbal_setpoint = Any()
