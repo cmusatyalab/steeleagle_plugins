@@ -1,7 +1,6 @@
 package fleet
 
 import (
-	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -11,15 +10,11 @@ import (
 
 	telemetrypb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/telemetry"
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
-	vehiclepb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/vehicle"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 )
 
 const (
-	// telemetryTimeout bounds each vehicle's telemetry call, so one slow
-	// vehicle can't hold up the list.
-	telemetryTimeout = time.Second
 	// staleSeconds is the last_updated of a vehicle with no telemetry.
 	staleSeconds = 1e6
 )
@@ -95,7 +90,6 @@ func ToVehicleJSON(v Vehicle, t *telemetrypb.Telemetry, flowStatus string, now t
 // Vehicles serves the vehicle list.
 type Vehicles struct {
 	daemon daemonpb.DaemonServiceClient
-	data   vehiclepb.DataServiceClient
 	flows  *Flows
 	log    zerolog.Logger
 
@@ -109,12 +103,11 @@ type Vehicles struct {
 }
 
 // NewVehicles returns a handler that lists vehicles from the daemon at conn.
-// flows may be nil, in which case no dataflows are managed and gcs_flow is
-// empty.
+// flows may be nil, in which case no dataflows are managed, gcs_flow is
+// empty, and no vehicle has telemetry.
 func NewVehicles(conn grpc.ClientConnInterface, flows *Flows, log zerolog.Logger) *Vehicles {
 	return &Vehicles{
 		daemon:      daemonpb.NewDaemonServiceClient(conn),
-		data:        vehiclepb.NewDataServiceClient(conn),
 		flows:       flows,
 		log:         log,
 		known:       map[string]Vehicle{},
@@ -123,9 +116,10 @@ func NewVehicles(conn grpc.ClientConnInterface, flows *Flows, log zerolog.Logger
 }
 
 // ServeVehicles writes the running vehicles, sorted by name, as a JSON array.
-// It fetches each vehicle's latest telemetry concurrently; a vehicle whose
-// telemetry fails or times out is listed as stale. A vehicle last listed on a
-// remote daemon that is now unavailable is still listed, as stale, with the
+// Each vehicle's telemetry is the last the GCS received over its flow; the
+// daemon is not asked for it. A vehicle whose telemetry the GCS never
+// received is listed as stale, as is a vehicle last listed on a
+// remote daemon that is now unavailable, which is still listed, with the
 // reason in gcs_flow, until its daemon is no longer listed as unavailable. It
 // responds 502 if the daemon can't be listed.
 func (h *Vehicles) ServeVehicles(w http.ResponseWriter, r *http.Request) {
@@ -139,15 +133,11 @@ func (h *Vehicles) ServeVehicles(w http.ResponseWriter, r *http.Request) {
 		h.flows.Observe(snap)
 	}
 	tels := make([]*telemetrypb.Telemetry, len(snap.Vehicles))
-	var wg sync.WaitGroup
-	for i, v := range snap.Vehicles {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			tels[i] = h.latest(r.Context(), v.Name)
-		}()
+	if h.flows != nil {
+		for i, v := range snap.Vehicles {
+			tels[i] = h.flows.Telemetry(v.Name)
+		}
 	}
-	wg.Wait()
 	now := time.Now()
 	out := make([]VehicleJSON, len(snap.Vehicles))
 	for i, v := range snap.Vehicles {
@@ -210,23 +200,6 @@ func (h *Vehicles) remember(snap Snapshot) []staleVehicle {
 		}
 	}
 	return stale
-}
-
-// latest returns the vehicle's latest telemetry, or nil if it has none or
-// can't be read within the timeout.
-func (h *Vehicles) latest(ctx context.Context, vehicle string) *telemetrypb.Telemetry {
-	ctx, cancel := context.WithTimeout(ctx, telemetryTimeout)
-	defer cancel()
-	resp, err := h.data.GetTelemetry(route(ctx, vehicle), &vehiclepb.GetTelemetryRequest{})
-	if err != nil {
-		h.log.Debug().Err(err).Str("vehicle", vehicle).Msg("get telemetry")
-		return nil
-	}
-	list := resp.GetTelemetry()
-	if len(list) == 0 {
-		return nil
-	}
-	return list[len(list)-1]
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

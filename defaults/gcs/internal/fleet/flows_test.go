@@ -200,7 +200,7 @@ func TestObserveRetriesUntilData(t *testing.T) {
 	}
 
 	// Telemetry alone is not enough when the flow carries video
-	f.Received(v1, false)
+	f.ReceivedTelemetry(v1, testTelemetry(time.Now(), 10, 0))
 	advance(time.Millisecond)
 	f.Observe(snap)
 	f.Wait()
@@ -209,8 +209,8 @@ func TestObserveRetriesUntilData(t *testing.T) {
 	}
 	// Once both arrive, it is left alone
 	advance(retryMax)
-	f.Received(v1, false)
-	f.Received(v1, true)
+	f.ReceivedTelemetry(v1, testTelemetry(time.Now(), 10, 0))
+	f.ReceivedFrame(v1)
 	f.Observe(snap)
 	f.Wait()
 	if n := d.setCount(v1); n != 3 {
@@ -231,14 +231,14 @@ func TestObserveTelemetryEnoughWithoutVideo(t *testing.T) {
 	d, f, snap := flowsFixture(t)
 	advance := fakeClock(f)
 	snap.Encoders = map[string]string{}
-	f.Received(v1, false)
+	f.ReceivedTelemetry(v1, testTelemetry(time.Now(), 10, 0))
 	f.Observe(snap)
 	f.Wait()
 	if n := d.setCount(v1); n != 0 {
 		t.Fatalf("pushes = %d with telemetry arriving, want 0", n)
 	}
 	advance(retryMin)
-	f.Received(v1, false)
+	f.ReceivedTelemetry(v1, testTelemetry(time.Now(), 10, 0))
 	f.Observe(snap)
 	f.Wait()
 	if n := d.setCount(v1); n != 0 {
@@ -251,8 +251,8 @@ func TestObserveTelemetryEnoughWithoutVideo(t *testing.T) {
 func TestHoldRearms(t *testing.T) {
 	d, f, snap := flowsFixture(t)
 	advance := fakeClock(f)
-	f.Received(v1, false)
-	f.Received(v1, true)
+	f.ReceivedTelemetry(v1, testTelemetry(time.Now(), 10, 0))
+	f.ReceivedFrame(v1)
 	f.Observe(snap)
 	f.Wait()
 	advance(freshFor)
@@ -273,8 +273,8 @@ func TestHoldRearms(t *testing.T) {
 		t.Fatalf("pushes = %d while data isn't arriving after the hold, want 2", n)
 	}
 	advance(retryMax)
-	f.Received(v1, false)
-	f.Received(v1, true)
+	f.ReceivedTelemetry(v1, testTelemetry(time.Now(), 10, 0))
+	f.ReceivedFrame(v1)
 	f.Observe(snap)
 	f.Wait()
 	advance(retryMax)

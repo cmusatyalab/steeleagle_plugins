@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	telemetrypb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/telemetry"
 	"github.com/cmusatyalab/steeleagle/config"
 
 	"github.com/rs/zerolog"
@@ -50,8 +51,9 @@ type vehicleState struct {
 	attempts  int
 	nextCheck time.Time
 	// lastTelemetry and lastFrame are when the GCS last received the
-	// vehicle's telemetry and frames.
+	// vehicle's telemetry and frames, and telemetry is the last it received.
 	lastTelemetry, lastFrame time.Time
+	telemetry                *telemetrypb.Telemetry
 }
 
 // Flows pushes the GCS dataflow to vehicles, and tracks how each push went.
@@ -91,17 +93,30 @@ func (f *Flows) state(name string) *vehicleState {
 	return st
 }
 
-// Received records that the GCS received the vehicle's telemetry, or one of
-// its frames if frame is set.
-func (f *Flows) Received(vehicle string, frame bool) {
+// ReceivedTelemetry records telemetry of the vehicle that the GCS received.
+func (f *Flows) ReceivedTelemetry(vehicle string, t *telemetrypb.Telemetry) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	st := f.state(vehicle)
-	if frame {
-		st.lastFrame = f.now()
-	} else {
-		st.lastTelemetry = f.now()
+	st.lastTelemetry, st.telemetry = f.now(), t
+}
+
+// ReceivedFrame records that the GCS received a frame of the vehicle.
+func (f *Flows) ReceivedFrame(vehicle string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state(vehicle).lastFrame = f.now()
+}
+
+// Telemetry returns the last telemetry of the vehicle the GCS received, or nil
+// if it received none.
+func (f *Flows) Telemetry(vehicle string) *telemetrypb.Telemetry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if st := f.vehicles[vehicle]; st != nil {
+		return st.telemetry
 	}
+	return nil
 }
 
 // Observe records the latest snapshot, and checks in the background each
