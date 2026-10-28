@@ -85,3 +85,10 @@ def test_without_a_geofence_a_target_with_no_ground_intersection_is_kept():
     above_horizon = make_detected(box=(0.0, 0.4, 0.1, 0.6))
     result = run(make_frame(pitch=0.0), FixedPredictor(above_horizon))
     assert len(result.detections) == 1
+
+
+def test_the_predictor_gets_a_writable_image():
+    # PyTorch warns about, and may corrupt, tensors made from read-only arrays
+    predictor = FixedPredictor()
+    run(make_frame(), predictor)
+    assert predictor.images[0].flags.writeable

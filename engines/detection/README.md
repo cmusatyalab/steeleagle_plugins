@@ -44,8 +44,8 @@ Accuracy assumes a level vehicle (the telemetry has no vehicle pitch or roll), f
 ## Development
 
 ```
-uv run pytest                  # all tests
-uv run pytest -m "not model"   # skip the tests that download and run real weights
+pixi run -e test test            # all tests
+pixi run -e test test -m "not model"   # skip the tests that download and run real weights
 ```
 
 The end-to-end test sends frames through a real Uriel server, client and producer.
