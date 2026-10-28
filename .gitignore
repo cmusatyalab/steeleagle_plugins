@@ -4,3 +4,5 @@ __pycache__/
 **aviary.toml
 *~
 config.toml
+# Visual brainstorming companion mockups
+.superpowers/
