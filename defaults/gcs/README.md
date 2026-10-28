@@ -28,10 +28,18 @@ Uriel engine name in `STEELEAGLE_ENGINE_ENDPOINT`, and its socket in `STEELEAGLE
 
 ### Encoder service
 
-Every daemon that runs a vehicle must also run an H.264 encoder engine service
-named exactly `h264_encoder`. The GCS builds each vehicle's flow as camera,
-encoder, GCS, using the encoder on the vehicle's own daemon. A vehicle on a
-daemon without that service (or without a camera) gets a telemetry-only flow.
+Every daemon that runs a vehicle must also run an engine service with the
+`encoder` plugin of the `h264` package (`defaults/h264`), under any service
+name. The GCS builds each vehicle's flow as camera, encoder, GCS, using the
+encoder on the vehicle's own daemon; if a daemon runs more than one, the first
+by name. A vehicle on a daemon without one (or without a camera) gets a
+telemetry-only flow.
+
+The GCS pushes this flow when a vehicle connects and after each hold, and pushes
+it again, backing off from 2 s to 30 s, until the vehicle's telemetry (and
+frames, if the flow carries video) reach the GCS. It stops as soon as they do,
+or as soon as a mission is started on the vehicle, and it never replaces a flow
+with engines other than the GCS and the encoder.
 
 ## Mission dataflows
 

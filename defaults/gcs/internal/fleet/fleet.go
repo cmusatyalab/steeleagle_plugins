@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/netip"
 	"runtime"
+	"strings"
 
 	"github.com/cmusatyalab/steeleagle/config"
 
@@ -70,6 +71,9 @@ type Snapshot struct {
 	Vehicles []Vehicle
 	// Engines is the set of full names of the engine services.
 	Engines map[string]bool
+	// Encoders maps the IP of each daemon that runs an H.264 encoder to the
+	// full name of its encoder service.
+	Encoders map[string]string
 	// Unavailable are the remote daemons that could not be reached.
 	Unavailable []Unavailable
 }
@@ -82,7 +86,7 @@ func List(ctx context.Context, c daemonpb.DaemonServiceClient) (Snapshot, error)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	snap := Snapshot{Engines: map[string]bool{}}
+	snap := Snapshot{Engines: map[string]bool{}, Encoders: map[string]string{}}
 	remoteArch := map[string]string{}
 	for _, r := range resp.GetRemotes() {
 		remoteArch[r.GetIp()] = r.GetArch()
@@ -91,6 +95,13 @@ func List(ctx context.Context, c daemonpb.DaemonServiceClient) (Snapshot, error)
 		switch s.GetCategory() {
 		case daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE:
 			snap.Engines[s.GetName()] = true
+			if isEncoder(s) {
+				// The first by name, so the choice is stable
+				ip, _ := SplitName(s.GetName())
+				if cur, ok := snap.Encoders[ip]; !ok || s.GetName() < cur {
+					snap.Encoders[ip] = s.GetName()
+				}
+			}
 		case daemonpb.ServiceCategory_SERVICE_CATEGORY_VEHICLE:
 			if !s.GetRunning() {
 				continue
@@ -119,4 +130,21 @@ func List(ctx context.Context, c daemonpb.DaemonServiceClient) (Snapshot, error)
 		}
 	}
 	return snap, nil
+}
+
+// isEncoder reports whether the service runs the H.264 encoder: the
+// EncoderPlugin plugin of a package whose directory is EncoderPackage. Its
+// service may have any name.
+func isEncoder(s *daemonpb.Service) bool {
+	if s.GetPlugin() != EncoderPlugin {
+		return false
+	}
+	// A package is a repository, then a double slash and its subdirectory,
+	// optionally followed by @version
+	pkg := s.GetUri()
+	if i := strings.LastIndex(pkg, "@"); i > strings.LastIndex(pkg, "/") {
+		pkg = pkg[:i]
+	}
+	pkg = strings.TrimSuffix(pkg, "/")
+	return pkg[strings.LastIndex(pkg, "/")+1:] == EncoderPackage
 }

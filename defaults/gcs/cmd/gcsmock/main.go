@@ -222,7 +222,7 @@ func run(o options, log zerolog.Logger) (int, error) {
 	defer u.Close()
 	for _, ip := range o.daemonIPs() {
 		if top.EncoderDaemons[ip] {
-			if err := u.StartEngine(ip+"."+fleet.EncoderService, encoderMaxOutput, Encoder(clips)); err != nil {
+			if err := u.StartEngine(ip+"."+encoderService, encoderMaxOutput, Encoder(clips)); err != nil {
 				return 1, err
 			}
 		}

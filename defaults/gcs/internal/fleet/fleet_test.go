@@ -79,6 +79,35 @@ func TestList(t *testing.T) {
 	}
 }
 
+// TestListEncoders checks that each daemon's encoder is found by its plugin
+// and package, whatever its service is named.
+func TestListEncoders(t *testing.T) {
+	encoder := func(name, uri string) *daemonpb.Service {
+		return daemonpb.Service_builder{
+			Name: name, Category: daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE,
+			Plugin: EncoderPlugin, Uri: uri, Running: true,
+		}.Build()
+	}
+	d := newFakeDaemon(t)
+	d.services = []*daemonpb.Service{
+		encoder("100.64.1.5.encoder", "github.com/cmusatyalab/steeleagle_plugins//defaults/h264@v4_backend_rework"),
+		// The first by name of two encoders on a daemon
+		encoder("100.64.1.6.h264_b", "github.com/cmusatyalab/steeleagle_plugins//defaults/h264"),
+		encoder("100.64.1.6.h264_a", "github.com/cmusatyalab/steeleagle_plugins//defaults/h264"),
+		// An encoder plugin from another package is not the H.264 encoder
+		encoder("100.64.1.7.encoder", "github.com/example/plugins//jpeg"),
+		service("100.64.1.7.h264_encoder", daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE, "h264", "", true),
+	}
+	snap, err := List(context.Background(), daemonpb.NewDaemonServiceClient(d.conn()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"100.64.1.5": "100.64.1.5.encoder", "100.64.1.6": "100.64.1.6.h264_a"}
+	if !reflect.DeepEqual(snap.Encoders, want) {
+		t.Errorf("Encoders = %v, want %v", snap.Encoders, want)
+	}
+}
+
 func TestListUnavailable(t *testing.T) {
 	d := newFakeDaemon(t)
 	d.remotes = []*daemonpb.Daemon{

@@ -74,6 +74,7 @@ type Controller struct {
 	timeout time.Duration
 	log     zerolog.Logger
 	onHold  func(vehicles []string)
+	onStart func(vehicles []string)
 }
 
 // New returns a controller that calls the daemon on conn, each call taking at
@@ -95,6 +96,10 @@ func New(conn grpc.ClientConnInterface, timeout time.Duration, log zerolog.Logge
 // away; it must return quickly, as the response isn't delivered until it
 // returns. Set it before serving.
 func (c *Controller) OnHold(hook func(vehicles []string)) { c.onHold = hook }
+
+// OnStart sets a hook called with the vehicles of each start request, before
+// their missions are started. It must return quickly. Set it before serving.
+func (c *Controller) OnStart(hook func(vehicles []string)) { c.onStart = hook }
 
 // run makes calls on each of vehicles, at once for every vehicle and in order
 // for each one, whether or not the ones before succeed.
@@ -189,6 +194,9 @@ func (c *Controller) ServeStart(w http.ResponseWriter, r *http.Request) {
 	var req StartRequest
 	if !c.decode(w, r, &req, &req.Vehicles) {
 		return
+	}
+	if c.onStart != nil {
+		c.onStart(req.Vehicles)
 	}
 	c.respond(w, r, req.Vehicles, call{name: "StartMission", do: func(ctx context.Context) error {
 		_, err := c.mission.StartMission(ctx, &missionpb.StartMissionRequest{})

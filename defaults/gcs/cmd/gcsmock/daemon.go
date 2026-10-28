@@ -62,6 +62,11 @@ const (
 
 	// yoloService is the bare name of the mock detection engine.
 	yoloService = "yolo"
+	// encoderService is the bare name of each mock H.264 encoder, which the
+	// GCS finds by its plugin and package, not its name.
+	encoderService = "h264_encoder"
+	// encoderURI is the package the mock encoders claim to be from.
+	encoderURI = "github.com/cmusatyalab/steeleagle_plugins//defaults/h264"
 )
 
 // engineConfig is the plugin config of a mock engine.
@@ -163,7 +168,7 @@ func (d *Daemon) ListServices(
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	encoderConf, err := engineConfig(fleet.EncoderService, "filter", []string{rawFrameID}, "")
+	encoderConf, err := engineConfig(encoderService, "filter", []string{rawFrameID}, "")
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -188,8 +193,8 @@ func (d *Daemon) ListServices(
 		if d.top.EncoderDaemons[ip] && !seen[ip] {
 			seen[ip] = true
 			out = append(out, daemonpb.Service_builder{
-				Name: ip + "." + fleet.EncoderService, Category: daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE,
-				Plugin: fleet.EncoderService, Config: encoderConf, Running: true, Auth: "admin",
+				Name: ip + "." + encoderService, Category: daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE,
+				Plugin: fleet.EncoderPlugin, Uri: encoderURI, Config: encoderConf, Running: true, Auth: "admin",
 			}.Build())
 		}
 		if d.top.YoloDaemons[ip] && !seen[ip+"/yolo"] {

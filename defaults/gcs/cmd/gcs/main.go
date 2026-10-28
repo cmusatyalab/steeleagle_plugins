@@ -152,9 +152,11 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	}
 	controller := control.New(grpcConn(conn), control.DefaultTimeout, log)
 	vehicles := noDaemonHandler()
+	var fleetFlows *fleet.Flows
 	if conn != nil {
-		fleetFlows := fleet.NewFlows(conn, fleet.FlowSpec{Engine: engine}, log)
+		fleetFlows = fleet.NewFlows(conn, fleet.FlowSpec{Engine: engine}, log)
 		controller.OnHold(fleetFlows.PushAfterHold)
+		controller.OnStart(fleetFlows.MissionStarted)
 		vehicles = http.HandlerFunc(fleet.NewVehicles(conn, fleetFlows, log).ServeVehicles)
 	}
 
@@ -210,7 +212,16 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 		}
 	}()
 	go func() {
-		if err := feed.Run(ctx, engine, a.MaxInputSize, log, hub.Publish); err != nil {
+		// The flows learn which vehicles' data is arriving, to push the GCS
+		// flow again to those whose data isn't
+		publish := hub.Publish
+		if fleetFlows != nil {
+			publish = func(msg feed.Message) {
+				fleetFlows.Received(msg.Vehicle, msg.Frame != nil)
+				hub.Publish(msg)
+			}
+		}
+		if err := feed.Run(ctx, engine, a.MaxInputSize, log, publish); err != nil {
 			errs <- err
 		}
 	}()

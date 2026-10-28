@@ -118,6 +118,19 @@ func (d *fakeDaemon) SetGimbalAngleTarget(ctx context.Context, req *driverpb.Set
 	return &driverpb.SetGimbalAngleTargetResponse{}, d.record(ctx, "SetGimbalAngleTarget", req)
 }
 
+// startCount is how many StartMission calls the daemon got.
+func (d *fakeDaemon) startCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, c := range d.calls {
+		if c.method == "StartMission" {
+			n++
+		}
+	}
+	return n
+}
+
 func (d *fakeDaemon) StartMission(ctx context.Context, req *missionpb.StartMissionRequest) (*missionpb.StartMissionResponse, error) {
 	return &missionpb.StartMissionResponse{}, d.record(ctx, "StartMission", req)
 }
@@ -437,6 +450,24 @@ func TestHoldHook(t *testing.T) {
 	c.OnHold(h.hook)
 	post(t, server, "/api/command", `{"hold": true, "vehicles": ["a", "b", "c"]}`)
 	if want := [][]string{{"a", "c"}}; !slices.EqualFunc(h.calls, want, slices.Equal) {
+		t.Errorf("hook calls = %v, want %v", h.calls, want)
+	}
+}
+
+// TestStartHook ensures that the start hook gets every vehicle a start is
+// requested for, before any mission is started.
+func TestStartHook(t *testing.T) {
+	d := &fakeDaemon{}
+	server, c := serveWith(t, d, DefaultTimeout)
+	var h hookRecorder
+	c.OnStart(func(vehicles []string) {
+		if n := d.startCount(); n != 0 {
+			t.Errorf("hook called after %d StartMission calls, want before any", n)
+		}
+		h.hook(vehicles)
+	})
+	post(t, server, "/api/start", `{"vehicles": ["a", "b"]}`)
+	if want := [][]string{{"a", "b"}}; !slices.EqualFunc(h.calls, want, slices.Equal) {
 		t.Errorf("hook calls = %v, want %v", h.calls, want)
 	}
 }

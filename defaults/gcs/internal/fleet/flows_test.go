@@ -28,7 +28,10 @@ func flowsFixture(t *testing.T) (*fakeDaemon, *Flows, Snapshot) {
 	d.services = []*daemonpb.Service{
 		service(v1, daemonpb.ServiceCategory_SERVICE_CATEGORY_VEHICLE, "quadcopter", driverConfig, true),
 		service(v2, daemonpb.ServiceCategory_SERVICE_CATEGORY_VEHICLE, "quadcopter", driverConfig, true),
-		service("100.64.1.5.h264_encoder", daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE, "h264", "", true),
+		daemonpb.Service_builder{
+			Name: "100.64.1.5.encoder", Category: daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE,
+			Plugin: EncoderPlugin, Uri: "github.com/cmusatyalab/steeleagle_plugins//defaults/h264", Running: true,
+		}.Build(),
 	}
 	snap, err := List(context.Background(), daemonpb.NewDaemonServiceClient(d.conn()))
 	if err != nil {
@@ -55,6 +58,41 @@ func wantFlow(t *testing.T, snap Snapshot, name string) []byte {
 	return nil
 }
 
+// sameFlow reports whether the TOML got is the flow want, ignoring comments
+// and formatting.
+func sameFlow(t *testing.T, got, want []byte) bool {
+	t.Helper()
+	g, err := config.ParseFlowConfigFromBytes(got)
+	if err != nil {
+		t.Fatalf("pushed flow %q: %v", got, err)
+	}
+	w, err := config.ParseFlowConfigFromBytes(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reflect.DeepEqual(g, w)
+}
+
+// setCount is how many times SetDataflow was called for the vehicle.
+func (d *fakeDaemon) setCount(vehicle string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, v := range d.setCalls {
+		if v == vehicle {
+			n++
+		}
+	}
+	return n
+}
+
+// fakeClock returns a clock for f, and a function that advances it.
+func fakeClock(f *Flows) func(time.Duration) {
+	now := time.Unix(1000, 0)
+	f.now = func() time.Time { return now }
+	return func(d time.Duration) { now = now.Add(d) }
+}
+
 func TestObservePushesWhenEmpty(t *testing.T) {
 	d, f, snap := flowsFixture(t)
 	d.flows[v2] = []byte("x")
@@ -63,13 +101,8 @@ func TestObservePushesWhenEmpty(t *testing.T) {
 	if !reflect.DeepEqual(d.setCalls, []string{v1}) {
 		t.Fatalf("SetDataflow went to %v, want only %s", d.setCalls, v1)
 	}
-	got, err := config.ParseFlowConfigFromBytes(d.flows[v1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	gotB, _ := got.ToBytes()
-	if !reflect.DeepEqual(gotB, wantFlow(t, snap, v1)) {
-		t.Errorf("pushed flow\n%s\nwant\n%s", gotB, wantFlow(t, snap, v1))
+	if !sameFlow(t, d.flows[v1], wantFlow(t, snap, v1)) {
+		t.Errorf("pushed flow\n%s\nwant\n%s", d.flows[v1], wantFlow(t, snap, v1))
 	}
 	if s := f.Status(v1); s != "ok" {
 		t.Errorf("Status(v1) = %q, want ok", s)
@@ -81,6 +114,7 @@ func TestObservePushesWhenEmpty(t *testing.T) {
 
 func TestObserveOnce(t *testing.T) {
 	d, f, snap := flowsFixture(t)
+	fakeClock(f)
 	f.Observe(snap)
 	f.Observe(snap)
 	f.Wait()
@@ -91,6 +125,7 @@ func TestObserveOnce(t *testing.T) {
 
 func TestObserveChecksAgainAfterReturn(t *testing.T) {
 	d, f, snap := flowsFixture(t)
+	fakeClock(f)
 	f.Observe(snap)
 	f.Wait()
 	f.Observe(Snapshot{})
@@ -103,36 +138,222 @@ func TestObserveChecksAgainAfterReturn(t *testing.T) {
 
 func TestObserveRetriesFailedCheck(t *testing.T) {
 	d, f, snap := flowsFixture(t)
-	now := time.Unix(1000, 0)
-	f.now = func() time.Time { return now }
+	advance := fakeClock(f)
 	d.getFail[v1] = 1
 	f.Observe(snap)
 	f.Wait()
 	if len(d.setCalls) != 1 || d.setCalls[0] != v2 {
 		t.Fatalf("SetDataflow went to %v, want only %s", d.setCalls, v2)
 	}
-	// Within the backoff, the failed check isn't retried
-	now = now.Add(checkBackoff - time.Millisecond)
+	advance(retryMin - time.Millisecond)
 	f.Observe(snap)
 	f.Wait()
 	if len(d.getCalls) != 2 {
 		t.Fatalf("GetFlow calls = %v, want no retry within the backoff", d.getCalls)
 	}
-	now = now.Add(time.Millisecond)
+	advance(time.Millisecond)
 	f.Observe(snap)
 	f.Wait()
-	if !reflect.DeepEqual(d.setCalls, []string{v2, v1}) {
+	if d.setCount(v1) != 1 {
 		t.Fatalf("SetDataflow went to %v, want %s retried", d.setCalls, v1)
 	}
 	if s := f.Status(v1); s != "ok" {
 		t.Errorf("Status(v1) = %q, want ok", s)
 	}
-	// Once it succeeds, it isn't checked again
-	now = now.Add(checkBackoff)
+}
+
+// TestObserveRetriesUntilData checks that the flow is pushed again, with
+// backoff, until the vehicle's telemetry and frames arrive, and not after.
+func TestObserveRetriesUntilData(t *testing.T) {
+	d, f, snap := flowsFixture(t)
+	advance := fakeClock(f)
 	f.Observe(snap)
 	f.Wait()
-	if len(d.getCalls) != 3 {
-		t.Errorf("GetFlow calls = %v, want three", d.getCalls)
+	first := d.flows[v1]
+
+	// Not before the backoff
+	advance(retryMin - time.Millisecond)
+	f.Observe(snap)
+	f.Wait()
+	if n := d.setCount(v1); n != 1 {
+		t.Fatalf("pushes = %d within the backoff, want 1", n)
+	}
+	// Then again, with different bytes, so the daemon sets it again
+	advance(time.Millisecond)
+	f.Observe(snap)
+	f.Wait()
+	if n := d.setCount(v1); n != 2 {
+		t.Fatalf("pushes = %d after the backoff, want 2", n)
+	}
+	if string(d.flows[v1]) == string(first) {
+		t.Errorf("retry pushed the same bytes %q", first)
+	}
+	if !sameFlow(t, d.flows[v1], wantFlow(t, snap, v1)) {
+		t.Errorf("retry pushed\n%s", d.flows[v1])
+	}
+	// The backoff doubles
+	advance(2*retryMin - time.Millisecond)
+	f.Observe(snap)
+	f.Wait()
+	if n := d.setCount(v1); n != 2 {
+		t.Fatalf("pushes = %d within the doubled backoff, want 2", n)
+	}
+
+	// Telemetry alone is not enough when the flow carries video
+	f.Received(v1, false)
+	advance(time.Millisecond)
+	f.Observe(snap)
+	f.Wait()
+	if n := d.setCount(v1); n != 3 {
+		t.Fatalf("pushes = %d with telemetry but no frames, want 3", n)
+	}
+	// Once both arrive, it is left alone
+	advance(retryMax)
+	f.Received(v1, false)
+	f.Received(v1, true)
+	f.Observe(snap)
+	f.Wait()
+	if n := d.setCount(v1); n != 3 {
+		t.Fatalf("pushes = %d with data arriving, want 3", n)
+	}
+	// Nor when they stop later: a mission may have changed the flow
+	advance(freshFor)
+	f.Observe(snap)
+	f.Wait()
+	if n := d.setCount(v1); n != 3 {
+		t.Fatalf("pushes = %d after data stopped, want 3", n)
+	}
+}
+
+// TestObserveTelemetryEnoughWithoutVideo checks that a vehicle whose flow
+// can't carry video only needs its telemetry to arrive.
+func TestObserveTelemetryEnoughWithoutVideo(t *testing.T) {
+	d, f, snap := flowsFixture(t)
+	advance := fakeClock(f)
+	snap.Encoders = map[string]string{}
+	f.Received(v1, false)
+	f.Observe(snap)
+	f.Wait()
+	if n := d.setCount(v1); n != 0 {
+		t.Fatalf("pushes = %d with telemetry arriving, want 0", n)
+	}
+	advance(retryMin)
+	f.Received(v1, false)
+	f.Observe(snap)
+	f.Wait()
+	if n := d.setCount(v1); n != 0 {
+		t.Fatalf("pushes = %d with telemetry still arriving, want 0", n)
+	}
+}
+
+// TestHoldRearms checks that a hold pushes the flow, and keeps pushing it
+// until the vehicle's data arrives again.
+func TestHoldRearms(t *testing.T) {
+	d, f, snap := flowsFixture(t)
+	advance := fakeClock(f)
+	f.Received(v1, false)
+	f.Received(v1, true)
+	f.Observe(snap)
+	f.Wait()
+	advance(freshFor)
+	f.Observe(snap)
+	f.Wait()
+	if n := d.setCount(v1); n != 0 {
+		t.Fatalf("pushes = %d before the hold, want 0", n)
+	}
+	f.PushAfterHold([]string{v1})
+	f.Wait()
+	if n := d.setCount(v1); n != 1 {
+		t.Fatalf("pushes = %d after the hold, want 1", n)
+	}
+	advance(retryMin)
+	f.Observe(snap)
+	f.Wait()
+	if n := d.setCount(v1); n != 2 {
+		t.Fatalf("pushes = %d while data isn't arriving after the hold, want 2", n)
+	}
+	advance(retryMax)
+	f.Received(v1, false)
+	f.Received(v1, true)
+	f.Observe(snap)
+	f.Wait()
+	advance(retryMax)
+	f.Observe(snap)
+	f.Wait()
+	if n := d.setCount(v1); n != 2 {
+		t.Fatalf("pushes = %d once data arrived, want 2", n)
+	}
+}
+
+// TestMissionStartedStopsRetries checks that once a vehicle's mission starts,
+// its flow is no longer pushed, even if its data never arrived.
+func TestMissionStartedStopsRetries(t *testing.T) {
+	d, f, snap := flowsFixture(t)
+	advance := fakeClock(f)
+	f.Observe(snap)
+	f.Wait()
+	f.MissionStarted([]string{v1})
+	for range 3 {
+		advance(retryMax)
+		f.Observe(snap)
+		f.Wait()
+	}
+	if n := d.setCount(v1); n != 1 {
+		t.Errorf("pushes = %d after the mission started, want 1", n)
+	}
+	if n := d.setCount(v2); n != 4 {
+		t.Errorf("pushes to the other vehicle = %d, want 4", n)
+	}
+}
+
+// TestObserveLeavesMissionFlow checks that a flow with engines other than the
+// GCS and the encoder, a mission's, is never replaced.
+func TestObserveLeavesMissionFlow(t *testing.T) {
+	d, f, snap := flowsFixture(t)
+	advance := fakeClock(f)
+	mission := []byte(`[[producers]]
+name = "telemetry"
+
+[[engines]]
+name = "100.64.1.5.yolo"
+location = "local"
+
+[[edges]]
+from = "telemetry"
+to = "100.64.1.5.yolo"
+timeout = "2s"
+`)
+	d.flows[v1] = mission
+	for range 3 {
+		f.Observe(snap)
+		f.Wait()
+		advance(retryMax)
+	}
+	if n := d.setCount(v1); n != 0 {
+		t.Errorf("pushes = %d over a mission flow, want 0", n)
+	}
+	if string(d.flows[v1]) != string(mission) {
+		t.Errorf("flow = %s, want the mission's", d.flows[v1])
+	}
+}
+
+// TestObserveReplacesTelemetryOnlyFlow checks that a GCS flow without video,
+// pushed before the encoder was found, is replaced by one with video.
+func TestObserveReplacesTelemetryOnlyFlow(t *testing.T) {
+	d, f, snap := flowsFixture(t)
+	fakeClock(f)
+	noEnc := snap
+	noEnc.Encoders = map[string]string{}
+	old, _ := BuildFlow(snap.Vehicles[0], noEnc, FlowSpec{Engine: gcs})
+	b, err := old.ToBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.flows[v1] = b
+	f.Observe(snap)
+	f.Wait()
+	if !sameFlow(t, d.flows[v1], wantFlow(t, snap, v1)) {
+		t.Errorf("flow = %s, want the GCS flow with video", d.flows[v1])
 	}
 }
 
@@ -146,7 +367,7 @@ func TestPushAfterHoldOverwrites(t *testing.T) {
 	d.mu.Unlock()
 	f.PushAfterHold([]string{v1})
 	f.Wait()
-	if !reflect.DeepEqual(d.flows[v1], wantFlow(t, snap, v1)) {
+	if !sameFlow(t, d.flows[v1], wantFlow(t, snap, v1)) {
 		t.Errorf("flow = %s, want the GCS flow", d.flows[v1])
 	}
 }
@@ -155,7 +376,7 @@ func TestPushListsWhenNoSnapshot(t *testing.T) {
 	d, f, snap := flowsFixture(t)
 	f.PushAfterHold([]string{v1})
 	f.Wait()
-	if !reflect.DeepEqual(d.flows[v1], wantFlow(t, snap, v1)) {
+	if !sameFlow(t, d.flows[v1], wantFlow(t, snap, v1)) {
 		t.Errorf("flow = %s, want the GCS flow", d.flows[v1])
 	}
 }

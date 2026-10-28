@@ -6,9 +6,13 @@ import (
 	"github.com/cmusatyalab/steeleagle/config"
 )
 
-// EncoderService is the bare name of the engine that encodes a vehicle's
-// camera frames before they are sent to the GCS.
-const EncoderService = "h264_encoder"
+// EncoderPlugin and EncoderPackage identify the engine that encodes a
+// vehicle's camera frames before they are sent to the GCS: the plugin
+// encoder.plugin.toml of the h264 package. Its service may have any name.
+const (
+	EncoderPlugin  = "encoder"
+	EncoderPackage = "h264"
+)
 
 // edgeTimeout is how long every edge of the flow waits on its target.
 const edgeTimeout = "2s"
@@ -35,7 +39,7 @@ func BuildFlow(v Vehicle, snap Snapshot, spec FlowSpec) (flow *config.FlowConfig
 		Edges:     []config.Edge{{From: "telemetry", To: spec.Engine, Timeout: edgeTimeout}},
 	}
 
-	encoder := v.DaemonIP + "." + EncoderService
+	encoder, hasEncoder := snap.Encoders[v.DaemonIP]
 	switch {
 	case v.DriverErr != nil:
 		return flow, fmt.Sprintf("driver config unavailable: %v", v.DriverErr)
@@ -45,8 +49,9 @@ func BuildFlow(v Vehicle, snap Snapshot, spec FlowSpec) (flow *config.FlowConfig
 		return flow, fmt.Sprintf("camera %s cannot be encoded", v.Driver.Cameras[0].Name)
 	case v.DaemonIP == "":
 		return flow, "no encoder: vehicle has no daemon address"
-	case !snap.Engines[encoder]:
-		return flow, fmt.Sprintf("no encoder %s on the vehicle's daemon", encoder)
+	case !hasEncoder:
+		return flow, fmt.Sprintf("no %s plugin of the %s package on the vehicle's daemon %s",
+			EncoderPlugin, EncoderPackage, v.DaemonIP)
 	}
 
 	cam := v.Driver.Cameras[0].Name
