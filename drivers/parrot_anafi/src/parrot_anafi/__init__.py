@@ -3,6 +3,7 @@ import json
 import grpc
 import logging
 from concurrent import futures
+from pathlib import Path
 import olympe
 # Protocol imports
 import steeleagle_protocol.v1.messages.telemetry.telemetry_pb2 as telemetry_proto
@@ -61,6 +62,9 @@ def main():
     listen_address = os.getenv('STEELEAGLE_LISTEN_SOCKET')
     if not listen_address:
         raise ValueError('no listen socket address provided!')
+    # Remove a socket left over from a previous run, so that the daemon
+    # doesn't connect to it while the drone is connecting
+    Path(listen_address).unlink(missing_ok=True)
 
     # The daemon connects once the socket exists, so the drone is connected
     # first
