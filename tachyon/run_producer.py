@@ -52,25 +52,29 @@ def build_raw_frame(data: bytes, seq: int) -> bytes:
     frame.data = data
     frame.h_res = FRAME_W
     frame.v_res = FRAME_H
-    frame.pixel_format = telemetry_pb2.RawFrame.PIXEL_FORMAT_YUV420
+    frame.channels = 3
+    frame.pixel_format = telemetry_pb2.RawFrame.PIXEL_FORMAT_RGB24
     frame.id = seq
     return frame.SerializeToString()
 
 
-def log_events(events, stop: threading.Event):
-    while not stop.is_set():
-        if events.wait(0.5):
-            while (event := events.poll()) is not None:
-                if event.engine not in WATCHED_ENGINES:
-                    continue
-                result_len = len(event.result) if event.result else 0
-                preview = bytes(event.result)[:60] if event.result else None
-                print(
-                    f"    event: engine={event.engine} kind={event.kind} "
-                    f"seq={event.id.seq} outcome={getattr(event, 'outcome', None)} "
-                    f"result_bytes={result_len} preview={preview!r}",
-                    flush=True,
-                )
+def log_events(producer_name: str, stop: threading.Event):
+    # Subscription is bound to whichever thread creates it, so it has to be
+    # created here, inside this thread -- not on the main thread and handed in.
+    with uriel.Subscription.producer(producer_name) as events:
+        while not stop.is_set():
+            if events.wait(0.5):
+                while (event := events.poll()) is not None:
+                    if event.engine not in WATCHED_ENGINES:
+                        continue
+                    result_len = len(event.result) if event.result else 0
+                    preview = bytes(event.result)[:60] if event.result else None
+                    print(
+                        f"    event: engine={event.engine} kind={event.kind} "
+                        f"seq={event.id.seq} outcome={getattr(event, 'outcome', None)} "
+                        f"result_bytes={result_len} preview={preview!r}",
+                        flush=True,
+                    )
 
 
 def main():
@@ -79,27 +83,26 @@ def main():
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
 
-    frames = sorted(Path(args.frames_dir).glob("*.yuv"))
+    frames = sorted(Path(args.frames_dir).glob("*.rgb"))
     if args.limit:
         frames = frames[: args.limit]
     print(f"found {len(frames)} frames, streaming at {CAMERA_FPS} fps", flush=True)
 
     spec = Path("flow_local.toml").read_text()
     cert = Path("certificate.der").read_bytes()
-    remote = uriel.RemoteServer(addr=REMOTE_ADDR, certificate=cert, crossing_capacity=8)
+    remote = uriel.RemoteServer(addr=REMOTE_ADDR, certificate=cert, crossing_capacity=1)
 
     camera = CameraFeed(frames)
 
     with (
         uriel.Producer(PRODUCER, input_type=RAW_FRAME_TYPE, max_input_size=MAX_FRAME_SIZE) as producer,
-        uriel.Subscription.producer(PRODUCER) as events,
         uriel.Client("patchcore-local-client", SERVER, remote=remote) as client,
     ):
         client.add_producer(PRODUCER)
         client.add_flow(FLOW, spec)
 
         stop_logging = threading.Event()
-        log_thread = threading.Thread(target=log_events, args=(events, stop_logging), daemon=True)
+        log_thread = threading.Thread(target=log_events, args=(PRODUCER, stop_logging), daemon=True)
         log_thread.start()
 
         camera.start()

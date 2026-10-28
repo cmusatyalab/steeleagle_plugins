@@ -1,0 +1,37 @@
+[plugin]
+name = "PatchCore Verifier"
+type = "engine"
+description = "RF-DETR person check on frames the PatchCore pipeline forwarded as anomalous"
+
+[[args]]
+name = "variant"
+type = "string"
+description = "RF-DETR size: nano/small/medium/large/xlarge/2xlarge (xlarge/2xlarge need rfdetr_plus)"
+default = "small"
+
+[[args]]
+name = "confidence"
+type = "number"
+description = "Minimum person-detection confidence to count as a detection"
+default = 0.70
+
+[[args]]
+name = "model_path"
+type = "string"
+description = "Checkpoint to load instead of RF-DETR's default COCO-pretrained weights (blank = default)"
+default = ""
+
+[[args]]
+name = "show_window"
+type = "boolean"
+description = "Pop an OpenCV window showing frames with a detected person"
+default = true
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest frame this engine will accept, in bytes"
+default = 2000000
+
+[engine]
+type = "detection"

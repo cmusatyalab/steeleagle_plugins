@@ -6,3 +6,4 @@ received/
 test/detector_out/
 test/detector_out_rfdetr/
 *.log
+*.egg-info/

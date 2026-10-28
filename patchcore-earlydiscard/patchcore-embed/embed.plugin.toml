@@ -1,0 +1,36 @@
+[plugin]
+name = "PatchCore Embed"
+type = "engine"
+description = "Quantized ResNet backbone on the Tachyon's HTP; emits a patch-embedding tensor alongside each frame for patchcore-score"
+
+[[args]]
+name = "model"
+type = "string"
+description = "Path to the quantized backbone model .so, relative to the plugin folder"
+default = "models/libpatchcore_backbone_quant.so"
+
+[[args]]
+name = "backend"
+type = "string"
+description = "Path to the QNN HTP backend .so, relative to the plugin folder"
+default = "libs/libQnnHtp.so"
+
+[[args]]
+name = "log_level"
+type = "string"
+description = "inference-server-uriel log level"
+default = "info"
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest FrameWithEmbedding message this engine will emit, in bytes"
+default = 8388608
+
+[engine]
+type = "filter"
+inputs = [
+    "steeleagle_protocol/v1/messages/telemetry/RawFrame",
+    "steeleagle_protocol/v1/messages/telemetry/EncodedFrame",
+]
+result = "steeleagle_protocol/v1/messages/result/FrameWithEmbedding"

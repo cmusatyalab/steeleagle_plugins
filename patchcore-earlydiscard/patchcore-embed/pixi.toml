@@ -1,0 +1,9 @@
+[workspace]
+authors = ["Natan Zmudzinski <nzmudzin@andrew.cmu.edu>"]
+channels = ["conda-forge"]
+name = "patchcore-embed"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+start = { cmd = "python3 start.py" }

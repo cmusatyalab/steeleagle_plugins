@@ -15,7 +15,7 @@ import uriel
 
 import h264_pb2
 from common import MAX_FRAME_SIZE
-from h264_common import FRAME_H, FRAME_W, I420_FRAME_SIZE, Pipeline
+from h264_common import FRAME_H, FRAME_W, RGB_FRAME_SIZE, Pipeline
 
 import gi
 gi.require_version("Gst", "1.0")
@@ -79,7 +79,7 @@ def main():
         f"appsrc name=src ! videoconvert ! {encoder_desc} "
         f"! h264parse config-interval=-1 "
         f"! video/x-h264,stream-format=byte-stream,alignment=au ! appsink name=sink",
-        f"video/x-raw,format=I420,width={FRAME_W},height={FRAME_H},framerate={args.fps}/1",
+        f"video/x-raw,format=RGB,width={FRAME_W},height={FRAME_H},framerate={args.fps}/1",
         uses_iframe_action=uses_iframe_action,
     )
 
@@ -105,10 +105,10 @@ def main():
 
                 started = time.perf_counter()
                 data = bytes(input.data)
-                if len(data) != I420_FRAME_SIZE:
+                if len(data) != RGB_FRAME_SIZE:
                     print(
                         f"discarding input {input.id.seq}: {len(data)} bytes, "
-                        f"not a {FRAME_W}x{FRAME_H} I420 frame",
+                        f"not a {FRAME_W}x{FRAME_H} RGB frame",
                         flush=True,
                     )
                     engine.drop()

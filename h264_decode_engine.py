@@ -15,7 +15,7 @@ import uriel
 
 import h264_pb2
 from common import MAX_FRAME_SIZE
-from h264_common import FRAME_H, FRAME_W, I420_FRAME_SIZE, Pipeline
+from h264_common import FRAME_H, FRAME_W, RGB_FRAME_SIZE, Pipeline
 
 import gi
 gi.require_version("Gst", "1.0")
@@ -42,7 +42,7 @@ def main():
 
     pipeline = Pipeline(
         f"appsrc name=src ! h264parse ! {args.decoder} ! videoconvert "
-        f"! video/x-raw,format=I420,width={FRAME_W},height={FRAME_H} ! appsink name=sink",
+        f"! video/x-raw,format=RGB,width={FRAME_W},height={FRAME_H} ! appsink name=sink",
         "video/x-h264,stream-format=byte-stream,alignment=au",
     )
 
@@ -91,8 +91,8 @@ def main():
             finally:
                 buf.unmap(mapinfo)
 
-            if len(pixels) != I420_FRAME_SIZE:
-                print(f"frame {number} decoded to {len(pixels)} bytes, not {I420_FRAME_SIZE}; discarding it", flush=True)
+            if len(pixels) != RGB_FRAME_SIZE:
+                print(f"frame {number} decoded to {len(pixels)} bytes, not {RGB_FRAME_SIZE}; discarding it", flush=True)
                 engine.drop(result=dropped_result)
                 continue
 

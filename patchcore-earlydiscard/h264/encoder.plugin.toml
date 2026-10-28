@@ -1,0 +1,43 @@
+[plugin]
+name = "PatchCore H.264 Encoder"
+type = "engine"
+description = "Encodes anomalous frames patchcore-score forwards with H.264, to send across the network to the H.264 decoder on the remote daemon"
+
+[[args]]
+name = "decoder_name"
+type = "string"
+description = "Service name of the H.264 decoder on the remote daemon, whose results tell the encoder when to send a keyframe"
+default = "h264_decoder"
+
+[[args]]
+name = "encoder"
+type = "string"
+description = "H.264 encoder, in gst-launch syntax"
+default = "qtic2venc quant-i-frames=40 quant-p-frames=40 b-frames=0"
+
+[[args]]
+name = "fps"
+type = "number"
+description = "Frame rate the encoder is told the frames come at"
+default = 30
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest encoded frame sent, in bytes"
+default = 3145728
+
+[[args]]
+name = "timeout_ms"
+type = "number"
+description = "Milliseconds a frame may take to encode before it is discarded"
+default = 1000
+
+[[args]]
+name = "log_frames"
+type = "boolean"
+description = "Log every frame encoded"
+default = false
+
+[engine]
+type = "filter"

@@ -1,0 +1,36 @@
+[plugin]
+name = "PatchCore Score"
+type = "engine"
+description = "Scores embeddings from the PatchCore embed engine against a FAISS memory bank; forwards anomalous frames, drops normal ones"
+
+[[args]]
+name = "bank_ckpt"
+type = "string"
+description = "Path to the PatchCore checkpoint (incl. memory bank and image threshold)"
+default = ""
+
+[[args]]
+name = "faiss_index"
+type = "string"
+description = "Path to the FAISS index file matching bank_ckpt"
+default = ""
+
+[[args]]
+name = "threshold"
+type = "number"
+description = "Anomaly-score threshold to override the one trained into bank_ckpt (blank/0 = use trained threshold)"
+default = 0
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest frame this engine will accept/forward, in bytes"
+default = 2000000
+
+# TODO(natan): inputs/result are placeholders until the tachyon's
+# steeleagle_protocol-based proto types (FrameWithEmbedding, etc.) are
+# pushed to git.
+[engine]
+type = "filter"
+inputs = ["patchcore_pipeline/v1/FrameWithEmbedding"]
+result = "messages/result/GenericResult"

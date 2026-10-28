@@ -15,7 +15,7 @@ Gst.init(None)
 
 FRAME_W = 1280
 FRAME_H = 720
-I420_FRAME_SIZE = FRAME_W * FRAME_H * 3 // 2
+RGB_FRAME_SIZE = FRAME_W * FRAME_H * 3
 
 # Where a pipeline's timestamps start. An encoder based on GstVideoEncoder
 # shifts every timestamp by 1000 hours when a decoding timestamp would
