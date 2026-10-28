@@ -41,15 +41,10 @@ cwd = "web"
 inputs = ["web/package.json", "web/package-lock.json"]
 outputs = ["web/node_modules/.package-lock.json"]
 
-# The web UI's local settings (e.g. its Mapbox token), which aren't checked in
-[tasks.web-config]
-cmd = "test -f src/config.js || cp src/config.js.template src/config.js"
-cwd = "web"
-
 [tasks.web-build]
 cmd = "npm run build"
 cwd = "web"
-depends-on = ["web-deps", "web-config"]
+depends-on = ["web-deps"]
 inputs = ["web/package.json", "web/index.html", "web/vite.config.js", "web/src/**", "web/public/**"]
 outputs = ["web/dist/**"]
 

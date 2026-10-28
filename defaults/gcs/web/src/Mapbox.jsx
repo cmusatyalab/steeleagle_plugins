@@ -1,7 +1,6 @@
 import { useRef, useEffect } from 'react'
 import mapboxgl from 'mapbox-gl'
 import 'mapbox-gl/dist/mapbox-gl.css';
-import { MAPBOX_TOKEN } from './config.js';
 import { vehicleColor, isVehicleDisconnected, vehicleStatus, vehicleStatusMapColor, vehicleStatusTextColor } from './mapUtils.js'
 import { vehicleControlGroupDigits } from './squadUtils.js'
 import { STYLE_URLS, applyBasemapConfig, applySatelliteLayerVisibility } from './mapStyles.js'
@@ -53,8 +52,6 @@ function Mapbox({ selectedVehicle, vehicles, mapPanelSize, tracking, detectedObj
   const markerRefs = useRef([]); // To store references to all markers
   const isFirstStyleEffect = useRef(true);
   useEffect(() => {
-    mapboxgl.accessToken = `${MAPBOX_TOKEN}`;
-
     mapRef.current = new mapboxgl.Map({
       container: mapContainerRef.current,
       style: 'mapbox://styles/mapbox/standard',

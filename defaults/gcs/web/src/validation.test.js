@@ -52,10 +52,10 @@ describe('runValidation — required fields', () => {
         expect(issues['n1']).toBeUndefined();
     });
 
-    it('does not flag a node whose type is not in schema', () => {
+    it('flags only support, not fields, for a node whose type is not in schema', () => {
         const nodes = [makeNode('n1', 'UnknownType', 'u1', {})];
         const { issues } = runValidation(nodes, schema, 'n1');
-        expect(issues['n1']).toBeUndefined();
+        expect(issues['n1']).toEqual(['UnknownType is not supported by the selected vehicle']);
     });
 });
 
@@ -102,5 +102,19 @@ describe('runValidation — no start state', () => {
         const nodes = [makeNode('n1', 'Wait', 'w1', { duration: 5 })];
         const { noStart } = runValidation(nodes, schema, 'nonexistent_id');
         expect(noStart).toBe(true);
+    });
+});
+
+describe('runValidation — vehicle support', () => {
+    it('flags a type the vehicle schema lacks', () => {
+        const nodes = [makeNode('n1', 'TakeOff', 't1')];
+        const { issues } = runValidation(nodes, schema, 'n1');
+        expect(issues['n1']).toEqual(['TakeOff is not supported by the selected vehicle']);
+    });
+
+    it('says nothing before the schema loads', () => {
+        const nodes = [makeNode('n1', 'TakeOff', 't1')];
+        const { issues } = runValidation(nodes, { actions: {} }, 'n1');
+        expect(issues).toEqual({});
     });
 });

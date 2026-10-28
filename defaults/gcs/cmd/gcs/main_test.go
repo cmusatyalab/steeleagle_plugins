@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -20,6 +21,28 @@ import (
 	"google.golang.org/grpc"
 )
 
+func TestServesUIConfig(t *testing.T) {
+	hub, err := rtc.NewHub(rtc.Options{}, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), uiConfig{Mapbox: "pk.test"}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	defer server.Close()
+	resp, err := http.Get(server.URL + "/api/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || got["mapbox"] != "pk.test" {
+		t.Errorf("GET /api/config = %d %v, want 200 with the mapbox token", resp.StatusCode, got)
+	}
+}
+
 func TestParseArgs(t *testing.T) {
 	a, err := parseArgs("")
 	if err != nil {
@@ -35,6 +58,9 @@ func TestParseArgs(t *testing.T) {
 	}
 	if a.HTTPAddr != ":9000" || !slices.Equal(a.ICEServers, []string{"stun:example.com"}) || a.MaxInputSize != 4<<20 {
 		t.Errorf("parseArgs() = %+v, want the set args over the defaults", a)
+	}
+	if a, err = parseArgs(`{"mapbox": "pk.test"}`); err != nil || a.Mapbox != "pk.test" {
+		t.Errorf("parseArgs() = %+v, %v, want the mapbox token", a, err)
 	}
 	for _, invalid := range []string{`{`, `{"max_input_size": 0}`, `{"max_input_size": "big"}`} {
 		if _, err := parseArgs(invalid); err == nil {
@@ -73,7 +99,7 @@ func TestHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), web, zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), uiConfig{}, web, zerolog.Nop()))
 	defer server.Close()
 
 	for path, want := range map[string]string{
@@ -122,7 +148,7 @@ func TestHandlerWithoutWeb(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/streams")
 	if err != nil {
@@ -142,7 +168,7 @@ func TestHandlerWithoutDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/remote/vehicles")
 	if err != nil {
@@ -158,7 +184,7 @@ func TestHandlerWithoutDaemon(t *testing.T) {
 // testMissions returns mission routes for a GCS with no daemon and an
 // unavailable compiler.
 func testMissions() missionRoutes {
-	svc := mission.NewService(unavailableCompiler{errors.New("no go")}, mission.CompilerConfig{}, "", nil, zerolog.Nop())
+	svc := mission.NewService(unavailableCompiler{errors.New("no go")}, mission.CompilerConfig{}, "", nil, nil, zerolog.Nop())
 	return missionRoutes{svc: svc, upload: noDaemonHandler(), deploy: noDaemonHandler(), catalog: noDaemonHandler()}
 }
 
@@ -182,7 +208,7 @@ func TestNoDaemonMissionRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	for _, path := range []string{"/api/upload", "/api/deploy"} {
 		resp, err := http.Post(server.URL+path, "application/json", strings.NewReader("{}"))
@@ -217,7 +243,7 @@ func TestCompilerRoutesRegistered(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/schema")
 	if err != nil {
@@ -248,7 +274,7 @@ func TestCatalogRoute503WithoutDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/flows/catalog")
 	if err != nil {

@@ -12,7 +12,17 @@ export function runValidation(nodes, schema, startNodeId) {
         issues[nodeId].push(msg);
     }
 
-    // Check 1: required fields not set
+    // Check 1: the type isn't one the vehicle's driver supports. The schema
+    // is empty until it loads, which says nothing about support.
+    if (Object.keys(schema.actions ?? {}).length > 0) {
+        for (const node of nodes) {
+            if (!schema.actions[node.data.type_name]) {
+                addIssue(node.id, `${node.data.type_name} is not supported by the selected vehicle`);
+            }
+        }
+    }
+
+    // Check 2: required fields not set
     for (const node of nodes) {
         const fields = schema.actions?.[node.data.type_name]?.fields ?? [];
         for (const field of fields) {
@@ -25,7 +35,7 @@ export function runValidation(nodes, schema, startNodeId) {
         }
     }
 
-    // Check 2: duplicate instance IDs
+    // Check 3: duplicate instance IDs
     const idCounts = {};
     for (const node of nodes) {
         const sid = node.data.instance_id;
@@ -37,7 +47,7 @@ export function runValidation(nodes, schema, startNodeId) {
         }
     }
 
-    // Check 3: no start state
+    // Check 4: no start state
     const noStart = !startNodeId || !nodes.some(n => n.id === startNodeId);
 
     return { issues, noStart };

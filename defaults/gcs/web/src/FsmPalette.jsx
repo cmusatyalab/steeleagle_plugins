@@ -10,26 +10,33 @@ const TYPE_ICONS = {
     AvoidTask: '🚧',
 };
 
-function FsmPalette({ onSchemaLoaded }) {
-    const [schema, setSchema] = useState({ actions: {}, events: {} });
+// The types come from the vehicle's driver cap (all types without a vehicle).
+function FsmPalette({ vehicle, onSchemaLoaded }) {
     const [actionsOpen, setActionsOpen] = useState(true);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState(null);
+    // The last load: the vehicle it was for, and its schema or error. It is
+    // loading until that is the current vehicle.
+    const [loaded, setLoaded] = useState({ vehicle: undefined, schema: { actions: {}, events: {} }, error: null });
+    const loading = loaded.vehicle !== vehicle;
+    const { schema, error } = loaded;
 
     useEffect(() => {
-        fetch(getApiUrl('/api/schema'))
+        const controller = new AbortController();
+        const query = vehicle ? `?vehicle=${encodeURIComponent(vehicle)}` : '';
+        fetch(getApiUrl(`/api/schema${query}`), { signal: controller.signal })
             .then(async r => {
                 const data = await r.json();
                 if (!r.ok) throw new Error(data.detail || `HTTP error! status: ${r.status}`);
                 return data;
             })
             .then(data => {
-                setSchema(data);
+                setLoaded({ vehicle, schema: data, error: null });
                 onSchemaLoaded(data);
-                setLoading(false);
             })
-            .catch(e => { setError(e.message); setLoading(false); });
-    }, []);
+            .catch(e => {
+                if (e.name !== 'AbortError') setLoaded({ vehicle, schema: { actions: {}, events: {} }, error: e.message });
+            });
+        return () => controller.abort();
+    }, [vehicle]);
 
     function onDragStart(event, typeName) {
         event.dataTransfer.setData('application/reactflow/typeName', typeName);

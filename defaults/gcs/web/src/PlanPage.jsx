@@ -23,6 +23,7 @@ import FsmPalette from './FsmPalette.jsx';
 import ConnectModal from './ConnectModal.jsx';
 import CanvasContextMenu from './CanvasContextMenu.jsx';
 import FlowBuilder from './FlowBuilder.jsx';
+import VehiclePicker from './VehiclePicker.jsx';
 import { canvasThemeVars } from './canvasTheme.js';
 import { getApiUrl } from './urls.js';
 import { runValidation } from './validation.js';
@@ -345,6 +346,15 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     const [canUndo, setCanUndo] = useState(false);
     const [canRedo, setCanRedo] = useState(false);
     useEffect(() => { schemaRef.current = schema; }, [schema]);
+    // The schema follows the vehicle's driver cap; nodes keep their own copy
+    // of their type's schema, so refresh it.
+    useEffect(() => {
+        setNodes(ns => ns.map(n => ({ ...n, data: { ...n.data, schema: schema.actions[n.data.type_name] } })));
+    }, [schema]);
+    // A mission compiled for one vehicle says nothing about another.
+    useEffect(() => { setMissionCompiled(false); }, [flow.vehicle]);
+    // Compile and Build use the vehicle's driver config, when one is picked.
+    const vehiclePart = flow.vehicle ? { vehicle: flow.vehicle } : {};
 
     useEffect(() => {
         const timer = setTimeout(() => {
@@ -506,7 +516,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
         if (!flowPart) return;
         setCompiling(true);
         try {
-            const body = { ...buildMissionRequestBody(), ...flowPart, geojson: features };
+            const body = { ...buildMissionRequestBody(), ...flowPart, ...vehiclePart, geojson: features };
             const resp = await fetch(getApiUrl('/api/compile'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -542,7 +552,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
         if (!missionCompiled) return;
         setBuilding(arch);
         try {
-            const body = { ...buildMissionRequestBody(), arch, geojson: features };
+            const body = { ...buildMissionRequestBody(), ...vehiclePart, arch, geojson: features };
             const resp = await fetch(getApiUrl('/api/build'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -818,6 +828,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
 
                         {/* Toolbar — now at top with borderBottom */}
                         <div className="flex gap-2 align-items-center p-2" style={{ borderBottom: '1px solid #2a3a4a', flexShrink: 0 }}>
+                            <VehiclePicker group="mission-vehicle" flow={flow} setFlow={setFlow} catalog={catalog} />
                             <Button
                                 icon="pi pi-undo"
                                 size="small"
@@ -893,7 +904,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
 
                         {/* Canvas — middle */}
                         <div className="flex flex-1" style={{ overflow: 'hidden', ...canvasThemeVars(theme) }}>
-                            <FsmPalette onSchemaLoaded={setSchema} />
+                            <FsmPalette vehicle={flow.vehicle} onSchemaLoaded={setSchema} />
                             <ReactFlowProvider>
                                 <FsmCanvas
                                     active={visible && activeIndex === 0}

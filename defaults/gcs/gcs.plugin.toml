@@ -44,6 +44,12 @@ type = "object"
 description = "How missions are compiled, with keys: modules (extra Go modules: path, version, optional override), imports (packages whose actions and events missions may use: path, optional alias), timeout_s (seconds one compile may take, default 300), sdk_version (steeleagle SDK version missions build against; defaults to the one the GCS was built with)"
 default = {}
 
+[[args]]
+name = "mapbox"
+type = "string"
+description = "Mapbox access token for the web UI's maps; empty shows no basemap"
+default = ""
+
 [engine]
 # Engine type: (detection, classification, guidance, position, generic, filter)
 type = "generic"

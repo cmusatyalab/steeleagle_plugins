@@ -1,8 +1,7 @@
-# Copy config template and update
-```
-cp src/config.js.template src/config.js
-vi src/config.js
-```
+The Mapbox token comes from the GCS's `mapbox` plugin arg (served at
+`/api/config`), so run against a GCS (or `pixi run mock`, which passes
+`$MAPBOX_TOKEN`).
+
 # Run on localhost or bind to address
 ```
 npm run dev

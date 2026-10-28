@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/cmusatyalab/steeleagle/config"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
 	"github.com/rs/zerolog"
 )
@@ -25,13 +27,15 @@ type fakeCompiler struct {
 	buildErr    func(BuildRequest) error
 	binaries    map[string][]byte
 	registryN   int
+	plugins     [][]byte // the plugin of each Registry call
 	builds      []BuildRequest
 }
 
-func (f *fakeCompiler) Registry(context.Context) (map[string]any, error) {
+func (f *fakeCompiler) Registry(_ context.Context, plugin []byte) (map[string]any, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.registryN++
+	f.plugins = append(f.plugins, plugin)
 	return f.registry, f.registryErr
 }
 
@@ -73,13 +77,13 @@ const testGCSIP = "100.64.0.1"
 
 func newService(t testing.TB, f *fakeCompiler) *Service {
 	t.Helper()
-	return NewService(f, testConfig(t), testGCSIP, nil, zerolog.Nop())
+	return NewService(f, testConfig(t), testGCSIP, nil, nil, zerolog.Nop())
 }
 
 // newFlowService returns a Service whose daemon lists cat.
 func newFlowService(t testing.TB, f *fakeCompiler, cat flows.Catalog) *Service {
 	t.Helper()
-	return NewService(f, testConfig(t), testGCSIP, func(context.Context) (flows.Catalog, error) { return cat, nil }, zerolog.Nop())
+	return NewService(f, testConfig(t), testGCSIP, func(context.Context) (flows.Catalog, error) { return cat, nil }, nil, zerolog.Nop())
 }
 
 func graphBody(t testing.TB, mutate func(map[string]any)) []byte {
@@ -142,6 +146,88 @@ func TestSchemaRefreshReloads(t *testing.T) {
 	}
 	if f.registryN != 2 {
 		t.Errorf("registry loads = %d, want 2", f.registryN)
+	}
+}
+
+// newVehicleService returns a Service whose daemon runs vs.
+func newVehicleService(t testing.TB, f *fakeCompiler, vs ...fleet.Vehicle) *Service {
+	t.Helper()
+	return NewService(f, testConfig(t), testGCSIP, nil,
+		func(context.Context) ([]fleet.Vehicle, error) { return vs, nil }, zerolog.Nop())
+}
+
+var harpy = fleet.Vehicle{Name: "100.64.0.2.harpy", Driver: &config.DriverCap{Type: "copter"}, Config: []byte("[driver]\ntype=\"copter\"\n")}
+
+func TestSchemaForVehicleLoadsWithItsPluginOnce(t *testing.T) {
+	f := newFake(t)
+	s := newVehicleService(t, f, harpy)
+	for range 2 {
+		if rec := do(s.ServeSchema, "GET", "/api/schema?vehicle=100.64.0.2.harpy", nil); rec.Code != 200 {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body)
+		}
+	}
+	if len(f.plugins) != 2 || f.plugins[0] != nil || string(f.plugins[1]) != string(harpy.Config) {
+		t.Errorf("registry plugins = %q, want the default load then harpy's config once", f.plugins)
+	}
+}
+
+func TestSchemaRefreshDropsVehicleSchemas(t *testing.T) {
+	f := newFake(t)
+	s := newVehicleService(t, f, harpy)
+	for _, url := range []string{"/api/schema?vehicle=100.64.0.2.harpy", "/api/schema?refresh=1&vehicle=100.64.0.2.harpy"} {
+		if rec := do(s.ServeSchema, "GET", url, nil); rec.Code != 200 {
+			t.Fatalf("%s: status %d: %s", url, rec.Code, rec.Body)
+		}
+	}
+	if f.registryN != 4 {
+		t.Errorf("registry loads = %d, want 4", f.registryN)
+	}
+}
+
+func TestSchemaForVehicleErrors(t *testing.T) {
+	broken := fleet.Vehicle{Name: "100.64.0.2.broken", DriverErr: errors.New("plugin config has no driver cap")}
+	tests := []struct {
+		name    string
+		s       func(*fakeCompiler) *Service
+		vehicle string
+		code    int
+		detail  string
+	}{
+		{"no daemon", func(f *fakeCompiler) *Service { return newService(t, f) }, harpy.Name, 503, noDaemon},
+		{"not running", func(f *fakeCompiler) *Service { return newVehicleService(t, f, harpy) }, "100.64.0.2.gone", 404, "vehicle 100.64.0.2.gone is not running"},
+		{"no driver", func(f *fakeCompiler) *Service { return newVehicleService(t, f, broken) }, broken.Name, 422,
+			"vehicle 100.64.0.2.broken has no driver config: plugin config has no driver cap"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := do(tt.s(newFake(t)).ServeSchema, "GET", "/api/schema?vehicle="+tt.vehicle, nil)
+			if rec.Code != tt.code {
+				t.Fatalf("status %d, want %d: %s", rec.Code, tt.code, rec.Body)
+			}
+			if got := decodeMap(t, rec)["detail"]; got != tt.detail {
+				t.Errorf("detail = %v, want %v", got, tt.detail)
+			}
+		})
+	}
+}
+
+func TestCompileAndBuildUseTheVehiclesPlugin(t *testing.T) {
+	f := newFake(t)
+	s := newVehicleService(t, f, harpy)
+	setVehicle := func(m map[string]any) { m["vehicle"] = harpy.Name; m["arch"] = "arm64" }
+	if rec := do(s.ServeCompile, "POST", "/api/compile", graphBody(t, setVehicle)); rec.Code != 200 {
+		t.Fatalf("compile status %d: %s", rec.Code, rec.Body)
+	}
+	if rec := do(s.ServeBuild, "POST", "/api/build", graphBody(t, setVehicle)); rec.Code != 200 {
+		t.Fatalf("build status %d: %s", rec.Code, rec.Body)
+	}
+	if len(f.builds) != 2 {
+		t.Fatalf("builds = %d, want 2", len(f.builds))
+	}
+	for _, b := range f.builds {
+		if string(b.Plugin) != string(harpy.Config) {
+			t.Errorf("%s build plugin = %q, want harpy's config", b.Arch, b.Plugin)
+		}
 	}
 }
 

@@ -3,7 +3,6 @@ import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
-import { MAPBOX_TOKEN } from './config.js';
 import { Button } from 'primereact/button';
 import { Dropdown } from 'primereact/dropdown';
 import { defaultFeatureName, featuresToGeoJson, featuresToKml, parseImportFile, bboxFromFeature } from './mapUtils.js';
@@ -94,7 +93,6 @@ function MapDraw({ features, setFeatures, toast }) {
     }, [features]);
 
     useEffect(() => {
-        mapboxgl.accessToken = `${MAPBOX_TOKEN}`;
         mapRef.current = new mapboxgl.Map({
             container: mapContainerRef.current,
             style: 'mapbox://styles/mapbox/standard',

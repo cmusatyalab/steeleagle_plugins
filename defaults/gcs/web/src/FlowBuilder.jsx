@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ReactFlow, ReactFlowProvider, Background, Controls, MiniMap, Panel, applyNodeChanges, useReactFlow } from '@xyflow/react';
 import { Button } from 'primereact/button';
-import { Dropdown } from 'primereact/dropdown';
 import { InputText } from 'primereact/inputtext';
 import { ConfirmDialog, confirmDialog } from 'primereact/confirmdialog';
-import { createCatalogLoader, vehicleLabel, vehicleOptions } from './flowCatalog.js';
+import { createCatalogLoader } from './flowCatalog.js';
 import { displayName } from './vehicleNames.js';
 import {
     addEdge, addEngine, addProducer, availableStreams, canConnect, emptyFlow, fileBaseName,
-    importFlowToml, parseFlowJson, removeEdge, removeNode, serializeFlow, setVehicle, toFlowToml, updateEdge, updateNode, validateFlow,
+    importFlowToml, parseFlowJson, removeEdge, removeNode, serializeFlow, toFlowToml, updateEdge, updateNode, validateFlow,
 } from './flowModel.js';
 import {
     ERROR_COLOR, FLOW_DRAG_TYPE, WARNING_COLOR,
@@ -20,6 +19,7 @@ import CallbackEdge from './CallbackEdge.jsx';
 import FlowPalette from './FlowPalette.jsx';
 import FlowPanel from './FlowPanel.jsx';
 import CanvasContextMenu from './CanvasContextMenu.jsx';
+import VehiclePicker from './VehiclePicker.jsx';
 import { flowCanvasThemeVars } from './canvasTheme.js';
 import '@xyflow/react/dist/style.css';
 
@@ -147,24 +147,6 @@ function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog,
 
     // --- toolbar ---
 
-    const options = useMemo(() => (catalog ? vehicleOptions(catalog, flow.vehicle) : []), [catalog, flow.vehicle]);
-
-    function onPickVehicle(vehicle) {
-        if (!vehicle || vehicle === flow.vehicle) return;
-        const producers = flow.nodes.filter((n) => n.kind === 'producer').length;
-        if (!producers) {
-            setFlow((f) => setVehicle(f, vehicle));
-            return;
-        }
-        confirmDialog({
-            group: 'flow',
-            header: 'Change vehicle',
-            message: `Switch to ${vehicleLabel(vehicle, options)}? This removes the ${producers} producer node(s) for ${displayName(flow.vehicle)} and their edges.`,
-            icon: 'pi pi-exclamation-triangle',
-            accept: () => { setFlow((f) => setVehicle(f, vehicle)); setSelection(null); },
-        });
-    }
-
     function onNew() {
         confirmDialog({
             group: 'flow',
@@ -244,14 +226,8 @@ function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog,
             <div className="flex gap-2 align-items-center p-2 flex-wrap" style={{ borderBottom: '1px solid #2a3a4a', flexShrink: 0 }}>
                 <InputText value={flow.name} onChange={(e) => setFlow((f) => ({ ...f, name: e.target.value }))}
                     placeholder="Flow name" className="p-inputtext-sm" style={{ width: 180 }} />
-                <Dropdown
-                    value={flow.vehicle}
-                    options={options.map((o) => ({ label: vehicleLabel(o, options), value: o }))}
-                    onChange={(e) => onPickVehicle(e.value)}
-                    placeholder={catalog ? 'Select vehicle' : 'Loading vehicles…'}
-                    className="p-inputtext-sm"
-                    style={{ width: 240 }}
-                />
+                <VehiclePicker group="flow-vehicle" flow={flow} setFlow={setFlow} catalog={catalog}
+                    onPicked={() => setSelection(null)} />
                 <Button label="New" icon="pi pi-file" size="small" outlined onClick={onNew} />
                 <Button label="Import JSON" icon="pi pi-file-import" size="small" outlined onClick={() => fileInputRef.current?.click()} />
                 <Button label="Import TOML" icon="pi pi-file-import" size="small" outlined

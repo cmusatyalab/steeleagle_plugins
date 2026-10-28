@@ -64,6 +64,8 @@ type args struct {
 	MaxInputSize int      `json:"max_input_size"`
 	// Compiler configures compiling missions; see mission.CompilerConfig.
 	Compiler mission.CompilerConfig `json:"compiler"`
+	// Mapbox is the access token the web UI's maps use; empty for none.
+	Mapbox string `json:"mapbox"`
 }
 
 // parseArgs reads the plugin's args from JSON, defaulting the ones it leaves
@@ -175,14 +177,19 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	}
 	var list mission.Lister
 	var catalog mission.CatalogFunc
+	var running mission.VehiclesFunc
 	if conn != nil {
 		list = daemonLister(daemonpb.NewDaemonServiceClient(conn), gcsIP, gcsHostname)
 		catalog = func(ctx context.Context) (flows.Catalog, error) {
 			_, cat, err := list(ctx)
 			return cat, err
 		}
+		running = func(ctx context.Context) ([]fleet.Vehicle, error) {
+			vs, _, err := list(ctx)
+			return vs, err
+		}
 	}
-	missions := missionRoutes{svc: mission.NewService(compiler, cfg, gcsIP, catalog, log), upload: noDaemonHandler(), deploy: noDaemonHandler(), catalog: noDaemonHandler()}
+	missions := missionRoutes{svc: mission.NewService(compiler, cfg, gcsIP, catalog, running, log), upload: noDaemonHandler(), deploy: noDaemonHandler(), catalog: noDaemonHandler()}
 	if conn != nil {
 		uploads := mission.NewUploads(list, mission.NewSender(conn, 1<<20, 30*time.Second), missions.svc, log)
 		missions.upload = http.HandlerFunc(uploads.ServeUpload)
@@ -203,7 +210,7 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: newHandler(hub, controller, vehicles, missions, daemonsRoutes, web, log), ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{Handler: newHandler(hub, controller, vehicles, missions, daemonsRoutes, uiConfig{Mapbox: a.Mapbox}, web, log), ReadHeaderTimeout: 10 * time.Second}
 	errs := make(chan error, 2)
 	go func() {
 		log.Info().Str("addr", ln.Addr().String()).Msg("serving web UI")
@@ -318,7 +325,9 @@ func noDaemonHandler() http.Handler {
 // fails every call with that error, so the compiler routes say why.
 type unavailableCompiler struct{ err error }
 
-func (c unavailableCompiler) Registry(context.Context) (map[string]any, error) { return nil, c.err }
+func (c unavailableCompiler) Registry(context.Context, []byte) (map[string]any, error) {
+	return nil, c.err
+}
 
 func (c unavailableCompiler) Build(context.Context, mission.BuildRequest) ([]byte, error) {
 	return nil, c.err
@@ -338,11 +347,21 @@ type daemonRoutes struct {
 	list, restart http.Handler
 }
 
+// uiConfig is the web UI's settings from the plugin's args, served at
+// /api/config.
+type uiConfig struct {
+	Mapbox string `json:"mapbox"`
+}
+
 // newHandler serves the API, and the web UI from the directory web. vehicles
-// serves the vehicle list, missions the mission routes, and orchestration
-// the daemon routes.
-func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Handler, missions missionRoutes, orchestration daemonRoutes, web string, log zerolog.Logger) http.Handler {
+// serves the vehicle list, missions the mission routes, orchestration the
+// daemon routes, and ui the web UI's settings.
+func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Handler, missions missionRoutes, orchestration daemonRoutes, ui uiConfig, web string, log zerolog.Logger) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ui)
+	})
 	mux.HandleFunc("POST /api/webrtc/offer", hub.ServeOffer)
 	mux.HandleFunc("GET /api/streams", hub.ServeStreams)
 	mux.HandleFunc("POST /api/start", controller.ServeStart)

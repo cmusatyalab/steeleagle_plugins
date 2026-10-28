@@ -56,6 +56,7 @@ var cmu = LatLon{Lat: 40.4433, Lon: -79.9436}
 // options are the command's flags.
 type options struct {
 	gcs, web, http, socket, clips string
+	mapbox                        string
 	gcsIP                         string
 	vehicles                      []string
 	noEncoder                     map[string]bool
@@ -97,6 +98,7 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&o.socket, "socket", filepath.Join(runtimeDir, fmt.Sprintf("gcsmock-%d.sock", os.Getpid())),
 		"unix socket the mock daemon serves on")
 	fs.StringVar(&o.clips, "clips", "bin/mockclips", "directory the video clips are cached in")
+	fs.StringVar(&o.mapbox, "mapbox", os.Getenv("MAPBOX_TOKEN"), "Mapbox access token passed to the GCS (default: $MAPBOX_TOKEN)")
 	fs.StringVar(&o.gcsIP, "gcs-ip", "100.64.0.1", "IP of the daemon the GCS runs on")
 	vehicles := fs.String("vehicles", "100.64.0.1.alpha,100.64.0.1.bravo,100.64.0.2.charlie",
 		"comma-separated vehicle names, each its daemon's IP, a dot and its own name")
@@ -386,7 +388,7 @@ func simulate(ctx context.Context, vehicles map[string]*Vehicle) {
 // runChild runs the GCS until it exits, stopping it on a signal from
 // signals, and returns its exit status.
 func runChild(o options, engine string, signals <-chan os.Signal, log zerolog.Logger) (int, error) {
-	pluginArgs, err := json.Marshal(map[string]string{"http_addr": o.http})
+	pluginArgs, err := json.Marshal(map[string]string{"http_addr": o.http, "mapbox": o.mapbox})
 	if err != nil {
 		return 1, err
 	}

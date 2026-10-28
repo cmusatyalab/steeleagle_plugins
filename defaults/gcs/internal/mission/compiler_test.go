@@ -160,7 +160,7 @@ func TestSDKCompilerRealBuild(t *testing.T) {
 	c := NewSDKCompiler(cfg, 2)
 	ctx := context.Background()
 
-	reg, err := c.Registry(ctx)
+	reg, err := c.Registry(ctx, nil)
 	if err != nil {
 		t.Fatalf("Registry: %v", err)
 	}

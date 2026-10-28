@@ -26,6 +26,9 @@ const validateMissionName = "validate"
 // CatalogFunc lists the flow catalog from the daemon.
 type CatalogFunc func(ctx context.Context) (flows.Catalog, error)
 
+// VehiclesFunc lists the running vehicles.
+type VehiclesFunc func(ctx context.Context) ([]fleet.Vehicle, error)
+
 // State is the loaded compiler state: the type index and the /api/schema body.
 type State struct {
 	Index  *TypeIndex
@@ -42,12 +45,17 @@ type Service struct {
 	gcsIP string
 	// catalog lists the flow catalog; nil without a daemon.
 	catalog CatalogFunc
+	// vehicles lists the running vehicles; nil without a daemon.
+	vehicles VehiclesFunc
 
 	ready chan struct{} // closed when the first load has finished
 
 	mu    sync.RWMutex
 	state *State
 	err   error
+	// scoped caches the state scrubbed by each driver plugin config, keyed
+	// by the config.
+	scoped map[string]*State
 }
 
 // BuildTarget is a binary CompileGraph builds. Key names the target in
@@ -68,13 +76,17 @@ type BuildTarget struct {
 
 // NewService returns a Service compiling with c. cfg should be resolved
 // (ResolveConfig). gcsIP is the IP of the GCS's own daemon, which
-// orchestrates flows, and catalog lists the flow catalog (nil without a
-// daemon). The type registry is loaded in the background; routes wait for it.
-func NewService(c Compiler, cfg CompilerConfig, gcsIP string, catalog CatalogFunc, log zerolog.Logger) *Service {
-	s := &Service{c: c, cfg: cfg, log: log, header: cfg.Header(), gcsIP: gcsIP, catalog: catalog, ready: make(chan struct{})}
+// orchestrates flows, and catalog and vehicles list the flow catalog and the
+// running vehicles (nil without a daemon). The type registry is loaded in the
+// background; routes wait for it.
+func NewService(c Compiler, cfg CompilerConfig, gcsIP string, catalog CatalogFunc, vehicles VehiclesFunc, log zerolog.Logger) *Service {
+	s := &Service{
+		c: c, cfg: cfg, log: log, header: cfg.Header(), gcsIP: gcsIP, catalog: catalog, vehicles: vehicles,
+		ready: make(chan struct{}), scoped: map[string]*State{},
+	}
 	go func() {
 		defer close(s.ready)
-		st, err := s.load(context.Background())
+		st, err := s.load(context.Background(), nil)
 		s.mu.Lock()
 		s.state, s.err = st, err
 		s.mu.Unlock()
@@ -88,8 +100,10 @@ func NewService(c Compiler, cfg CompilerConfig, gcsIP string, catalog CatalogFun
 	return s
 }
 
-func (s *Service) load(ctx context.Context) (*State, error) {
-	reg, err := s.c.Registry(ctx)
+// load loads the type registry scrubbed by plugin's driver cap, or unscrubbed
+// if plugin is nil.
+func (s *Service) load(ctx context.Context, plugin []byte) (*State, error) {
+	reg, err := s.c.Registry(ctx, plugin)
 	if err != nil {
 		return nil, err
 	}
@@ -119,12 +133,60 @@ func (s *Service) Ready(ctx context.Context) (*State, error) {
 	return s.state, nil
 }
 
+// scopedState returns the state scrubbed by plugin's driver cap, loading it
+// on first use.
+func (s *Service) scopedState(ctx context.Context, plugin []byte) (*State, error) {
+	key := string(plugin)
+	s.mu.RLock()
+	st, ok := s.scoped[key]
+	s.mu.RUnlock()
+	if ok {
+		return st, nil
+	}
+	st, err := s.load(ctx, plugin)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.scoped[key] = st
+	s.mu.Unlock()
+	return st, nil
+}
+
+// vehiclePlugin returns the plugin config of the named running vehicle, or
+// writes an error and returns false.
+func (s *Service) vehiclePlugin(w http.ResponseWriter, r *http.Request, name string) ([]byte, bool) {
+	if s.vehicles == nil {
+		writeError(w, http.StatusServiceUnavailable, noDaemon)
+		return nil, false
+	}
+	vs, err := s.vehicles(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "Cannot list vehicles: "+err.Error())
+		return nil, false
+	}
+	for _, v := range vs {
+		if v.Name != name {
+			continue
+		}
+		if v.Driver == nil {
+			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("vehicle %s has no driver config: %v", name, v.DriverErr))
+			return nil, false
+		}
+		return v.Config, true
+	}
+	writeError(w, http.StatusNotFound, fmt.Sprintf("vehicle %s is not running", name))
+	return nil, false
+}
+
 // graphRequest is a mission graph as the frontend posts it; unknown fields
-// are ignored.
+// are ignored. Vehicle, if set, is the vehicle whose driver config the
+// mission is compiled with.
 type graphRequest struct {
 	Graph
-	Arch string          `json:"arch"`
-	Flow *flows.Template `json:"flow"`
+	Arch    string          `json:"arch"`
+	Flow    *flows.Template `json:"flow"`
+	Vehicle string          `json:"vehicle"`
 }
 
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -147,27 +209,41 @@ func (s *Service) ready503(w http.ResponseWriter, r *http.Request) *State {
 	return st
 }
 
-// ServeSchema serves GET /api/schema; ?refresh=1 reloads the registry.
+// ServeSchema serves GET /api/schema; ?refresh=1 reloads the registry, and
+// ?vehicle=<name> gives the types that vehicle's driver cap supports.
 func (s *Service) ServeSchema(w http.ResponseWriter, r *http.Request) {
 	st := s.ready503(w, r)
 	if st == nil {
 		return
 	}
 	if q := r.URL.Query().Get("refresh"); q != "" && q != "0" && q != "false" {
-		fresh, err := s.load(r.Context())
+		fresh, err := s.load(r.Context(), nil)
 		if err != nil {
 			writeError(w, http.StatusServiceUnavailable, "Reloading the schema failed: "+err.Error())
 			return
 		}
 		s.mu.Lock()
 		s.state = fresh
+		s.scoped = map[string]*State{}
 		s.mu.Unlock()
 		st = fresh
+	}
+	if name := r.URL.Query().Get("vehicle"); name != "" {
+		plugin, ok := s.vehiclePlugin(w, r, name)
+		if !ok {
+			return
+		}
+		var err error
+		if st, err = s.scopedState(r.Context(), plugin); err != nil {
+			writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("Loading the types of %s failed: %v", name, err))
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, st.Schema)
 }
 
-// ServeCompile serves POST /api/compile: a check build for amd64.
+// ServeCompile serves POST /api/compile: a check build for amd64, with the
+// driver config of the request's vehicle if it names one.
 func (s *Service) ServeCompile(w http.ResponseWriter, r *http.Request) {
 	if s.ready503(w, r) == nil {
 		return
@@ -177,6 +253,12 @@ func (s *Service) ServeCompile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := BuildTarget{Key: "amd64", Arch: "amd64", Engines: map[string]string{}}
+	if g.Vehicle != "" {
+		var ok bool
+		if target.Plugin, ok = s.vehiclePlugin(w, r, g.Vehicle); !ok {
+			return
+		}
+	}
 	if !g.Flow.Empty() {
 		if s.catalog == nil {
 			writeError(w, http.StatusServiceUnavailable, noDaemon)
@@ -298,7 +380,8 @@ func (s *Service) ServeParseDSL(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, graph)
 }
 
-// ServeBuild serves POST /api/build: the binary for one architecture.
+// ServeBuild serves POST /api/build: the binary for one architecture, with
+// the driver config of the request's vehicle if it names one.
 func (s *Service) ServeBuild(w http.ResponseWriter, r *http.Request) {
 	if s.ready503(w, r) == nil {
 		return
@@ -311,7 +394,14 @@ func (s *Service) ServeBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "arch must be amd64 or arm64")
 		return
 	}
-	bins, errs, err := s.CompileGraph(r.Context(), req.Graph, []BuildTarget{{Key: req.Arch, Arch: req.Arch}})
+	target := BuildTarget{Key: req.Arch, Arch: req.Arch}
+	if req.Vehicle != "" {
+		var ok bool
+		if target.Plugin, ok = s.vehiclePlugin(w, r, req.Vehicle); !ok {
+			return
+		}
+	}
+	bins, errs, err := s.CompileGraph(r.Context(), req.Graph, []BuildTarget{target})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

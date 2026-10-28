@@ -174,8 +174,10 @@ func (e *CompileErrors) Error() string {
 
 // Compiler compiles missions and reports the types available to them.
 type Compiler interface {
-	// Registry returns the type registry missions are linked against.
-	Registry(ctx context.Context) (map[string]any, error)
+	// Registry returns the type registry missions are linked against,
+	// scrubbed by the driver cap of plugin (a driver plugin config TOML), or
+	// unscrubbed if plugin is nil.
+	Registry(ctx context.Context, plugin []byte) (map[string]any, error)
 	// Build compiles a mission into a binary.
 	Build(ctx context.Context, req BuildRequest) ([]byte, error)
 }
@@ -188,7 +190,7 @@ type sdkCompiler struct {
 	cfg      CompilerConfig
 	sem      chan struct{}
 	compile  func(req BuildRequest) ([]byte, error)
-	registry func() ([]byte, error)
+	registry func(plugin []byte) ([]byte, error)
 }
 
 // NewSDKCompiler returns a Compiler using the SDK, with at most
@@ -203,8 +205,8 @@ func NewSDKCompiler(c CompilerConfig, maxConcurrent int) Compiler {
 	return s
 }
 
-func (s *sdkCompiler) Registry(ctx context.Context) (map[string]any, error) {
-	raw, err := s.run(ctx, s.registry)
+func (s *sdkCompiler) Registry(ctx context.Context, plugin []byte) (map[string]any, error) {
+	raw, err := s.run(ctx, func() ([]byte, error) { return s.registry(plugin) })
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +265,7 @@ func (s *sdkCompiler) run(ctx context.Context, fn func() ([]byte, error)) ([]byt
 	}
 }
 
-func (s *sdkCompiler) sdkRegistry() ([]byte, error) {
+func (s *sdkCompiler) sdkRegistry(plugin []byte) ([]byte, error) {
 	hdr, err := json.Marshal(s.cfg.Header())
 	if err != nil {
 		return nil, err
@@ -273,7 +275,11 @@ func (s *sdkCompiler) sdkRegistry() ([]byte, error) {
 		return nil, err
 	}
 	defer w.Close()
-	out, errs := w.Load(compiler.FromJson(hdr))
+	var opts []buildtools.Option
+	if plugin != nil {
+		opts = append(opts, buildtools.WithPlugin(plugin))
+	}
+	out, errs := w.Load(compiler.FromJson(hdr), opts...)
 	if err := convertErrors(errs); err != nil {
 		return nil, err
 	}
