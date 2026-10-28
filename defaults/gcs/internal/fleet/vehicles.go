@@ -49,6 +49,10 @@ type VehicleJSON struct {
 	Bearing     float64   `json:"bearing"`
 	Velocity    *Velocity `json:"velocity,omitempty"`
 	GCSFlow     string    `json:"gcs_flow"`
+	// Reachable is whether the vehicle's daemon lists it now, so it can be
+	// commanded even if its data isn't reaching the GCS. A vehicle on a
+	// daemon that is unavailable is not.
+	Reachable bool `json:"reachable"`
 }
 
 // ToVehicleJSON maps a vehicle and its latest telemetry to the UI's shape.
@@ -146,6 +150,7 @@ func (h *Vehicles) ServeVehicles(w http.ResponseWriter, r *http.Request) {
 			status = h.flows.Status(v.Name)
 		}
 		out[i] = ToVehicleJSON(v, tels[i], status, now)
+		out[i].Reachable = true
 	}
 	for _, s := range h.remember(snap) {
 		out = append(out, ToVehicleJSON(s.vehicle, nil,

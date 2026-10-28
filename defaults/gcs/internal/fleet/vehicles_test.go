@@ -123,6 +123,9 @@ func TestVehiclesEndpoint(t *testing.T) {
 	if code != 200 || len(out) != 2 || out[0].Name != v1 || out[1].Name != v2 {
 		t.Fatalf("code %d out %+v", code, out)
 	}
+	if !out[0].Reachable || !out[1].Reachable {
+		t.Errorf("reachable = %v, %v; want both, as the daemon lists them", out[0].Reachable, out[1].Reachable)
+	}
 	if out[0].Current.Alt != 10 || out[1].Current.Alt != 20 {
 		t.Errorf("alts = %v, %v; want each vehicle's own telemetry", out[0].Current.Alt, out[1].Current.Alt)
 	}
@@ -141,6 +144,10 @@ func TestVehiclesNoTelemetry(t *testing.T) {
 	f.Wait()
 	if code != 200 || len(out) != 2 || out[0].LastUpdated > 100 || out[1].LastUpdated < 1e6 {
 		t.Fatalf("code %d out %+v", code, out)
+	}
+	// Still reachable, so it can be held to get its data flowing again
+	if !out[1].Reachable {
+		t.Errorf("vehicle without telemetry reachable = false, want true")
 	}
 }
 

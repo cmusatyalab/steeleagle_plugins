@@ -29,13 +29,21 @@ export function isVehicleDisconnected(vehicle) {
     return vehicle.last_updated > 5;
 }
 
+// Whether the vehicle can be selected (and so held or controlled): its
+// daemon lists it, even if none of its data is reaching the GCS -- holding
+// it is how its data gets flowing again. A vehicle whose daemon is
+// unavailable (reachable: false) can't be.
+export function isVehicleSelectable(vehicle) {
+    return vehicle.reachable !== false;
+}
+
 // A single source of truth for "what state is this vehicle in," reused by
-// every place that renders a vehicle's status. Offline overrides
-// selection -- a vehicle that stopped reporting isn't meaningfully
-// "selected" for control purposes.
+// every place that renders a vehicle's status. Selection overrides offline:
+// a vehicle with no data can still be selected, to hold it, and must show
+// that it is.
 export function vehicleStatus(disconnected, selected) {
-    if (disconnected) return 'offline';
     if (selected) return 'selected';
+    if (disconnected) return 'offline';
     return 'online';
 }
 

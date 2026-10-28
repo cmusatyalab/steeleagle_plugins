@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
-import { defaultFeatureName, featuresToGeoJson, featuresToKml, parseImportFile, bboxFromFeature, vehicleColor, vehicleSpeed, isVehicleDisconnected, vehicleStatus, vehicleStatusColor, vehicleStatusRailFill, vehicleStatusMapColor, vehicleStatusTextColor, sortVehiclesForDisplay } from './mapUtils.js';
+import { defaultFeatureName, featuresToGeoJson, featuresToKml, parseImportFile, bboxFromFeature, vehicleColor, vehicleSpeed, isVehicleDisconnected, isVehicleSelectable, vehicleStatus, vehicleStatusColor, vehicleStatusRailFill, vehicleStatusMapColor, vehicleStatusTextColor, sortVehiclesForDisplay } from './mapUtils.js';
 
 const SAMPLE_FC = {
     type: 'FeatureCollection',
@@ -181,10 +181,23 @@ describe('isVehicleDisconnected', () => {
     });
 });
 
+describe('isVehicleSelectable', () => {
+    it('is true for a vehicle its daemon lists, even with no data reaching the GCS', () => {
+        expect(isVehicleSelectable({ reachable: true, last_updated: 1e6 })).toBe(true);
+    });
+
+    it('is false for a vehicle whose daemon is unavailable', () => {
+        expect(isVehicleSelectable({ reachable: false, last_updated: 1e6 })).toBe(false);
+    });
+});
+
 describe('vehicleStatus', () => {
-    it('is "offline" when disconnected, regardless of selection', () => {
+    it('is "offline" when disconnected and not selected', () => {
         expect(vehicleStatus(true, false)).toBe('offline');
-        expect(vehicleStatus(true, true)).toBe('offline');
+    });
+
+    it('is "selected" when selected, even if disconnected, so it can be held', () => {
+        expect(vehicleStatus(true, true)).toBe('selected');
     });
 
     it('is "selected" when connected and selected', () => {

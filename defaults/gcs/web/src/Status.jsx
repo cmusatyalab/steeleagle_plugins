@@ -4,7 +4,7 @@ import { Badge } from 'primereact/badge';
 import { ProgressBar } from 'primereact/progressbar';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faSatellite } from '@fortawesome/free-solid-svg-icons';
-import { vehicleSpeed, isVehicleDisconnected, vehicleStatus, vehicleStatusColor, bearingToCardinal } from './mapUtils.js';
+import { vehicleSpeed, isVehicleDisconnected, isVehicleSelectable, vehicleStatus, vehicleStatusColor, bearingToCardinal } from './mapUtils.js';
 import { displayName } from './vehicleNames.js';
 
 const cardPassthrough = {
@@ -21,7 +21,8 @@ function Status({ vehicle, selectable, selected, onToggle }) {
     const showCheck = !!(selectable && selected);
     const status = vehicleStatus(disconnected, showCheck);
     const statusColor = vehicleStatusColor(status);
-    const clickable = selectable && !disconnected;
+    // A vehicle with no data can still be selected, to hold it
+    const clickable = selectable && isVehicleSelectable(vehicle);
 
     let battery_severity = "info";
 
@@ -43,7 +44,7 @@ function Status({ vehicle, selectable, selected, onToggle }) {
                 position: 'relative',
                 backgroundColor: `color-mix(in srgb, ${statusColor} 12%, var(--surface-0))`,
                 width: '100%',
-                cursor: clickable ? 'pointer' : (disconnected ? 'not-allowed' : 'default'),
+                cursor: clickable ? 'pointer' : (selectable ? 'not-allowed' : 'default'),
                 border: `2px solid ${statusColor}`,
                 opacity: disconnected ? 0.6 : 1,
             }}

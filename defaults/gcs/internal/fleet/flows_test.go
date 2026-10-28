@@ -419,3 +419,38 @@ func TestPushCoalesces(t *testing.T) {
 		t.Errorf("SetDataflow called %d times, want 2", len(d.setCalls))
 	}
 }
+
+// TestObserveRidesOutUnavailableDaemon checks that a vehicle whose daemon is
+// briefly listed as unavailable is not taken as reconnecting when it comes
+// back: it keeps its backoff, and isn't checked while its daemon is away.
+func TestObserveRidesOutUnavailableDaemon(t *testing.T) {
+	d, f, snap := flowsFixture(t)
+	advance := fakeClock(f)
+	away := Snapshot{
+		Engines: map[string]bool{}, Encoders: map[string]string{},
+		Unavailable: []Unavailable{{IP: "100.64.1.5", Hostname: "swap03", Reason: "deadline exceeded"}},
+	}
+	f.Observe(snap)
+	f.Wait()
+	if n := d.setCount(v1); n != 1 {
+		t.Fatalf("pushes = %d on connect, want 1", n)
+	}
+	for range 3 {
+		advance(retryMin)
+		f.Observe(away)
+		f.Wait()
+		f.Observe(snap)
+		f.Wait()
+	}
+	// One check per backoff period: retryMin, then 2*retryMin from there
+	if n := d.setCount(v1); n != 3 {
+		t.Errorf("pushes = %d while the daemon flapped, want 3 (not reset by each return)", n)
+	}
+	// A push while the daemon is away still uses the vehicle as last listed
+	f.Observe(away)
+	f.PushAfterHold([]string{v1})
+	f.Wait()
+	if s := f.Status(v1); s != "ok" {
+		t.Errorf("Status after a hold while away = %q, want ok", s)
+	}
+}

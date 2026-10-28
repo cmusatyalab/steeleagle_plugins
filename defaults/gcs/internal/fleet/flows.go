@@ -3,6 +3,8 @@ package fleet
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -30,7 +32,7 @@ const (
 	// retryMin and retryMax bound the wait between checks of a vehicle whose
 	// data isn't arriving. The wait starts at retryMin and doubles with each
 	// check, until the data arrives.
-	retryMin = 2 * time.Second
+	retryMin = 5 * time.Second
 	retryMax = 30 * time.Second
 )
 
@@ -125,15 +127,22 @@ func (f *Flows) Telemetry(vehicle string) *telemetrypb.Telemetry {
 // a snapshot, or reappears), and after a hold, until its data arrives or a
 // mission starts on it; a vehicle running a mission is never checked. A check
 // pushes the GCS flow unless the vehicle runs another flow, a mission's.
-// Checks of a vehicle back off from retryMin to retryMax.
+// Checks of a vehicle back off from retryMin to retryMax. A daemon listed as
+// unavailable keeps its vehicles and encoder from the last snapshot, so that
+// they aren't taken as reconnecting when it comes back; they aren't checked
+// until it does.
 func (f *Flows) Observe(snap Snapshot) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	snap, away := carryUnavailable(f.snap, snap)
 	f.snap, f.hasSnap = snap, true
 	present := map[string]bool{}
 	now := f.now()
 	for _, v := range snap.Vehicles {
 		present[v.Name] = true
+		if away[v.DaemonIP] {
+			continue
+		}
 		st := f.state(v.Name)
 		if !st.present {
 			st.present = true
@@ -161,6 +170,40 @@ func (f *Flows) Observe(snap Snapshot) {
 			st.present = false
 		}
 	}
+}
+
+// carryUnavailable returns snap with the vehicles and encoders that prev
+// listed on daemons snap lists as unavailable, and the set of those daemons'
+// IPs. It doesn't modify snap.
+func carryUnavailable(prev, snap Snapshot) (Snapshot, map[string]bool) {
+	away := map[string]bool{}
+	for _, u := range snap.Unavailable {
+		away[u.IP] = true
+	}
+	if len(away) == 0 {
+		return snap, away
+	}
+	listed := map[string]bool{}
+	for _, v := range snap.Vehicles {
+		listed[v.Name] = true
+	}
+	out := snap
+	out.Vehicles = slices.Clone(snap.Vehicles)
+	out.Encoders = maps.Clone(snap.Encoders)
+	if out.Encoders == nil {
+		out.Encoders = map[string]string{}
+	}
+	for _, v := range prev.Vehicles {
+		if away[v.DaemonIP] && !listed[v.Name] {
+			out.Vehicles = append(out.Vehicles, v)
+		}
+	}
+	for ip, enc := range prev.Encoders {
+		if _, ok := out.Encoders[ip]; away[ip] && !ok {
+			out.Encoders[ip] = enc
+		}
+	}
+	return out, away
 }
 
 // arm arms the vehicle, to be checked right away.

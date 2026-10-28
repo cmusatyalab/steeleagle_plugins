@@ -36,7 +36,7 @@ by name. A vehicle on a daemon without one (or without a camera) gets a
 telemetry-only flow.
 
 The GCS pushes this flow when a vehicle connects and after each hold, and pushes
-it again, backing off from 2 s to 30 s, until the vehicle's telemetry (and
+it again, backing off from 5 s to 30 s, until the vehicle's telemetry (and
 frames, if the flow carries video) reach the GCS. It stops as soon as they do,
 or as soon as a mission is started on the vehicle, and it never replaces a flow
 with engines other than the GCS and the encoder.

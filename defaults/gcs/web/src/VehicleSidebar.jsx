@@ -7,7 +7,7 @@ import { ButtonGroup } from 'primereact/buttongroup';
 import React from 'react';
 import VehicleGrid from './VehicleGrid.jsx';
 import { toggleVehicleInSquad, recallControlGroup, squadMatchesGroup } from './squadUtils.js';
-import { sortVehiclesForDisplay, vehicleStatus, vehicleStatusColor, vehicleStatusRailFill, isVehicleDisconnected } from './mapUtils.js';
+import { sortVehiclesForDisplay, vehicleStatus, vehicleStatusColor, vehicleStatusRailFill, isVehicleDisconnected, isVehicleSelectable } from './mapUtils.js';
 import { displayName } from './vehicleNames.js';
 
 const controlGroupDigits = ['1', '2', '3'];
@@ -22,12 +22,12 @@ export const VEHICLE_SIDEBAR_EXPANDED_WIDTH = 360;
 function VehicleSidebar({ vehicles, squadList, setSquadList, controlGroups, collapsed, setCollapsed }) {
   const sortedVehicles = useMemo(() => sortVehiclesForDisplay(vehicles, squadList), [vehicles, squadList]);
   const vehicleNames = useMemo(() => vehicles.map(v => v.name), [vehicles]);
-  const connectedVehicleNames = useMemo(
-    () => vehicles.filter(v => !isVehicleDisconnected(v)).map(v => v.name),
+  const selectableVehicleNames = useMemo(
+    () => vehicles.filter(isVehicleSelectable).map(v => v.name),
     [vehicles]
   );
 
-  const onSelectAllSquad = useCallback(() => setSquadList([...connectedVehicleNames]), [connectedVehicleNames, setSquadList]);
+  const onSelectAllSquad = useCallback(() => setSquadList([...selectableVehicleNames]), [selectableVehicleNames, setSquadList]);
   const onClearSquad = useCallback(() => setSquadList([]), [setSquadList]);
   const onRecallGroup = useCallback((digit) => setSquadList(recallControlGroup(controlGroups, digit)), [controlGroups, setSquadList]);
   const onToggleVehicle = useCallback((name) => setSquadList((prev) => toggleVehicleInSquad(prev, name)), [setSquadList]);
@@ -86,16 +86,17 @@ function VehicleSidebar({ vehicles, squadList, setSquadList, controlGroups, coll
             <Button size="small" rounded text label="" icon="pi pi-chevron-right" tooltip="Expand" tooltipOptions={{ position: 'right' }} onClick={() => setCollapsed(false)} aria-label="Expand squad list" />
             {sortedVehicles.map((v) => {
               const disconnected = isVehicleDisconnected(v);
+              const selectable = isVehicleSelectable(v);
               const status = vehicleStatus(disconnected, !!(squadList && squadList.includes(v.name)));
               const shortName = displayName(v.name);
               return (
                 <span
                   key={v.name}
                   title={`${shortName}${shortName !== v.name ? ` [${v.name}]` : ''} (${status})`}
-                  onClick={disconnected ? undefined : () => onToggleVehicle(v.name)}
+                  onClick={selectable ? () => onToggleVehicle(v.name) : undefined}
                   style={{
                     width: '12px', height: '12px', borderRadius: '50%',
-                    cursor: disconnected ? 'not-allowed' : 'pointer',
+                    cursor: selectable ? 'pointer' : 'not-allowed',
                     backgroundColor: vehicleStatusRailFill(status),
                     border: `2px solid ${vehicleStatusColor(status)}`,
                     opacity: disconnected ? 0.6 : 1,

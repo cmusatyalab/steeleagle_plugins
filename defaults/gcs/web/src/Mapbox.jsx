@@ -1,7 +1,7 @@
 import { useRef, useEffect } from 'react'
 import mapboxgl from 'mapbox-gl'
 import 'mapbox-gl/dist/mapbox-gl.css';
-import { vehicleColor, isVehicleDisconnected, vehicleStatus, vehicleStatusMapColor, vehicleStatusTextColor } from './mapUtils.js'
+import { vehicleColor, isVehicleDisconnected, isVehicleSelectable, vehicleStatus, vehicleStatusMapColor, vehicleStatusTextColor } from './mapUtils.js'
 import { vehicleControlGroupDigits } from './squadUtils.js'
 import { STYLE_URLS, applyBasemapConfig, applySatelliteLayerVisibility } from './mapStyles.js'
 import { displayName } from './vehicleNames.js'
@@ -151,10 +151,11 @@ function Mapbox({ selectedVehicle, vehicles, mapPanelSize, tracking, detectedObj
       marker.togglePopup();
       const markerDiv = marker.getElement();
 
-      if (onToggleVehicle && !offline) {
+      // A vehicle with no data can still be selected, to hold it
+      if (onToggleVehicle && isVehicleSelectable(v)) {
         markerDiv.style.cursor = 'pointer';
         markerDiv.addEventListener('click', () => onToggleVehicle(v.name));
-      } else if (offline) {
+      } else if (onToggleVehicle) {
         markerDiv.style.cursor = 'not-allowed';
       }
 
