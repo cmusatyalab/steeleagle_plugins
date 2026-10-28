@@ -4,7 +4,7 @@ import {
     applyFlowEdgeChanges, applyFlowNodeChanges, connectionKind, legendEntries, mergeNodes, nodeBorderColor, paletteTitle, statusText, toReactFlow,
 } from './flowView.js';
 import { addEdge, validateFlow } from './flowModel.js';
-import { TYPES, catalogFixture, flowB } from './flowFixtures.js';
+import { SWAP, TYPES, catalogFixture, flowB } from './flowFixtures.js';
 
 const catalog = catalogFixture();
 const clean = { errors: [], warnings: [] };
@@ -15,10 +15,11 @@ describe('toReactFlow', () => {
         expect(nodes.map((n) => [n.id, n.type, n.data.label, n.selected])).toEqual([
             ['p1', 'producer', 'harpy.telemetry', false],
             ['p2', 'producer', 'harpy.frames', true],
-            ['e1', 'engine', 'yolo @ lab-a (mock)', false],
-            ['e2', 'engine', 'telemetry @ lab-b (mock)', false],
+            ['e1', 'engine', '100.64.0.2.yolo', false],
+            ['e2', 'engine', '100.64.0.1.telemetry', false],
         ]);
         expect(nodes[2].data.resolution.location).toBe('local');
+        expect(nodes.map((n) => n.data.daemonName)).toEqual([null, null, 'swap', 'gcs']);
         // each producer may switch only to itself or an unplaced stream
         expect(nodes[1].data.streamChoices.map((c) => c.name)).toEqual(['frames', 'thermal', 'downward']);
         expect(nodes[1].data.streamChoices[0]).toEqual({ name: 'frames', primary: true, disabled: false, reason: null });
@@ -148,7 +149,7 @@ describe('display helpers', () => {
     });
 
     it('builds palette tooltips', () => {
-        const yolo = catalog[0].engines.find((e) => e.name === 'yolo');
+        const yolo = catalog.daemons[1].engines.find((e) => e.name === `${SWAP.ip}.yolo`);
         expect(paletteTitle(yolo)).toBe('accepts RawFrame · events: result, dropped');
         const untyped = { name: 'x', accepts: ['*'], events: [{ label: 'result', type: null }], typed: false, problem: 'no plugin file' };
         expect(paletteTitle(untyped)).toBe('accepts * · events: result · no plugin file');
@@ -170,7 +171,7 @@ describe('legendEntries', () => {
     it('is empty without a vehicle, a catalog, or any primary camera', () => {
         expect(legendEntries({ ...flowB(), vehicle: null }, catalog)).toEqual([]);
         expect(legendEntries(flowB(), null)).toEqual([]);
-        const noPrimary = catalog.map((d) => ({ ...d, vehicles: d.vehicles.map((v) => ({ ...v, streams: v.streams.map((st) => ({ ...st, primary: false })) })) }));
+        const noPrimary = { ...catalog, daemons: catalog.daemons.map((d) => ({ ...d, vehicles: d.vehicles.map((v) => ({ ...v, streams: v.streams.map((st) => ({ ...st, primary: false })) })) })) };
         expect(legendEntries(flowB(), noPrimary)).toEqual([]);
     });
 });

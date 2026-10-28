@@ -223,12 +223,12 @@ func TestSetDataflowQualifies(t *testing.T) {
 	if !slices.Equal(prods, []string{alphaName + ".telemetry", alphaName + ".front"}) {
 		t.Errorf("producers = %v", prods)
 	}
-	var froms []string
+	var forms []string
 	for _, e := range f.Edges {
-		froms = append(froms, e.From)
+		forms = append(forms, e.From)
 	}
-	if !slices.Contains(froms, alphaName+".front") || !slices.Contains(froms, alphaName+".telemetry") {
-		t.Errorf("edges not renamed: %v", froms)
+	if !slices.Contains(forms, alphaName+".front") || !slices.Contains(forms, alphaName+".telemetry") {
+		t.Errorf("edges not renamed: %v", forms)
 	}
 	for _, e := range f.Engines {
 		if e.Location != config.LocationLocal {
@@ -474,5 +474,55 @@ func TestListServicesRemotesArchAndGCSExcluded(t *testing.T) {
 	want := map[string]string{"100.64.0.2": "amd64", "100.64.0.3": "arm64"}
 	if len(got) != len(want) || got["100.64.0.2"] != "amd64" || got["100.64.0.3"] != "arm64" {
 		t.Errorf("remotes = %v, want %v (the GCS's own daemon is never listed)", got, want)
+	}
+}
+
+func TestListServicesEnginesHaveConfigs(t *testing.T) {
+	o, err := parseFlags([]string{"-vehicles", alphaName + "," + charlieName, "-no-yolo-daemons", "100.64.0.3", "-gcs-ip", "100.64.0.9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := NewDaemon(o.topology(), nil, &recordingFlows{}, zerolog.Nop())
+	resp, err := d.ListServices(context.Background(), &daemonpb.ListServicesRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engines := map[string]*config.EngineCap{}
+	for _, s := range resp.GetServices() {
+		if s.GetCategory() != daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE {
+			continue
+		}
+		pc, err := config.ParsePluginConfigFromBytes(s.GetConfig())
+		if err != nil {
+			t.Errorf("engine %s: %v", s.GetName(), err)
+			continue
+		}
+		if pc.Engine == nil {
+			t.Errorf("engine %s has no engine table", s.GetName())
+			continue
+		}
+		engines[s.GetName()] = pc.Engine
+	}
+	const (
+		raw     = "steeleagle_protocol/v1/messages/frame/RawFrame"
+		encoded = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
+		tele    = "steeleagle_protocol/v1/messages/telemetry/Telemetry"
+	)
+	for _, ip := range []string{"100.64.0.1", "100.64.0.3"} {
+		e := engines[ip+".h264_encoder"]
+		// A filter, as the real H.264 encoder's plugin file declares it
+		if e == nil || e.Type != "filter" || !slices.Equal(e.Inputs, []string{raw}) || e.Result != "" {
+			t.Errorf("%s encoder = %+v", ip, e)
+		}
+	}
+	if e := engines["100.64.0.9.gcs"]; e == nil || !slices.Equal(e.Inputs, []string{encoded, tele}) || e.Result != "" {
+		t.Errorf("gcs = %+v", e)
+	}
+	if e := engines["100.64.0.1.yolo"]; e == nil || e.Type != "detection" || !slices.Equal(e.Inputs, []string{raw}) ||
+		e.Result != "steeleagle_protocol/v1/messages/result/DetectionResult" {
+		t.Errorf("yolo = %+v", e)
+	}
+	if engines["100.64.0.3.yolo"] != nil {
+		t.Error("-no-yolo-daemons left yolo on 100.64.0.3")
 	}
 }

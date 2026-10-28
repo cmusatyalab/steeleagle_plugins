@@ -3,7 +3,7 @@
 // React Flow state is re-derived from it, carrying over only what React
 // Flow measures itself (node sizes, drag state). Kept free of React and
 // @xyflow imports so it runs under vitest's node environment.
-import { findVehicle, resolveNode, shortType } from './flowCatalog.js';
+import { daemonLabel, findVehicle, resolveHost, resolveNode, shortType, splitTemplateName } from './flowCatalog.js';
 import { forwardedTypes, nodeLabel, removeEdge, removeNode, streamChoices, updateNode } from './flowModel.js';
 
 export const ERROR_COLOR = '#ff4444';
@@ -18,7 +18,7 @@ export const CALLBACK_SPACING = 16;
 export const SELECTED_COLOR = '#7ecfff';
 
 // dataTransfer type for palette items dragged onto the canvas; the payload
-// is JSON: {kind: 'vehicle'} or {kind: 'engine', daemon: {name, address}, engine}.
+// is JSON: {kind: 'vehicle'} or {kind: 'engine', engine: <full service name>}.
 export const FLOW_DRAG_TYPE = 'application/steeleagle-flow';
 
 function messagesBy(issues, key) {
@@ -36,6 +36,14 @@ function producerChoices(flow, catalog, node) {
     return catalog
         ? streamChoices(flow, catalog, node.id)
         : [{ name: node.stream, primary: false, disabled: false, reason: null }];
+}
+
+// The daemon an engine node runs on, by hostname when the catalog has it;
+// the host as written when it doesn't resolve.
+function engineDaemonName(catalog, node) {
+    const host = splitTemplateName(node.engine)?.host ?? '';
+    const daemon = catalog ? resolveHost(catalog, host).daemon : null;
+    return daemon ? daemonLabel(daemon) : host;
 }
 
 export function toReactFlow(flow, catalog, validation, selection, handlers = {}) {
@@ -56,6 +64,7 @@ export function toReactFlow(flow, catalog, validation, selection, handlers = {})
                 label: nodeLabel(flow, node),
                 resolution: catalog ? resolveNode(flow, catalog, node) : null,
                 forwarded: !isProducer && catalog ? forwardedTypes(flow, catalog, node.id) : null,
+                daemonName: isProducer ? null : engineDaemonName(catalog, node),
                 errors: nodeErrors.get(node.id) ?? [],
                 warnings: nodeWarnings.get(node.id) ?? [],
                 streamChoices: isProducer ? producerChoices(flow, catalog, node) : [],

@@ -27,6 +27,31 @@ import { canvasThemeVars } from './canvasTheme.js';
 import { getApiUrl } from './urls.js';
 import { runValidation } from './validation.js';
 import { missionRequestBody, renderDsl } from './missionGraph.js';
+import { OLD_VERSION_MESSAGE, emptyFlow, parseFlowJson, serializeFlow, toTemplate, validateFlow } from './flowModel.js';
+import { engineChoices } from './flowEngines.js';
+
+const FLOW_DRAFT_KEY = 'steeleagle-flow-draft';
+
+// The Flow Builder draft survives tab switches and reloads; it's a
+// convenience, not storage -- the exported file is the saved flow. Returns
+// {flow, notice}: notice is set when the draft was saved by an older Flow
+// Builder, so the page can say why the builder started empty.
+function loadFlowDraft() {
+    try {
+        const raw = localStorage.getItem(FLOW_DRAFT_KEY);
+        return { flow: raw ? parseFlowJson(raw) : emptyFlow(), notice: null };
+    } catch (e) {
+        return { flow: emptyFlow(), notice: e.message === OLD_VERSION_MESSAGE ? OLD_VERSION_MESSAGE : null };
+    }
+}
+
+function saveFlowDraft(flow) {
+    try {
+        localStorage.setItem(FLOW_DRAFT_KEY, serializeFlow(flow));
+    } catch {
+        // storage full or blocked; the flow still lives in page state
+    }
+}
 
 const nodeTypes = { taskNode: TaskNode };
 const edgeTypes = { selfLoop: SelfLoopEdge };
@@ -111,7 +136,7 @@ function getNamedAreas(featuresStr) {
 
 function FsmCanvas({ nodes, edges, setNodes, setEdges, eventInstances, setEventInstances,
                      startNodeId, setStartNodeId, schema, features, setPanelNode,
-                     setPanelEdgeId, pushSnapshot, theme, active = true }) {
+                     setPanelEdgeId, pushSnapshot, theme, engines, active = true }) {
     const { screenToFlowPosition } = useReactFlow();
     const [connectModal, setConnectModal] = useState({ visible: false, connection: null });
     const [contextMenu, setContextMenu] = useState(null);
@@ -267,6 +292,7 @@ function FsmCanvas({ nodes, edges, setNodes, setEdges, eventInstances, setEventI
                 connection={connectModal.connection}
                 eventInstances={eventInstances}
                 schema={schema}
+                engines={engines}
                 onConfirm={confirmConnect}
                 onAddEvent={(ev) => setEventInstances(evs => [...evs, ev])}
             />
@@ -276,6 +302,13 @@ function FsmCanvas({ nodes, edges, setNodes, setEdges, eventInstances, setEventI
 
 function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState, visible = true }) {
     const [activeIndex, setActiveIndex] = useState(0);
+    const draftNotice = useRef(null);
+    const [flow, setFlow] = useState(() => {
+        const draft = loadFlowDraft();
+        draftNotice.current = draft.notice;
+        return draft.flow;
+    });
+    const [catalog, setCatalog] = useState(null);
     const [nodes, setNodes] = useState([]);
     const [edges, setEdges] = useState([]);
     const [eventInstances, setEventInstances] = useState([]);
@@ -416,6 +449,40 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
         return () => window.removeEventListener('keydown', onKeyDown);
     }, []);
 
+    useEffect(() => saveFlowDraft(flow), [flow]);
+
+    // An old-format draft is dropped at load; say so once after mount.
+    useEffect(() => {
+        if (draftNotice.current) {
+            toast.current?.show({ severity: 'warn', summary: 'Flow draft not loaded', detail: draftNotice.current });
+            draftNotice.current = null;
+        }
+    }, []);
+
+    // Engine fields offer the flow's engines of the field's engine type.
+    const engines = useCallback((engineType) => engineChoices(flow, catalog, engineType), [flow, catalog]);
+
+    // The flow to ship with Validate and Deploy: {flow: template} when the
+    // flow has nodes and is valid, {} when it has none, and null (after a
+    // toast) when it's broken -- a broken flow is never sent.
+    function flowRequestPart() {
+        if (flow.nodes.length === 0) return {};
+        if (!catalog || (catalog.daemons.length === 0 && catalog.error)) {
+            toast.current.show({
+                severity: 'warn', summary: 'Flow catalog unavailable',
+                detail: `The flow catalog isn't loaded (${catalog?.error ?? 'not fetched yet'}); open the Flow Builder tab to retry`,
+            });
+            return null;
+        }
+        try {
+            if (validateFlow(flow, catalog).errors.length > 0) throw new Error('invalid flow');
+            return { flow: toTemplate(flow, catalog) };
+        } catch {
+            toast.current.show({ severity: 'warn', summary: 'Flow has errors', detail: 'Fix the flow on the Flow Builder tab first' });
+            return null;
+        }
+    }
+
     const startNode = nodes.find(n => n.id === startNodeId);
 
     function buildMissionRequestBody() {
@@ -435,9 +502,11 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
             toast.current.show({ severity: 'warn', summary: 'No start state', detail: 'Right-click a node and set it as the start state.' });
             return;
         }
+        const flowPart = flowRequestPart();
+        if (!flowPart) return;
         setCompiling(true);
         try {
-            const body = { ...buildMissionRequestBody(), geojson: features };
+            const body = { ...buildMissionRequestBody(), ...flowPart, geojson: features };
             const resp = await fetch(getApiUrl('/api/compile'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -506,13 +575,15 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
 
     async function handleDeploy() {
         const targets = [...deployTargets];
+        const flowPart = flowRequestPart();
+        if (!flowPart) return;
         setDeployDialogVisible(false);
         if (deploying) {
             toast.current.show({ severity: 'warn', summary: 'Upload already in progress', detail: 'Wait for the current mission upload to finish before starting another.' });
             return;
         }
         setUploadState(initialUploadState(targets));
-        const body = { ...buildMissionRequestBody(), geojson: features, vehicles: targets, name: deployName };
+        const body = { ...buildMissionRequestBody(), ...flowPart, geojson: features, vehicles: targets, name: deployName };
         try {
             await streamUpload(getApiUrl('/api/deploy'), {
                 method: 'POST',
@@ -729,6 +800,9 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
                     options={vehicles.map(v => v.name)}
                     onChange={e => setDeployTargets(e.value)}
                     placeholder="Select vehicles" />
+                <p id="deploy-flow" className="mt-3 mb-0">
+                    {flow.nodes.length > 0 ? `Flow: ${flow.name} (${flow.nodes.filter(n => n.kind === 'engine').length} engines)` : 'No flow'}
+                </p>
             </Dialog>
             <TabView renderActiveOnly={false} activeIndex={activeIndex} onTabChange={(e) => setActiveIndex(e.index)}>
                 <TabPanel header="Mission Builder" leftIcon="pi pi-share-alt mr-2" headerClassName="mr-2">
@@ -833,6 +907,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
                                     pushSnapshot={pushSnapshot}
                                     toast={toast}
                                     theme={theme}
+                                    engines={engines}
                                 />
                             </ReactFlowProvider>
                         </div>
@@ -857,6 +932,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
                         node={panelNode}
                         schema={panelNode ? schema.actions[panelNode.data.type_name] : null}
                         namedAreas={getNamedAreas(features)}
+                        engines={engines}
                         enums={schema.enums}
                         onUpdate={updateNodeParams}
                         onUpdateId={updateNodeId}
@@ -869,6 +945,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
                         edge={panelEdge}
                         eventInstance={panelEventInstance}
                         eventSchema={panelEventInstance ? schema.events[panelEventInstance.type_name] : null}
+                        engines={engines}
                         enums={schema.enums}
                         sourceLabel={panelEdgeSourceLabel}
                         targetLabel={panelEdgeTargetLabel}
@@ -878,7 +955,8 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
                 </TabPanel>
 
                 <TabPanel header="Flow Builder" leftIcon="pi pi-sitemap mr-2" headerClassName="mr-2">
-                    <FlowBuilder theme={theme} toast={toast} active={visible && activeIndex === 1} />
+                    <FlowBuilder theme={theme} toast={toast} active={visible && activeIndex === 1}
+                        flow={flow} setFlow={setFlow} catalog={catalog} setCatalog={setCatalog} />
                 </TabPanel>
                 <TabPanel header="Map" leftIcon="pi pi-map mr-2" headerClassName="mr-2">
                     <div style={{ height: 'calc(100vh - 180px)' }}>

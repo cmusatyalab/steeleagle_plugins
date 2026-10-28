@@ -11,11 +11,13 @@ import (
 	"sync"
 
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
 	"github.com/rs/zerolog"
 )
 
-// Lister lists the running vehicles.
-type Lister func(ctx context.Context) ([]fleet.Vehicle, error)
+// Lister lists the running vehicles and the flow catalog, from one listing
+// of the daemon's services.
+type Lister func(ctx context.Context) ([]fleet.Vehicle, flows.Catalog, error)
 
 // VehicleSender uploads a mission to one vehicle and loads it; *Sender is
 // one. An error's text is the vehicle's result.
@@ -32,8 +34,8 @@ type Uploads struct {
 	maxSize int
 }
 
-// NewUploads returns Uploads that resolve vehicles with list, send missions
-// with send, and compile deployed graphs with svc.
+// NewUploads returns Uploads that resolve vehicles and flows with list, send
+// missions with send, and compile deployed graphs with svc.
 func NewUploads(list Lister, send VehicleSender, svc *Service, log zerolog.Logger) *Uploads {
 	return &Uploads{list: list, send: send, svc: svc, log: log, maxSize: MaxMissionSize}
 }
@@ -86,18 +88,19 @@ func dedupe(in []string) []string {
 	return out
 }
 
-// listVehicles lists the fleet by name, or writes a 503 and returns nil.
-func (u *Uploads) listVehicles(w http.ResponseWriter, r *http.Request) map[string]fleet.Vehicle {
-	vs, err := u.list(r.Context())
+// listVehicles lists the fleet by name and the flow catalog, or writes a
+// 503 and returns nil.
+func (u *Uploads) listVehicles(w http.ResponseWriter, r *http.Request) (map[string]fleet.Vehicle, flows.Catalog) {
+	vs, cat, err := u.list(r.Context())
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "Cannot list vehicles: "+err.Error())
-		return nil
+		return nil, flows.Catalog{}
 	}
 	by := make(map[string]fleet.Vehicle, len(vs))
 	for _, v := range vs {
 		by[v.Name] = v
 	}
-	return by
+	return by, cat
 }
 
 // resolve finds a vehicle that can be sent a mission, or says why not.
@@ -195,7 +198,7 @@ func (u *Uploads) ServeUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		variants[arch] = data
 	}
-	by := u.listVehicles(w, r)
+	by, _ := u.listVehicles(w, r)
 	if by == nil {
 		return
 	}
@@ -221,13 +224,35 @@ func (u *Uploads) ServeUpload(w http.ResponseWriter, r *http.Request) {
 // deployRequest is a mission graph with the vehicles to deploy it to.
 type deployRequest struct {
 	Graph
-	Vehicles []string `json:"vehicles"`
-	Name     string   `json:"name"`
+	Vehicles []string        `json:"vehicles"`
+	Name     string          `json:"name"`
+	Flow     *flows.Template `json:"flow"`
+}
+
+// buildFailed ends a Deploy stream with the errors that failed its build.
+func buildFailed(st *stream, errs []GraphError) {
+	msgs := make([]string, len(errs))
+	for i, e := range errs {
+		msgs[i] = e.Message
+	}
+	st.emit(map[string]any{"type": "error", "detail": "Build failed: " + strings.Join(msgs, "; "), "errors": errs})
+}
+
+// cameraNames returns the names of the vehicle's cameras, empty (not nil)
+// if it has none.
+func cameraNames(v fleet.Vehicle) []string {
+	names := []string{}
+	if v.Driver != nil {
+		for _, c := range v.Driver.Cameras {
+			names = append(names, c.Name)
+		}
+	}
+	return names
 }
 
 // ServeDeploy serves POST /api/deploy: it builds the graph for the
-// architecture and driver config of each vehicle, then uploads. If any build
-// fails nothing is uploaded.
+// architecture and driver config of each vehicle, with the request's flow
+// resolved for it, then uploads. If any build fails nothing is uploaded.
 func (u *Uploads) ServeDeploy(w http.ResponseWriter, r *http.Request) {
 	var req deployRequest
 	if !decodeBody(w, r, &req) {
@@ -242,14 +267,16 @@ func (u *Uploads) ServeDeploy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := u.svc.Ready(r.Context()); err != nil {
+	ready, err := u.svc.Ready(r.Context())
+	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	by := u.listVehicles(w, r)
+	by, cat := u.listVehicles(w, r)
 	if by == nil {
 		return
 	}
+	hasFlow := !req.Flow.Empty()
 
 	st := newStream(w)
 	// Step 1: structural and GeoJSON checks, once, before any vehicle is
@@ -261,13 +288,31 @@ func (u *Uploads) ServeDeploy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(errs) > 0 {
-		msgs := make([]string, len(errs))
-		for i, e := range errs {
-			msgs[i] = e.Message
-		}
-		st.emit(map[string]any{"type": "error", "detail": "Build failed: " + strings.Join(msgs, "; "), "errors": errs})
+		buildFailed(st, errs)
 		return
 	}
+	// Step 2: the checks of the flow and of the engines the mission uses
+	// that hold for every vehicle. Every vehicle's flow has the same engines
+	// under the same full names, wherever they run, so the mission is
+	// translated with those once here; without a flow it may use no engine.
+	engineNames := map[string]string{}
+	if hasFlow {
+		if err := req.Flow.Check(cat, u.svc.gcsIP); err != nil {
+			buildFailed(st, []GraphError{{Message: err.Error()}})
+			return
+		}
+		var err error
+		if engineNames, err = req.Flow.EngineNames(cat); err != nil {
+			buildFailed(st, []GraphError{{Message: err.Error()}})
+			return
+		}
+	}
+	if _, err := GraphToAst(req.Graph, ready.Index, u.svc.header, engineNames); err != nil {
+		buildFailed(st, []GraphError{{Message: err.Error()}})
+		return
+	}
+	// Step 3: resolve each vehicle, and group those that build the same.
+	roles := GraphRoles(req.Graph)
 	type group struct {
 		target   BuildTarget
 		vehicles []string
@@ -279,14 +324,23 @@ func (u *Uploads) ServeDeploy(w http.ResponseWriter, r *http.Request) {
 		if err == nil && v.DriverErr != nil {
 			err = fmt.Errorf("driver config: %w", v.DriverErr)
 		}
+		var res flows.Resolved
+		if err == nil && hasFlow {
+			res, err = req.Flow.Resolve(cat, u.svc.gcsIP, v, cameraNames(v), req.Name, roles)
+		}
 		if err != nil {
 			st.result(n, err, "")
 			continue
 		}
 		key := fmt.Sprintf("%s/%x", v.Arch, sha256.Sum256(v.Config))
+		target := BuildTarget{Arch: v.Arch, Plugin: v.Config, Engines: map[string]string{}}
+		if hasFlow {
+			key += fmt.Sprintf("/%x", sha256.Sum256(res.Flow))
+			target.Flow, target.Manifest, target.Engines = res.Flow, res.Manifest, res.Engines
+		}
 		g := index[key]
 		if g == nil {
-			g = &group{target: BuildTarget{Arch: v.Arch, Plugin: v.Config}}
+			g = &group{target: target}
 			index[key] = g
 			groups = append(groups, g)
 		}
@@ -304,11 +358,7 @@ func (u *Uploads) ServeDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	bins, errs, err := u.svc.CompileGraph(r.Context(), req.Graph, targets)
 	if len(errs) > 0 {
-		msgs := make([]string, len(errs))
-		for i, e := range errs {
-			msgs[i] = e.Message
-		}
-		st.emit(map[string]any{"type": "error", "detail": "Build failed: " + strings.Join(msgs, "; "), "errors": errs})
+		buildFailed(st, errs)
 		return
 	}
 	if err != nil {

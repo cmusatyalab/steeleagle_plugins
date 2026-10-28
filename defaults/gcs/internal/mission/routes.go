@@ -9,11 +9,22 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
 	"github.com/rs/zerolog"
 )
 
 // maxBodySize bounds the JSON bodies the compiler routes accept.
 const maxBodySize = 32 << 20
+
+// noDaemon is the detail of a 503 for a route that needs the daemon.
+const noDaemon = "the GCS has no connection to the daemon"
+
+// validateMissionName is the manifest's mission name in a Validate build.
+const validateMissionName = "validate"
+
+// CatalogFunc lists the flow catalog from the daemon.
+type CatalogFunc func(ctx context.Context) (flows.Catalog, error)
 
 // State is the loaded compiler state: the type index and the /api/schema body.
 type State struct {
@@ -27,6 +38,10 @@ type Service struct {
 	cfg    CompilerConfig
 	log    zerolog.Logger
 	header map[string]any
+	// gcsIP is the IP of the GCS's own daemon, the orchestrator.
+	gcsIP string
+	// catalog lists the flow catalog; nil without a daemon.
+	catalog CatalogFunc
 
 	ready chan struct{} // closed when the first load has finished
 
@@ -41,13 +56,22 @@ type BuildTarget struct {
 	Key    string
 	Arch   string
 	Plugin []byte
+	// Flow and Manifest are the resolved flow and manifest TOML, nil
+	// without a flow.
+	Flow     []byte
+	Manifest []byte
+	// Engines maps the engine names the mission uses to their full names
+	// (see GraphToAst): nil uses them as written, and an empty map allows
+	// none.
+	Engines map[string]string
 }
 
 // NewService returns a Service compiling with c. cfg should be resolved
-// (ResolveConfig). The type registry is loaded in the background; routes
-// wait for it.
-func NewService(c Compiler, cfg CompilerConfig, log zerolog.Logger) *Service {
-	s := &Service{c: c, cfg: cfg, log: log, header: cfg.Header(), ready: make(chan struct{})}
+// (ResolveConfig). gcsIP is the IP of the GCS's own daemon, which
+// orchestrates flows, and catalog lists the flow catalog (nil without a
+// daemon). The type registry is loaded in the background; routes wait for it.
+func NewService(c Compiler, cfg CompilerConfig, gcsIP string, catalog CatalogFunc, log zerolog.Logger) *Service {
+	s := &Service{c: c, cfg: cfg, log: log, header: cfg.Header(), gcsIP: gcsIP, catalog: catalog, ready: make(chan struct{})}
 	go func() {
 		defer close(s.ready)
 		st, err := s.load(context.Background())
@@ -99,7 +123,8 @@ func (s *Service) Ready(ctx context.Context) (*State, error) {
 // are ignored.
 type graphRequest struct {
 	Graph
-	Arch string `json:"arch"`
+	Arch string          `json:"arch"`
+	Flow *flows.Template `json:"flow"`
 }
 
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -151,7 +176,25 @@ func (s *Service) ServeCompile(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &g) {
 		return
 	}
-	_, errs, err := s.CompileGraph(r.Context(), g.Graph, []BuildTarget{{Key: "amd64", Arch: "amd64"}})
+	target := BuildTarget{Key: "amd64", Arch: "amd64", Engines: map[string]string{}}
+	if !g.Flow.Empty() {
+		if s.catalog == nil {
+			writeError(w, http.StatusServiceUnavailable, noDaemon)
+			return
+		}
+		cat, err := s.catalog(r.Context())
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "Cannot list the flow catalog: "+err.Error())
+			return
+		}
+		res, err := s.resolveForValidate(cat, *g.Flow, g.Graph)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"errors": []GraphError{{Message: err.Error()}}})
+			return
+		}
+		target.Flow, target.Manifest, target.Engines = res.Flow, res.Manifest, res.Engines
+	}
+	_, errs, err := s.CompileGraph(r.Context(), g.Graph, []BuildTarget{target})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -161,6 +204,30 @@ func (s *Service) ServeCompile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// resolveForValidate checks the flow and resolves it for the vehicle it was
+// designed for, or, when that is unset or unknown, for a vehicle on the
+// orchestrator whose cameras aren't checked.
+func (s *Service) resolveForValidate(cat flows.Catalog, t flows.Template, g Graph) (flows.Resolved, error) {
+	if err := t.Check(cat, s.gcsIP); err != nil {
+		return flows.Resolved{}, err
+	}
+	target := fleet.Vehicle{DaemonIP: s.gcsIP}
+	var cameras []string
+	if v, ok := cat.VehicleByName(t.Vehicle); ok && t.Vehicle != "" {
+		target.Name = v.Name
+		target.DaemonIP, _ = fleet.SplitName(v.Name)
+		if v.Typed {
+			cameras = []string{}
+			for _, st := range v.Streams {
+				if st.Kind == "camera" {
+					cameras = append(cameras, st.Name)
+				}
+			}
+		}
+	}
+	return t.Resolve(cat, s.gcsIP, target, cameras, validateMissionName, GraphRoles(g))
 }
 
 // ServeRenderDSL serves POST /api/render_dsl.
@@ -173,7 +240,7 @@ func (s *Service) ServeRenderDSL(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &g) {
 		return
 	}
-	ast, err := GraphToAst(g.Graph, st.Index, s.header)
+	ast, err := GraphToAst(g.Graph, st.Index, s.header, nil)
 	if err == nil {
 		var dsl string
 		if dsl, err = AstToDSL(ast); err == nil {
@@ -282,9 +349,19 @@ func (s *Service) CompileGraph(ctx context.Context, g Graph, targets []BuildTarg
 	if len(errs) > 0 {
 		return nil, errs, nil
 	}
-	ast, err := GraphToAst(g, st.Index, s.header)
-	if err != nil {
-		return nil, []GraphError{{Message: err.Error()}}, nil
+	// One AST per distinct engine map; targets with the same map share it.
+	asts := make([]map[string]any, len(targets))
+	byEngines := map[string]map[string]any{}
+	for i, t := range targets {
+		k := enginesKey(t.Engines)
+		ast, ok := byEngines[k]
+		if !ok {
+			if ast, err = GraphToAst(g, st.Index, s.header, t.Engines); err != nil {
+				return nil, []GraphError{{Message: err.Error()}}, nil
+			}
+			byEngines[k] = ast
+		}
+		asts[i] = ast
 	}
 
 	bins := make([][]byte, len(targets))
@@ -294,7 +371,9 @@ func (s *Service) CompileGraph(ctx context.Context, g Graph, targets []BuildTarg
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			bins[i], failures[i] = s.c.Build(ctx, BuildRequest{Ast: ast, GeoJSON: geojson, Plugin: t.Plugin, Arch: t.Arch})
+			bins[i], failures[i] = s.c.Build(ctx, BuildRequest{
+				Ast: asts[i], GeoJSON: geojson, Plugin: t.Plugin, Arch: t.Arch, Flow: t.Flow, Manifest: t.Manifest,
+			})
 		}()
 	}
 	wg.Wait()
@@ -318,6 +397,12 @@ func (s *Service) CompileGraph(ctx context.Context, g Graph, targets []BuildTarg
 		out[t.Key] = bins[i]
 	}
 	return out, nil, nil
+}
+
+// enginesKey identifies an engine map; nil and empty maps differ.
+func enginesKey(m map[string]string) string {
+	b, _ := json.Marshal(m) // sorted keys; nil is "null"
+	return string(b)
 }
 
 func errKey(e GraphError) string {

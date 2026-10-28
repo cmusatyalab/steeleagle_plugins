@@ -4,7 +4,7 @@
 
 const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 
-function isIPv6(s) {
+export function isIPv6(s) {
     if (!s.includes(':') || !/^[0-9a-fA-F:.]+$/.test(s)) return false;
     let head = s;
     let groups = 8;
@@ -23,7 +23,7 @@ function isIPv6(s) {
     return halves.length === 2 ? parts.length < groups : parts.length === groups;
 }
 
-function isIP(s) {
+export function isIP(s) {
     return IPV4.test(s) || isIPv6(s);
 }
 

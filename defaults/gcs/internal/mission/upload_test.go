@@ -14,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cmusatyalab/steeleagle/config"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
 	"github.com/rs/zerolog"
 )
 
@@ -72,7 +74,12 @@ func vehicle(name, arch string) fleet.Vehicle {
 }
 
 func lister(vs ...fleet.Vehicle) Lister {
-	return func(context.Context) ([]fleet.Vehicle, error) { return vs, nil }
+	return catalogLister(flows.Catalog{}, vs...)
+}
+
+// catalogLister lists vs, and cat as the flow catalog.
+func catalogLister(cat flows.Catalog, vs ...fleet.Vehicle) Lister {
+	return func(context.Context) ([]fleet.Vehicle, flows.Catalog, error) { return vs, cat, nil }
 }
 
 type uploadFile struct {
@@ -109,6 +116,13 @@ func newUploads(t testing.TB, l Lister, s VehicleSender, f *fakeCompiler) *Uploa
 		f = newFake(t)
 	}
 	return NewUploads(l, s, newService(t, f), zerolog.Nop())
+}
+
+// newFlowUploads is newUploads whose Service lists the catalog l lists.
+func newFlowUploads(t testing.TB, l Lister, s VehicleSender, f *fakeCompiler) *Uploads {
+	t.Helper()
+	_, cat, _ := l(context.Background())
+	return NewUploads(l, s, newFlowService(t, f, cat), zerolog.Nop())
 }
 
 func events(t testing.TB, rec *httptest.ResponseRecorder) []map[string]any {
@@ -292,7 +306,9 @@ func TestUploadRepeatedVehicleFields(t *testing.T) {
 }
 
 func TestUploadListFailureIs503(t *testing.T) {
-	l := func(context.Context) ([]fleet.Vehicle, error) { return nil, errors.New("daemon down") }
+	l := func(context.Context) ([]fleet.Vehicle, flows.Catalog, error) {
+		return nil, flows.Catalog{}, errors.New("daemon down")
+	}
 	u := newUploads(t, l, &fakeSender{}, nil)
 	rec := httptest.NewRecorder()
 	u.ServeUpload(rec, multipartReq(t, []uploadFile{{"x", amdBin}}, []string{"v"}, "m"))
@@ -591,5 +607,294 @@ func TestDeployCompilerFailureIsTerminalError(t *testing.T) {
 	}
 	if len(s.called()) != 0 {
 		t.Fatal("sender was called")
+	}
+}
+
+// --- deploy with flows ---
+
+// engineFake is a fake compiler whose registry also has actions.Track, with
+// a DetectionEngine field.
+func engineFake(t testing.TB) *fakeCompiler {
+	t.Helper()
+	f := newFake(t)
+	f.registry["actions"].(map[string]any)["actions.Track"] = map[string]any{
+		"type":   "actions.Track",
+		"fields": []any{map[string]any{"name": "Engine", "type": "params.DetectionEngine"}},
+	}
+	return f
+}
+
+// flowCatalog lists alpha and bravo on 100.64.0.1 and charlie on
+// 100.64.0.2 (host swap03), each with telemetry only; the daemons with yoloIPs run yolo.
+func flowCatalog(yoloIPs ...string) flows.Catalog {
+	telemetry := []flows.Stream{{Name: "telemetry", Kind: "telemetry"}}
+	cat := flows.Catalog{Daemons: []flows.Daemon{
+		{IP: "100.64.0.1", Local: true, Vehicles: []flows.Vehicle{
+			{Name: "100.64.0.1.alpha", Streams: telemetry, Typed: true},
+			{Name: "100.64.0.1.bravo", Streams: telemetry, Typed: true},
+		}},
+		{IP: "100.64.0.2", Hostname: "swap03", Vehicles: []flows.Vehicle{{Name: "100.64.0.2.charlie", Streams: telemetry, Typed: true}}},
+	}}
+	for _, ip := range yoloIPs {
+		for i := range cat.Daemons {
+			if cat.Daemons[i].IP == ip {
+				cat.Daemons[i].Engines = append(cat.Daemons[i].Engines, flows.Engine{
+					Name: ip + ".yolo", Bare: "yolo", Result: "messages/result/DetectionResult", Typed: true,
+				})
+			}
+		}
+	}
+	return cat
+}
+
+// localYolo is a flow designed for alpha: its telemetry into the yolo on the
+// orchestrator's daemon, 100.64.0.1.
+func localYolo() *flows.Template {
+	return &flows.Template{
+		Vehicle:   "100.64.0.1.alpha",
+		Producers: []flows.TemplateProducer{{Name: "100.64.0.1.telemetry"}},
+		Engines:   []flows.TemplateEngine{{Name: "100.64.0.1.yolo"}},
+		Edges:     []flows.TemplateEdge{{From: "100.64.0.1.telemetry", To: "100.64.0.1.yolo", Timeout: "1s"}},
+	}
+}
+
+// remoteDet is a flow with an engine the catalog doesn't have.
+func remoteDet() *flows.Template {
+	return &flows.Template{
+		Vehicle:   "100.64.0.1.alpha",
+		Producers: []flows.TemplateProducer{{Name: "100.64.0.1.telemetry"}},
+		Engines:   []flows.TemplateEngine{{Name: "100.64.0.1.det"}},
+		Edges:     []flows.TemplateEdge{{From: "100.64.0.1.telemetry", To: "100.64.0.1.det", Timeout: "1s"}},
+	}
+}
+
+// trackBody is a one-node mission, a Track with the engine, with tpl as its
+// flow (none if nil); mutate, if set, edits the body.
+func trackBody(t testing.TB, engine string, tpl *flows.Template, mutate func(map[string]any)) []byte {
+	t.Helper()
+	m := map[string]any{
+		"nodes":    []any{map[string]any{"instance_id": "trk", "type_name": "Track", "params": map[string]any{"Engine": engine}}},
+		"events":   []any{},
+		"edges":    []any{},
+		"start_id": "trk",
+	}
+	if tpl != nil {
+		m["flow"] = tpl
+	}
+	if mutate != nil {
+		mutate(m)
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func trackDeployReq(t testing.TB, engine string, tpl *flows.Template, vehicles ...string) *http.Request {
+	t.Helper()
+	body := trackBody(t, engine, tpl, func(m map[string]any) {
+		m["vehicles"] = vehicles
+		m["name"] = "m"
+	})
+	return httptest.NewRequest(http.MethodPost, "/api/deploy", bytes.NewReader(body))
+}
+
+// manifestEngines parses a manifest and returns its engines' names.
+func manifestEngines(t testing.TB, data []byte) []string {
+	t.Helper()
+	m, err := config.ParseMissionManifestFromBytes(data)
+	if err != nil {
+		t.Fatalf("manifest %q: %v", data, err)
+	}
+	var names []string
+	for _, e := range m.Engines {
+		names = append(names, e.Name)
+	}
+	return names
+}
+
+func flowFleet() []fleet.Vehicle {
+	return []fleet.Vehicle{
+		cfgVehicle("100.64.0.1.alpha", "arm64", "A"),
+		cfgVehicle("100.64.0.1.bravo", "arm64", "A"),
+		cfgVehicle("100.64.0.2.charlie", "arm64", "A"),
+	}
+}
+
+// charlieYolo is a flow designed for charlie: its telemetry into the yolo on
+// its own daemon.
+func charlieYolo(host string) *flows.Template {
+	return &flows.Template{
+		Vehicle:   "100.64.0.2.charlie",
+		Producers: []flows.TemplateProducer{{Name: host + ".telemetry"}},
+		Engines:   []flows.TemplateEngine{{Name: host + ".yolo"}},
+		Edges:     []flows.TemplateEdge{{From: host + ".telemetry", To: host + ".yolo", Timeout: "1s"}},
+	}
+}
+
+func TestDeployFlowLocalPerTarget(t *testing.T) {
+	f := engineFake(t)
+	s := &fakeSender{}
+	u := newFlowUploads(t, catalogLister(flowCatalog("100.64.0.1", "100.64.0.2"), flowFleet()...), s, f)
+	rec := httptest.NewRecorder()
+	u.ServeDeploy(rec, trackDeployReq(t, "100.64.0.2.yolo", charlieYolo("100.64.0.2"), "100.64.0.1.alpha", "100.64.0.1.bravo", "100.64.0.2.charlie"))
+	res := results(events(t, rec))
+	if c := res["100.64.0.2.charlie"]; c["success"] != true {
+		t.Fatalf("charlie %v", c)
+	}
+	// Producers re-home to each target, so it is the engine on charlie's
+	// daemon that keeps the other vehicles from the flow.
+	for _, v := range []string{"100.64.0.1.alpha", "100.64.0.1.bravo"} {
+		if r := res[v]; r["success"] != false || r["details"] != "flow engine 100.64.0.2.yolo is neither on this vehicle's daemon nor on the orchestrator" {
+			t.Errorf("%s: %v", v, r)
+		}
+	}
+	if len(f.builds) != 1 || len(s.called()) != 1 {
+		t.Fatalf("builds %d sends %d", len(f.builds), len(s.called()))
+	}
+	b := f.builds[0]
+	if !strings.Contains(string(b.Flow), "100.64.0.2.yolo") || !strings.Contains(string(b.Flow), `location = "local"`) {
+		t.Errorf("flow %s", b.Flow)
+	}
+	if got := manifestEngines(t, b.Manifest); !reflect.DeepEqual(got, []string{"100.64.0.2.yolo"}) {
+		t.Errorf("manifest engines %v", got)
+	}
+	eq(t, engineIdent(t, b.Ast), "DetectionEngine_100_64_0_2_yolo")
+}
+
+func TestDeployFlowEngineOnOtherDaemonFailsTarget(t *testing.T) {
+	f := engineFake(t)
+	s := &fakeSender{}
+	u := newFlowUploads(t, catalogLister(flowCatalog("100.64.0.1", "100.64.0.2"), flowFleet()...), s, f)
+	tpl := &flows.Template{Engines: []flows.TemplateEngine{{Name: "100.64.0.2.yolo"}}}
+	rec := httptest.NewRecorder()
+	u.ServeDeploy(rec, trackDeployReq(t, "100.64.0.2.yolo", tpl, "100.64.0.1.alpha", "100.64.0.2.charlie"))
+	res := results(events(t, rec))
+	if a := res["100.64.0.1.alpha"]; a["success"] != false || a["details"] != "flow engine 100.64.0.2.yolo is neither on this vehicle's daemon nor on the orchestrator" {
+		t.Errorf("alpha %v", a)
+	}
+	if c := res["100.64.0.2.charlie"]; c["success"] != true {
+		t.Errorf("charlie %v", c)
+	}
+	if len(f.builds) != 1 {
+		t.Fatalf("builds %d", len(f.builds))
+	}
+}
+
+func TestDeployFlowOrchestratorEngineEverywhere(t *testing.T) {
+	f := engineFake(t)
+	s := &fakeSender{}
+	u := newFlowUploads(t, catalogLister(flowCatalog("100.64.0.1", "100.64.0.2"), flowFleet()...), s, f)
+	tpl := &flows.Template{Engines: []flows.TemplateEngine{{Name: "100.64.0.1.yolo"}}}
+	rec := httptest.NewRecorder()
+	u.ServeDeploy(rec, trackDeployReq(t, "100.64.0.1.yolo", tpl, "100.64.0.1.alpha", "100.64.0.2.charlie"))
+	res := results(events(t, rec))
+	for _, v := range []string{"100.64.0.1.alpha", "100.64.0.2.charlie"} {
+		if res[v]["success"] != true {
+			t.Errorf("%s: %v", v, res[v])
+		}
+	}
+	// On the orchestrator's own daemon the engine is local, elsewhere
+	// remote, so the two located flows build separately.
+	if len(f.builds) != 2 {
+		t.Fatalf("builds %d: %v", len(f.builds), events(t, rec))
+	}
+	locals := 0
+	for _, b := range f.builds {
+		if strings.Contains(string(b.Flow), `location = "local"`) {
+			locals++
+		} else if !strings.Contains(string(b.Flow), `location = "remote"`) {
+			t.Errorf("flow %s", b.Flow)
+		}
+		eq(t, engineIdent(t, b.Ast), "DetectionEngine_100_64_0_1_yolo")
+	}
+	if locals != 1 {
+		t.Errorf("%d local flows, want 1", locals)
+	}
+}
+
+func TestDeployFlowUnknownHostFailsDeploy(t *testing.T) {
+	f := engineFake(t)
+	s := &fakeSender{}
+	u := newFlowUploads(t, catalogLister(flowCatalog("100.64.0.1"), flowFleet()...), s, f)
+	tpl := &flows.Template{Engines: []flows.TemplateEngine{{Name: "heisenberg.yolo"}}}
+	rec := httptest.NewRecorder()
+	u.ServeDeploy(rec, trackDeployReq(t, "heisenberg.yolo", tpl, "100.64.0.1.alpha"))
+	evs := events(t, rec)
+	if len(evs) != 1 || evs[0]["type"] != "error" || !strings.Contains(evs[0]["detail"].(string), "flow host heisenberg is not a known daemon") {
+		t.Fatal(evs)
+	}
+	if len(f.builds) != 0 || len(s.called()) != 0 {
+		t.Fatal("compiled or sent")
+	}
+}
+
+func TestDeployFlowProducerRehomesToTarget(t *testing.T) {
+	f := engineFake(t)
+	s := &fakeSender{}
+	u := newFlowUploads(t, catalogLister(flowCatalog("100.64.0.1", "100.64.0.2"), flowFleet()...), s, f)
+	// Designed on charlie's daemon, but each target uses its own telemetry.
+	tpl := charlieYolo("100.64.0.2")
+	tpl.Engines = []flows.TemplateEngine{{Name: "100.64.0.1.yolo"}}
+	tpl.Edges = []flows.TemplateEdge{{From: "100.64.0.2.telemetry", To: "100.64.0.1.yolo", Timeout: "1s"}}
+	rec := httptest.NewRecorder()
+	u.ServeDeploy(rec, trackDeployReq(t, "100.64.0.1.yolo", tpl, "100.64.0.1.alpha", "100.64.0.2.charlie"))
+	res := results(events(t, rec))
+	for _, v := range []string{"100.64.0.1.alpha", "100.64.0.2.charlie"} {
+		if res[v]["success"] != true {
+			t.Errorf("%s: %v", v, res[v])
+		}
+	}
+	for _, b := range f.builds {
+		if !strings.Contains(string(b.Flow), `name = "telemetry"`) {
+			t.Errorf("flow %s", b.Flow)
+		}
+	}
+}
+
+func TestDeployEngineReferenceWithoutFlow(t *testing.T) {
+	f := engineFake(t)
+	s := &fakeSender{}
+	u := newFlowUploads(t, catalogLister(flowCatalog("100.64.0.1"), flowFleet()...), s, f)
+	rec := httptest.NewRecorder()
+	u.ServeDeploy(rec, trackDeployReq(t, "yolo", nil, "100.64.0.1.alpha"))
+	evs := events(t, rec)
+	if len(evs) != 1 || evs[0]["type"] != "error" || !strings.Contains(evs[0]["detail"].(string), "mission uses engine yolo in") {
+		t.Fatal(evs)
+	}
+	if len(f.builds) != 0 || len(s.called()) != 0 {
+		t.Fatal("compiled or sent")
+	}
+}
+
+func TestDeployWithoutFlowUnchanged(t *testing.T) {
+	f := newFake(t)
+	f.binaries = map[string][]byte{"arm64": []byte("ARM"), "amd64": []byte("AMD")}
+	s := &fakeSender{}
+	u := newUploads(t, lister(
+		cfgVehicle("100.64.0.1.alpha", "arm64", "A"),
+		cfgVehicle("100.64.0.1.bravo", "arm64", "A"),
+		cfgVehicle("100.64.0.2.charlie", "amd64", "A"),
+	), s, f)
+	rec := httptest.NewRecorder()
+	u.ServeDeploy(rec, deployReq(t, []string{"100.64.0.1.alpha", "100.64.0.1.bravo", "100.64.0.2.charlie"}, "m"))
+	if len(f.builds) != 2 {
+		t.Fatalf("builds %d", len(f.builds))
+	}
+	for _, b := range f.builds {
+		if b.Flow != nil || b.Manifest != nil {
+			t.Errorf("build has flow %q manifest %q", b.Flow, b.Manifest)
+		}
+	}
+	evs := events(t, rec)
+	if evs[0]["stage"] != "building" {
+		t.Fatalf("first event %v", evs[0])
+	}
+	res := results(evs)
+	for v, want := range map[string]string{"100.64.0.1.alpha": "ARM", "100.64.0.1.bravo": "ARM", "100.64.0.2.charlie": "AMD"} {
+		if res[v]["success"] != true || string(s.binaryFor(t, v)) != want {
+			t.Errorf("%s: %v %q", v, res[v], s.binaryFor(t, v))
+		}
 	}
 }

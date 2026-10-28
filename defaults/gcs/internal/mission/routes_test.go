@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
 	"github.com/rs/zerolog"
 )
 
@@ -67,9 +68,18 @@ func newFake(t testing.TB) *fakeCompiler {
 	return &fakeCompiler{registry: jsonMap(t, string(raw))}
 }
 
+// testGCSIP is the IP of the GCS's own daemon, the orchestrator, in tests.
+const testGCSIP = "100.64.0.1"
+
 func newService(t testing.TB, f *fakeCompiler) *Service {
 	t.Helper()
-	return NewService(f, testConfig(t), zerolog.Nop())
+	return NewService(f, testConfig(t), testGCSIP, nil, zerolog.Nop())
+}
+
+// newFlowService returns a Service whose daemon lists cat.
+func newFlowService(t testing.TB, f *fakeCompiler, cat flows.Catalog) *Service {
+	t.Helper()
+	return NewService(f, testConfig(t), testGCSIP, func(context.Context) (flows.Catalog, error) { return cat, nil }, zerolog.Nop())
 }
 
 func graphBody(t testing.TB, mutate func(map[string]any)) []byte {
@@ -467,5 +477,102 @@ func TestCompileGraphCompilerFailureIsAnError(t *testing.T) {
 	_, errs, err := s.CompileGraph(context.Background(), exGraph(t), []BuildTarget{{Key: "a", Arch: "amd64"}})
 	if err == nil || len(errs) != 0 || err.Error() != "timed out after 300 s" {
 		t.Errorf("err = %v, errs = %v", err, errs)
+	}
+}
+
+func TestCompileWithFlow(t *testing.T) {
+	f := engineFake(t)
+	s := newFlowService(t, f, flowCatalog("100.64.0.1", "100.64.0.2"))
+	rec := do(s.ServeCompile, "POST", "/api/compile", trackBody(t, "100.64.0.1.yolo", localYolo(), nil))
+	if rec.Code != 200 || !reflect.DeepEqual(decodeMap(t, rec), map[string]any{"ok": true}) {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if len(f.builds) != 1 {
+		t.Fatalf("builds = %d", len(f.builds))
+	}
+	b := f.builds[0]
+	if b.Arch != "amd64" || b.Plugin != nil {
+		t.Errorf("arch %q plugin %q", b.Arch, b.Plugin)
+	}
+	if !strings.Contains(string(b.Flow), "100.64.0.1.yolo") {
+		t.Errorf("flow %s", b.Flow)
+	}
+	if got := manifestEngines(t, b.Manifest); !reflect.DeepEqual(got, []string{"100.64.0.1.yolo"}) {
+		t.Errorf("manifest engines %v", got)
+	}
+	eq(t, engineIdent(t, b.Ast), "DetectionEngine_100_64_0_1_yolo")
+}
+
+func TestCompileFlowUnknownVehicleResolvesOnOrchestrator(t *testing.T) {
+	f := engineFake(t)
+	tpl := localYolo()
+	tpl.Vehicle = ""
+	tpl.Producers = append(tpl.Producers, flows.TemplateProducer{Name: testGCSIP + ".front"})
+	tpl.Edges = append(tpl.Edges, flows.TemplateEdge{From: testGCSIP + ".front", To: testGCSIP + ".yolo", Timeout: "1s"})
+	s := newFlowService(t, f, flowCatalog("100.64.0.1"))
+	rec := do(s.ServeCompile, "POST", "/api/compile", trackBody(t, "100.64.0.1.yolo", tpl, nil))
+	if rec.Code != 200 || len(f.builds) != 1 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(string(f.builds[0].Flow), testGCSIP+".yolo") {
+		t.Errorf("flow %s", f.builds[0].Flow)
+	}
+}
+
+func TestCompileFlowDesignedForNamedHost(t *testing.T) {
+	f := engineFake(t)
+	s := newFlowService(t, f, flowCatalog("100.64.0.1", "100.64.0.2"))
+	rec := do(s.ServeCompile, "POST", "/api/compile", trackBody(t, "swap03.yolo", charlieYolo("swap03"), nil))
+	if rec.Code != 200 || !reflect.DeepEqual(decodeMap(t, rec), map[string]any{"ok": true}) {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	eq(t, engineIdent(t, f.builds[0].Ast), "DetectionEngine_100_64_0_2_yolo")
+}
+
+func TestCompileFlowCheckFailure(t *testing.T) {
+	f := engineFake(t)
+	s := newFlowService(t, f, flowCatalog())
+	rec := do(s.ServeCompile, "POST", "/api/compile", trackBody(t, "100.64.0.1.det", remoteDet(), nil))
+	want := `{"errors":[{"node_id":null,"event_id":null,"message":"flow engine 100.64.0.1.det is not on 100.64.0.1"}]}`
+	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != want {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if len(f.builds) != 0 {
+		t.Error("compiler was called")
+	}
+}
+
+func TestCompileFlowWithoutDaemonIs503(t *testing.T) {
+	f := engineFake(t)
+	s := newService(t, f)
+	rec := do(s.ServeCompile, "POST", "/api/compile", trackBody(t, "100.64.0.1.yolo", localYolo(), nil))
+	if rec.Code != 503 || decodeMap(t, rec)["detail"] != "the GCS has no connection to the daemon" {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCompileEngineReferenceWithoutFlow(t *testing.T) {
+	f := engineFake(t)
+	s := newService(t, f)
+	rec := do(s.ServeCompile, "POST", "/api/compile", trackBody(t, "yolo", nil, nil))
+	want := `{"errors":[{"node_id":null,"event_id":null,"message":"mission uses engine yolo in trk.Engine, but the flow has no such engine"}]}`
+	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != want {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if len(f.builds) != 0 {
+		t.Error("compiler was called")
+	}
+}
+
+func TestBuildAndRenderKeepEngineNamesVerbatim(t *testing.T) {
+	f := engineFake(t)
+	s := newService(t, f)
+	body := trackBody(t, "yolo", nil, func(m map[string]any) { m["arch"] = "arm64" })
+	if rec := do(s.ServeBuild, "POST", "/api/build", body); rec.Code != 200 {
+		t.Fatalf("build status %d: %s", rec.Code, rec.Body)
+	}
+	eq(t, engineIdent(t, f.builds[0].Ast), "DetectionEngine_yolo")
+	if rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", body); rec.Code != 200 {
+		t.Fatalf("render status %d: %s", rec.Code, rec.Body)
 	}
 }

@@ -59,9 +59,9 @@ type Vehicle struct {
 // Unavailable is a remote daemon the daemon could not reach, whose services
 // are therefore not listed.
 type Unavailable struct {
-	IP       string
-	Hostname string
-	Reason   string
+	IP       string `json:"ip"`
+	Hostname string `json:"hostname"`
+	Reason   string `json:"reason"`
 }
 
 // Snapshot is the vehicles and engines the daemon listed.

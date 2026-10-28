@@ -1,7 +1,8 @@
 import { Button } from 'primereact/button';
-import { engineLocation, vehicleLabel, vehicleOptions } from './flowCatalog.js';
+import { daemonLabel, engineLocation, templateName, vehicleLabel, vehicleOptions } from './flowCatalog.js';
 import { availableStreams, isEnginePlaced } from './flowModel.js';
 import { FLOW_DRAG_TYPE, paletteTitle } from './flowView.js';
+import { displayName } from './vehicleNames.js';
 
 const sectionHeader = {
     fontSize: 12, color: 'var(--palette-header)', textTransform: 'uppercase', letterSpacing: 1,
@@ -33,12 +34,11 @@ function Item({ payload, disabled, title, children }) {
 }
 
 // What can go on the canvas: the flow's vehicle (dropped as a producer for
-// its next unplaced stream) and every engine on a reachable daemon, grouped
-// by daemon. Items already placed are disabled. Unreachable daemons are left
-// out (their nodes still show as unresolved on the canvas).
+// its next unplaced stream) and every engine in the catalog, grouped by
+// daemon. Items already placed, or on neither the vehicle's daemon nor the
+// orchestrator, are disabled. Daemons the GCS couldn't list are noted.
 function FlowPalette({ flow, catalog, loading, onRefresh }) {
     const free = catalog ? availableStreams(flow, catalog) : [];
-    const reachable = catalog?.filter((d) => d.reachable);
     return (
         <div style={{ width: 180, background: 'var(--palette-bg)', height: '100%', overflowY: 'auto', borderRight: '1px solid var(--palette-border)' }}>
             <div style={{ ...sectionHeader, position: 'relative' }}>
@@ -53,32 +53,40 @@ function FlowPalette({ flow, catalog, loading, onRefresh }) {
                 <Item payload={{ kind: 'vehicle' }} disabled={free.length === 0}
                     title={free.length ? `Drop to add a producer (${free.join(', ')})` : 'Every stream is already on the canvas'}>
                     <i className="pi pi-send" style={{ fontSize: 11 }} />
-                    <span>{vehicleLabel(flow.vehicle, vehicleOptions(catalog ?? [], flow.vehicle))}</span>
+                    <span>{vehicleLabel(flow.vehicle, catalog ? vehicleOptions(catalog, flow.vehicle) : [])}</span>
                 </Item>
             )}
 
             <div style={{ ...sectionHeader, marginTop: 8 }}>Engines</div>
             {catalog === null && <div className="p-2 text-sm text-color-secondary">Loading catalog…</div>}
-            {catalog?.length === 0 && <div className="p-2 text-sm text-color-secondary">No daemons in the roster (add them on the Orchestrate page).</div>}
-            {catalog?.length > 0 && reachable.length === 0 && <div className="p-2 text-sm text-color-secondary">No reachable daemons.</div>}
-            {reachable?.map((daemon) => (
-                <div key={daemon.address}>
-                    <div className="px-2 pt-2 pb-1" style={{ fontSize: 11, color: 'var(--palette-header)' }} title={daemon.address}>
-                        {daemon.name}
+            {catalog?.error && <div className="p-2 text-sm" style={{ color: '#e8c87a' }}>{catalog.error}</div>}
+            {catalog?.unavailable.map((u) => (
+                <div key={u.ip} className="px-2 py-1 text-xs" style={{ color: '#e8c87a' }} title={u.reason}>
+                    {u.hostname || u.ip} is unavailable
+                </div>
+            ))}
+            {catalog?.daemons.map((daemon) => (
+                <div key={daemon.ip}>
+                    <div className="px-2 pt-2 pb-1" style={{ fontSize: 11, color: 'var(--palette-header)' }} title={daemon.ip}>
+                        {daemonLabel(daemon)}{daemon.local ? ' (orchestrator)' : ''}
                     </div>
                     {daemon.engines.length === 0 && <div className="px-2 pb-2 text-xs text-color-secondary">No engines</div>}
                     {daemon.engines.map((engine) => {
-                        const placed = isEnginePlaced(flow, daemon.address, engine.name);
-                        const location = engineLocation(flow, daemon.address);
+                        const placed = isEnginePlaced(flow, catalog, engine.name);
+                        const location = engineLocation(catalog, flow.vehicle, templateName(catalog, engine.name));
+                        const unreachable = flow.vehicle && location === null;
                         return (
-                            <Item key={engine.name} disabled={placed}
-                                payload={{ kind: 'engine', daemon: { name: daemon.name, address: daemon.address }, engine: engine.name }}
-                                title={placed ? 'Already on the canvas' : paletteTitle(engine)}>
+                            <Item key={engine.name} disabled={placed || !flow.vehicle || unreachable}
+                                payload={{ kind: 'engine', engine: engine.name }}
+                                title={placed ? 'Already on the canvas'
+                                    : !flow.vehicle ? 'Select a vehicle first'
+                                        : unreachable ? "Not on the vehicle's daemon or the orchestrator"
+                                            : paletteTitle(engine)}>
                                 <i className="pi pi-microchip" style={{ fontSize: 11 }} />
-                                <span>{engine.name}</span>
+                                <span>{displayName(engine.name)}</span>
                                 {engine.category && <span style={{ fontSize: 9, opacity: 0.7 }}>{engine.category}</span>}
                                 {!engine.typed && <Tag color="#e8c87a" title={engine.problem ?? undefined}>untyped</Tag>}
-                                {flow.vehicle && <Tag color={location === 'local' ? '#a3e8a0' : '#7ecfff'}>{location}</Tag>}
+                                {flow.vehicle && <Tag color={location === 'local' ? '#a3e8a0' : location ? '#7ecfff' : '#ff8888'}>{location ?? 'unreachable'}</Tag>}
                             </Item>
                         );
                     })}

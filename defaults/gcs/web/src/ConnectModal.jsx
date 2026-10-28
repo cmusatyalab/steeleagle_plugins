@@ -5,7 +5,7 @@ import { InputText } from 'primereact/inputtext';
 import { Dropdown } from 'primereact/dropdown';
 import FieldInput from './FieldInput.jsx';
 
-function NewEventForm({ schema, onAdd }) {
+function NewEventForm({ schema, engines, onAdd }) {
     const eventTypes = Object.keys(schema.events || {}).sort();
     const [typeName, setTypeName] = useState(eventTypes[0] ?? '');
     const [instanceId, setInstanceId] = useState('');
@@ -49,6 +49,7 @@ function NewEventForm({ schema, onAdd }) {
                         field={f}
                         value={params[f.name]}
                         onChange={val => updateParam(f.name, val)}
+                        engines={engines}
                         enums={schema.enums}
                     />
                 </div>
@@ -58,7 +59,7 @@ function NewEventForm({ schema, onAdd }) {
     );
 }
 
-function ConnectModal({ visible, onHide, connection, eventInstances, schema, onConfirm, onAddEvent }) {
+function ConnectModal({ visible, onHide, connection, eventInstances, schema, engines, onConfirm, onAddEvent }) {
     const [showNewForm, setShowNewForm] = useState(false);
 
     if (!connection) return null;
@@ -119,7 +120,7 @@ function ConnectModal({ visible, onHide, connection, eventInstances, schema, onC
             />
 
             {showNewForm && (
-                <NewEventForm schema={schema} onAdd={handleAddEvent} />
+                <NewEventForm schema={schema} engines={engines} onAdd={handleAddEvent} />
             )}
         </Dialog>
     );

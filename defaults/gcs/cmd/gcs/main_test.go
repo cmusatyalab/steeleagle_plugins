@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -11,10 +12,12 @@ import (
 	"strings"
 	"testing"
 
+	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/control"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/rtc"
 	"github.com/rs/zerolog"
+	"google.golang.org/grpc"
 )
 
 func TestParseArgs(t *testing.T) {
@@ -155,8 +158,8 @@ func TestHandlerWithoutDaemon(t *testing.T) {
 // testMissions returns mission routes for a GCS with no daemon and an
 // unavailable compiler.
 func testMissions() missionRoutes {
-	svc := mission.NewService(unavailableCompiler{errors.New("no go")}, mission.CompilerConfig{}, zerolog.Nop())
-	return missionRoutes{svc: svc, upload: noDaemonHandler(), deploy: noDaemonHandler()}
+	svc := mission.NewService(unavailableCompiler{errors.New("no go")}, mission.CompilerConfig{}, "", nil, zerolog.Nop())
+	return missionRoutes{svc: svc, upload: noDaemonHandler(), deploy: noDaemonHandler(), catalog: noDaemonHandler()}
 }
 
 // TestParseArgsCompiler ensures that the compiler's config is read from the
@@ -222,5 +225,92 @@ func TestCompilerRoutesRegistered(t *testing.T) {
 		if resp.StatusCode == http.StatusNotFound {
 			t.Errorf("POST %s = 404, want it registered", path)
 		}
+	}
+}
+
+// TestCatalogRoute503WithoutDaemon ensures that the flow catalog route says
+// when the GCS has no connection to the daemon.
+func TestCatalogRoute503WithoutDaemon(t *testing.T) {
+	hub, err := rtc.NewHub(rtc.Options{}, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	defer server.Close()
+	resp, err := http.Get(server.URL + "/api/flows/catalog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), `{"detail":"the GCS has no connection to the daemon"}`) {
+		t.Errorf("GET /api/flows/catalog = %d %q, want 503 and the detail", resp.StatusCode, body)
+	}
+}
+
+// countingDaemon is a daemon client that counts its ListServices calls.
+type countingDaemon struct {
+	daemonpb.DaemonServiceClient
+	calls int
+}
+
+func (d *countingDaemon) ListServices(context.Context, *daemonpb.ListServicesRequest, ...grpc.CallOption) (*daemonpb.ListServicesResponse, error) {
+	d.calls++
+	return daemonpb.ListServicesResponse_builder{Services: []*daemonpb.Service{
+		daemonpb.Service_builder{Name: "100.64.0.1.alpha", Category: daemonpb.ServiceCategory_SERVICE_CATEGORY_VEHICLE, Running: true}.Build(),
+		daemonpb.Service_builder{Name: "100.64.0.1.yolo", Category: daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE}.Build(),
+	}}.Build(), nil
+}
+
+// TestDaemonListerListsOnce ensures that the vehicles and the flow catalog
+// come from one ListServices call.
+func TestDaemonListerListsOnce(t *testing.T) {
+	d := &countingDaemon{}
+	vs, cat, err := daemonLister(d, "100.64.0.1", "cloudlet033")(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.calls != 1 {
+		t.Errorf("ListServices called %d times, want 1", d.calls)
+	}
+	if len(vs) != 1 || vs[0].Name != "100.64.0.1.alpha" {
+		t.Errorf("vehicles = %+v", vs)
+	}
+	if _, ok := cat.Engine("100.64.0.1.yolo"); !ok {
+		t.Errorf("catalog = %+v", cat)
+	}
+}
+
+// configDaemon is a daemon client whose GetConfiguration answers with toml or
+// err.
+type configDaemon struct {
+	daemonpb.DaemonServiceClient
+	toml string
+	err  error
+}
+
+func (d configDaemon) GetConfiguration(context.Context, *daemonpb.GetConfigurationRequest, ...grpc.CallOption) (*daemonpb.GetConfigurationResponse, error) {
+	return daemonpb.GetConfigurationResponse_builder{ConfigToml: []byte(d.toml)}.Build(), d.err
+}
+
+func TestDaemonHostname(t *testing.T) {
+	osHost, _ := os.Hostname()
+	tests := []struct {
+		name string
+		d    configDaemon
+		want string
+	}{
+		{"configured", configDaemon{toml: "[daemon]\nhostname = \"cloudlet033\"\n"}, "cloudlet033"},
+		{"default", configDaemon{toml: "[daemon]\nport = 5000\n"}, "eagled"},
+		{"rpc fails", configDaemon{err: errors.New("unimplemented")}, osHost},
+		{"bad toml", configDaemon{toml: "[daemon"}, osHost},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := daemonHostname(context.Background(), tc.d, zerolog.Nop()); got != tc.want {
+				t.Errorf("daemonHostname() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

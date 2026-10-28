@@ -153,6 +153,10 @@ type BuildRequest struct {
 	GeoJSON []byte // nil if the mission has no areas
 	Plugin  []byte // driver plugin config TOML, nil if none
 	Arch    string // GOARCH of the vehicle
+	// Flow and Manifest are the resolved flow config and mission manifest
+	// TOML, nil if the mission has no flow.
+	Flow     []byte
+	Manifest []byte
 }
 
 // CompileErrors is the error returned when the compiler rejected the mission.
@@ -288,13 +292,7 @@ func (s *sdkCompiler) sdkBuild(req BuildRequest) ([]byte, error) {
 	}
 	f.Close()
 	defer os.Remove(f.Name())
-	opts := []buildtools.Option{buildtools.WithOutputFile(f.Name())}
-	if req.GeoJSON != nil {
-		opts = append(opts, buildtools.WithGeoJson(req.GeoJSON))
-	}
-	if req.Plugin != nil {
-		opts = append(opts, buildtools.WithPlugin(req.Plugin))
-	}
+	opts := buildOptions(req, f.Name())
 	w, err := compiler.NewWorkspace([]string{"GOARCH=" + req.Arch})
 	if err != nil {
 		return nil, err
@@ -304,6 +302,25 @@ func (s *sdkCompiler) sdkBuild(req BuildRequest) ([]byte, error) {
 		return nil, err
 	}
 	return os.ReadFile(f.Name())
+}
+
+// buildOptions returns the SDK build options for req, writing to output.
+// Inputs that are nil are left out.
+func buildOptions(req BuildRequest, output string) []buildtools.Option {
+	opts := []buildtools.Option{buildtools.WithOutputFile(output)}
+	if req.GeoJSON != nil {
+		opts = append(opts, buildtools.WithGeoJson(req.GeoJSON))
+	}
+	if req.Plugin != nil {
+		opts = append(opts, buildtools.WithPlugin(req.Plugin))
+	}
+	if req.Flow != nil {
+		opts = append(opts, buildtools.WithFlow(req.Flow))
+	}
+	if req.Manifest != nil {
+		opts = append(opts, buildtools.WithManifest(req.Manifest))
+	}
+	return opts
 }
 
 // convertErrors maps SDK compile errors to *CompileErrors when any is about

@@ -4,11 +4,11 @@ import { Button } from 'primereact/button';
 import { Dropdown } from 'primereact/dropdown';
 import { InputText } from 'primereact/inputtext';
 import { ConfirmDialog, confirmDialog } from 'primereact/confirmdialog';
-import { loadDaemons, subscribeDaemons } from './daemonRoster.js';
-import { createCatalogLoader, sameVehicle, vehicleKey, vehicleLabel, vehicleOptions } from './flowCatalog.js';
+import { createCatalogLoader, vehicleLabel, vehicleOptions } from './flowCatalog.js';
+import { displayName } from './vehicleNames.js';
 import {
     addEdge, addEngine, addProducer, availableStreams, canConnect, emptyFlow, fileBaseName,
-    parseFlowJson, removeEdge, removeNode, serializeFlow, setVehicle, toGabrielToml, updateEdge, updateNode, validateFlow,
+    importFlowToml, parseFlowJson, removeEdge, removeNode, serializeFlow, setVehicle, toFlowToml, updateEdge, updateNode, validateFlow,
 } from './flowModel.js';
 import {
     ERROR_COLOR, FLOW_DRAG_TYPE, WARNING_COLOR,
@@ -25,27 +25,7 @@ import '@xyflow/react/dist/style.css';
 
 const nodeTypes = { producer: ProducerNode, engine: EngineNode };
 const edgeTypes = { callback: CallbackEdge };
-const DRAFT_STORAGE_KEY = 'steeleagle-flow-draft';
 const NO_ISSUES = { errors: [], warnings: [] };
-
-// The draft survives tab switches and reloads; it's a convenience, not
-// storage -- the exported file is the saved flow.
-function loadDraft() {
-    try {
-        const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
-        return raw ? parseFlowJson(raw) : emptyFlow();
-    } catch {
-        return emptyFlow();
-    }
-}
-
-function saveDraft(flow) {
-    try {
-        localStorage.setItem(DRAFT_STORAGE_KEY, serializeFlow(flow));
-    } catch {
-        // storage full or blocked; the flow still lives in page state
-    }
-}
 
 function download(filename, text, type) {
     const url = URL.createObjectURL(new Blob([text], { type }));
@@ -56,30 +36,27 @@ function download(filename, text, type) {
     URL.revokeObjectURL(url);
 }
 
-function FlowBuilderInner({ theme, toast, active = true }) {
+// flow and catalog are owned by the Plan page, which also ships the flow with
+// Validate and Deploy; this tab edits them and refreshes the catalog.
+function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog, setCatalog }) {
     const { screenToFlowPosition, fitView } = useReactFlow();
     const [importCount, setImportCount] = useState(0);
-    const [flow, setFlow] = useState(loadDraft);
     const [selection, setSelection] = useState(null);
     const [contextMenu, setContextMenu] = useState(null); // {x, y, nodeId} | {x, y, edgeId}
-    const [daemons, setDaemons] = useState(loadDaemons);
-    const [catalog, setCatalog] = useState(null);
     const [loadingCatalog, setLoadingCatalog] = useState(false);
     const [rfNodes, setRfNodes] = useState([]);
     const fileInputRef = useRef(null);
+    const tomlInputRef = useRef(null);
 
     const notify = useCallback((severity, summary, detail) => {
         toast?.current?.show({ severity, summary, detail });
     }, [toast]);
 
-    useEffect(() => saveDraft(flow), [flow]);
-    useEffect(() => subscribeDaemons(setDaemons), []);
-
-    const loader = useMemo(() => createCatalogLoader((c) => { setCatalog(c); setLoadingCatalog(false); }), []);
+    const loader = useMemo(() => createCatalogLoader((c) => { setCatalog(c); setLoadingCatalog(false); }), [setCatalog]);
     const refreshCatalog = useCallback(() => {
         setLoadingCatalog(true);
-        loader(daemons);
-    }, [loader, daemons]);
+        loader();
+    }, [loader]);
     useEffect(() => { refreshCatalog(); }, [refreshCatalog]);
     // Refresh when the tab/page becomes visible again (initial mount is covered above).
     const wasActive = useRef(active);
@@ -95,7 +72,7 @@ function FlowBuilderInner({ theme, toast, active = true }) {
     }, [importCount, fitView]);
 
     const validation = useMemo(() => (catalog ? validateFlow(flow, catalog) : NO_ISSUES), [flow, catalog]);
-    const onChangeStream = useCallback((id, stream) => setFlow((f) => updateNode(f, id, { stream })), []);
+    const onChangeStream = useCallback((id, stream) => setFlow((f) => updateNode(f, id, { stream })), [setFlow]);
     const view = useMemo(
         () => toReactFlow(flow, catalog, validation, selection, { onChangeStream }),
         [flow, catalog, validation, selection, onChangeStream],
@@ -109,12 +86,12 @@ function FlowBuilderInner({ theme, toast, active = true }) {
         setRfNodes((ns) => applyNodeChanges(changes, ns));
         setFlow((f) => applyFlowNodeChanges(f, changes));
         if (changes.some((c) => c.type === 'remove')) setSelection(null);
-    }, []);
+    }, [setFlow]);
 
     const onEdgesChange = useCallback((changes) => {
         setFlow((f) => applyFlowEdgeChanges(f, changes));
         if (changes.some((c) => c.type === 'remove')) setSelection(null);
-    }, []);
+    }, [setFlow]);
 
     const isValidConnection = useCallback((conn) => {
         if (!catalog) return false;
@@ -129,7 +106,7 @@ function FlowBuilderInner({ theme, toast, active = true }) {
         } catch (e) {
             notify('warn', 'Not connected', e.message);
         }
-    }, [flow, catalog, notify]);
+    }, [flow, setFlow, catalog, notify]);
 
     // Say why a drop onto a node was refused; isValidConnection only colors
     // the handle.
@@ -158,23 +135,22 @@ function FlowBuilderInner({ theme, toast, active = true }) {
         try {
             if (item.kind === 'vehicle') {
                 const [stream] = availableStreams(flow, catalog);
-                if (!stream) throw new Error(`Every stream of ${flow.vehicle.name} is already on the canvas`);
-                setFlow(addProducer(flow, stream, position));
+                if (!stream) throw new Error(`Every stream of ${displayName(flow.vehicle)} is already on the canvas`);
+                setFlow(addProducer(flow, catalog, stream, position));
             } else {
-                setFlow(addEngine(flow, item.daemon, item.engine, position));
+                setFlow(addEngine(flow, catalog, item.engine, position));
             }
         } catch (e) {
             notify('warn', 'Not added', e.message);
         }
-    }, [flow, catalog, screenToFlowPosition, notify]);
+    }, [flow, setFlow, catalog, screenToFlowPosition, notify]);
 
     // --- toolbar ---
 
-    const options = useMemo(() => vehicleOptions(catalog ?? [], flow.vehicle), [catalog, flow.vehicle]);
+    const options = useMemo(() => (catalog ? vehicleOptions(catalog, flow.vehicle) : []), [catalog, flow.vehicle]);
 
-    function onPickVehicle(key) {
-        const vehicle = options.find((o) => vehicleKey(o) === key);
-        if (!vehicle || sameVehicle(vehicle, flow.vehicle)) return;
+    function onPickVehicle(vehicle) {
+        if (!vehicle || vehicle === flow.vehicle) return;
         const producers = flow.nodes.filter((n) => n.kind === 'producer').length;
         if (!producers) {
             setFlow((f) => setVehicle(f, vehicle));
@@ -183,7 +159,7 @@ function FlowBuilderInner({ theme, toast, active = true }) {
         confirmDialog({
             group: 'flow',
             header: 'Change vehicle',
-            message: `Switch to ${vehicleLabel(vehicle, options)}? This removes the ${producers} producer node(s) for ${flow.vehicle.name} and their edges.`,
+            message: `Switch to ${vehicleLabel(vehicle, options)}? This removes the ${producers} producer node(s) for ${displayName(flow.vehicle)} and their edges.`,
             icon: 'pi pi-exclamation-triangle',
             accept: () => { setFlow((f) => setVehicle(f, vehicle)); setSelection(null); },
         });
@@ -213,9 +189,26 @@ function FlowBuilderInner({ theme, toast, active = true }) {
         }
     }
 
+    // The TOML names no vehicle, so the import binds to the one selected now.
+    async function onImportToml(event) {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (!file) return;
+        try {
+            if (!flow.vehicle) throw new Error('Select a vehicle first; the TOML does not say which one it is for');
+            const imported = await importFlowToml(await file.text(), catalog, flow.vehicle);
+            setFlow({ ...imported, name: file.name.replace(/\.toml$/i, '') || imported.name });
+            setSelection(null);
+            setImportCount((n) => n + 1);
+            notify('success', 'Flow imported', file.name);
+        } catch (e) {
+            notify('error', 'Import failed', e.message);
+        }
+    }
+
     function onExportToml() {
         try {
-            download(`${fileBaseName(flow)}.toml`, toGabrielToml(flow, catalog), 'application/toml');
+            download(`${fileBaseName(flow)}.toml`, toFlowToml(flow, catalog), 'application/toml');
         } catch (e) {
             notify('error', 'Export failed', e.message);
         }
@@ -247,12 +240,13 @@ function FlowBuilderInner({ theme, toast, active = true }) {
         <div className="flex flex-column" style={{ height: 'calc(100vh - 180px)', ...flowCanvasThemeVars(theme) }}>
             <ConfirmDialog group="flow" />
             <input ref={fileInputRef} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={onImportFile} />
+            <input ref={tomlInputRef} type="file" accept=".toml,application/toml" style={{ display: 'none' }} onChange={onImportToml} />
             <div className="flex gap-2 align-items-center p-2 flex-wrap" style={{ borderBottom: '1px solid #2a3a4a', flexShrink: 0 }}>
                 <InputText value={flow.name} onChange={(e) => setFlow((f) => ({ ...f, name: e.target.value }))}
                     placeholder="Flow name" className="p-inputtext-sm" style={{ width: 180 }} />
                 <Dropdown
-                    value={flow.vehicle ? vehicleKey(flow.vehicle) : null}
-                    options={options.map((o) => ({ label: vehicleLabel(o, options), value: vehicleKey(o) }))}
+                    value={flow.vehicle}
+                    options={options.map((o) => ({ label: vehicleLabel(o, options), value: o }))}
                     onChange={(e) => onPickVehicle(e.value)}
                     placeholder={catalog ? 'Select vehicle' : 'Loading vehicles…'}
                     className="p-inputtext-sm"
@@ -260,6 +254,11 @@ function FlowBuilderInner({ theme, toast, active = true }) {
                 />
                 <Button label="New" icon="pi pi-file" size="small" outlined onClick={onNew} />
                 <Button label="Import JSON" icon="pi pi-file-import" size="small" outlined onClick={() => fileInputRef.current?.click()} />
+                <Button label="Import TOML" icon="pi pi-file-import" size="small" outlined
+                    disabled={!catalog || !flow.vehicle}
+                    tooltip={flow.vehicle ? undefined : 'Select a vehicle first'}
+                    tooltipOptions={{ showOnDisabled: true, position: 'bottom' }}
+                    onClick={() => tomlInputRef.current?.click()} />
                 <Button label="Export JSON" icon="pi pi-file-export" size="small" outlined
                     onClick={() => download(`${fileBaseName(flow)}.flow.json`, serializeFlow(flow), 'application/json')} />
                 <Button label="Export TOML" icon="pi pi-download" size="small" outlined

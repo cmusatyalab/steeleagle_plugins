@@ -21,6 +21,32 @@ var FeatureTypes = []string{
 	"params.Polygon",
 }
 
+// EngineTypes are the params types whose constants the SDK generates from the
+// mission manifest's engines, one per engine: a field of one of these types
+// names a flow engine.
+var EngineTypes = []string{
+	"params.DetectionEngine",
+	"params.ClassificationEngine",
+	"params.GuidanceEngine",
+	"params.PositionEngine",
+	"params.GenericEngine",
+}
+
+func isEngineType(t string) bool {
+	for _, e := range EngineTypes {
+		if e == t {
+			return true
+		}
+	}
+	return false
+}
+
+// constName is how the SDK spells an engine name inside a generated constant
+// (sdk/preprocess/const_gen.go constNameReplacer).
+func constName(name string) string {
+	return strings.NewReplacer(".", "_", "/", "_").Replace(name)
+}
+
 func isFeatureType(t string) bool {
 	for _, f := range FeatureTypes {
 		if f == t {
@@ -182,11 +208,14 @@ func (ix *TypeIndex) FieldType(qualified, field string) (string, bool) {
 	return t, ok
 }
 
-// Kind classifies a Go type: feature, enum, object, array, number, integer,
+// Kind classifies a Go type: feature, engine, enum, object, array, number, integer,
 // boolean, string or unknown.
 func (ix *TypeIndex) Kind(goType string) string {
 	if isFeatureType(goType) {
 		return "feature"
+	}
+	if isEngineType(goType) {
+		return "engine"
 	}
 	if _, ok := ix.enums[goType]; ok {
 		return "enum"
@@ -271,6 +300,9 @@ func schemaField(ix *TypeIndex, f map[string]any, required bool) map[string]any 
 		entry["type"] = "string"
 		entry["map_feature"] = true
 		entry["feature_type"] = Bare(goType)
+	case "engine":
+		entry["type"] = "string"
+		entry["engine_type"] = Bare(goType)
 	case "enum":
 		entry["type"] = "string"
 		key, _ := ix.Key("enums", goType)
@@ -316,7 +348,11 @@ func typedDefault(kind, value string) any {
 // header's Modules: and Imports: and no Role:. Unknown type names pass
 // through unqualified so the compiler reports them on their decl. A nil
 // Params, Events or Edges is the same as an empty one.
-func GraphToAst(g Graph, ix *TypeIndex, header map[string]any) (map[string]any, error) {
+//
+// An engine field's value names a flow engine. With a nil engines map the name
+// is used as written; otherwise it must be a key of engines, and its value (the
+// engine's full resolved name) is what the generated constant names.
+func GraphToAst(g Graph, ix *TypeIndex, header map[string]any, engines map[string]string) (map[string]any, error) {
 	type block struct {
 		action string
 		rules  []any
@@ -335,7 +371,7 @@ func GraphToAst(g Graph, ix *TypeIndex, header map[string]any) (map[string]any, 
 
 	actionDecls := []any{}
 	for _, n := range g.Nodes {
-		d, err := astDecl(ix, "actions", n)
+		d, err := astDecl(ix, "actions", n, engines)
 		if err != nil {
 			return nil, err
 		}
@@ -343,7 +379,7 @@ func GraphToAst(g Graph, ix *TypeIndex, header map[string]any) (map[string]any, 
 	}
 	eventDecls := []any{}
 	for _, e := range g.Events {
-		d, err := astDecl(ix, "events", GraphNode(e))
+		d, err := astDecl(ix, "events", GraphNode(e), engines)
 		if err != nil {
 			return nil, err
 		}
@@ -386,7 +422,7 @@ func orderedParams(ix *TypeIndex, qualified string, params map[string]any) []str
 	return append(keys, rest...)
 }
 
-func astDecl(ix *TypeIndex, sec string, instance GraphNode) (map[string]any, error) {
+func astDecl(ix *TypeIndex, sec string, instance GraphNode, engines map[string]string) (map[string]any, error) {
 	qualified, ok := ix.Qualify(sec, instance.TypeName)
 	if !ok {
 		qualified = instance.TypeName
@@ -394,7 +430,7 @@ func astDecl(ix *TypeIndex, sec string, instance GraphNode) (map[string]any, err
 	attrs := []any{}
 	for _, key := range orderedParams(ix, qualified, instance.Params) {
 		goType, _ := ix.FieldType(qualified, key)
-		value, err := astValue(ix, goType, instance.Params[key])
+		value, err := astValue(ix, goType, instance.Params[key], &engineCtx{engines, instance.InstanceID, key})
 		if err != nil {
 			return nil, err
 		}
@@ -428,10 +464,19 @@ func numberText(v any) (string, bool) {
 
 func isIntLiteral(s string) bool { return !strings.ContainsAny(s, ".eE") }
 
+// engineCtx carries what an engine field needs while its value is converted:
+// the flow's engines (nil for none known) and the top-level node and field the
+// value sits in, for the error.
+type engineCtx struct {
+	engines map[string]string
+	node    string
+	field   string
+}
+
 // astValue converts one plain-JSON param value into an AST Value, shaped by
 // the field's Go type when it's known. It returns nil for an unset value
 // (null or "").
-func astValue(ix *TypeIndex, goType string, value any) (map[string]any, error) {
+func astValue(ix *TypeIndex, goType string, value any, ec *engineCtx) (map[string]any, error) {
 	if value == nil || value == "" {
 		return nil, nil
 	}
@@ -441,6 +486,16 @@ func astValue(ix *TypeIndex, goType string, value any) (map[string]any, error) {
 	}
 	if kind == "feature" {
 		return map[string]any{"Ident": fmt.Sprintf("%s_%v", goType, value)}, nil
+	}
+	if s, isStr := value.(string); kind == "engine" && isStr {
+		full := s
+		if ec.engines != nil {
+			var ok bool
+			if full, ok = ec.engines[s]; !ok {
+				return nil, fmt.Errorf("mission uses engine %s in %s.%s, but the flow has no such engine", s, ec.node, ec.field)
+			}
+		}
+		return map[string]any{"Ident": Bare(goType) + "_" + constName(full)}, nil
 	}
 	if s, isStr := value.(string); kind == "enum" && isStr {
 		if strings.Contains(s, ".") {
@@ -459,7 +514,7 @@ func astValue(ix *TypeIndex, goType string, value any) (map[string]any, error) {
 		args := []any{}
 		for _, key := range orderedParams(ix, goType, obj) {
 			ft, _ := ix.FieldType(goType, key)
-			nested, err := astValue(ix, ft, obj[key])
+			nested, err := astValue(ix, ft, obj[key], ec)
 			if err != nil {
 				return nil, err
 			}
@@ -500,7 +555,7 @@ func astValue(ix *TypeIndex, goType string, value any) (map[string]any, error) {
 		}
 		elems := []any{}
 		for _, e := range list {
-			v, err := astValue(ix, elemType, e)
+			v, err := astValue(ix, elemType, e, ec)
 			if err != nil {
 				return nil, err
 			}
@@ -613,6 +668,11 @@ func asStr(v any) string {
 func astDecls(ast map[string]any, stanza string) []any {
 	return asList(asMap(ast[stanza])["Decls"])
 }
+
+// GraphRoles lists the roles the mission graph declares, for the deployed
+// manifest's info.roles. The graph carries no role yet, so it is always nil;
+// it is the hook for when it does.
+func GraphRoles(g Graph) []string { return nil }
 
 // AstToGraph converts eaglec AST JSON (from `eaglec parse`) into the
 // frontend's graph, plus the mission's own modules and imports and warnings
@@ -775,6 +835,9 @@ func fromValue(ix *TypeIndex, goType string, value map[string]any, data map[stri
 		return fromAttrs(ix, owner, d["Attrs"], data, used)
 	}
 	if goType != "" && ix.Kind(goType) == "feature" {
+		return strings.TrimPrefix(Bare(ident), Bare(goType)+"_")
+	}
+	if goType != "" && ix.Kind(goType) == "engine" {
 		return strings.TrimPrefix(Bare(ident), Bare(goType)+"_")
 	}
 	return Bare(ident)

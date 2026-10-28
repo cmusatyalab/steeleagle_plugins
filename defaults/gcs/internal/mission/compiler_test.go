@@ -9,6 +9,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cmusatyalab/steeleagle/sdk/buildtools"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
 )
 
 func TestResolveConfigDefaults(t *testing.T) {
@@ -200,5 +204,75 @@ func TestSDKCompilerRealBuild(t *testing.T) {
 	req.Plugin = plugin
 	if _, err := c.Build(ctx, req); err != nil {
 		t.Fatalf("Build with plugin: %v", err)
+	}
+
+	t.Run("flow", func(t *testing.T) {
+		// A Track node on the flow's local yolo engine, resolved for a
+		// vehicle on 100.64.0.2 with a remote engine on the orchestrator.
+		tpl := flows.Template{
+			Producers: []flows.TemplateProducer{{Name: "100.64.0.2.front"}},
+			Engines: []flows.TemplateEngine{
+				{Name: "100.64.0.2.yolo"},
+				{Name: "100.64.0.1.gcs"},
+			},
+			Edges: []flows.TemplateEdge{
+				{From: "100.64.0.2.front", To: "100.64.0.2.yolo", Timeout: "2s"},
+				{From: "100.64.0.2.yolo", To: "100.64.0.1.gcs", Timeout: "1s"},
+			},
+		}
+		cat := flows.Catalog{Daemons: []flows.Daemon{{
+			IP: "100.64.0.2",
+			Engines: []flows.Engine{{
+				Name: "100.64.0.2.yolo", Bare: "yolo",
+				Result: "steeleagle_protocol/v1/messages/result/DetectionResult",
+			}},
+		}}}
+		target := fleet.Vehicle{Name: "100.64.0.2.alpha", DaemonIP: "100.64.0.2"}
+		res, err := tpl.Resolve(cat, "100.64.0.1", target, []string{"front"}, "flowtest", nil)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		g := jsonGraph(t, `{
+  "nodes": [
+    {"instance_id": "trk", "type_name": "Track",
+     "params": {"Camera": "front", "Engine": "100.64.0.2.yolo", "Class": "person"}},
+    {"instance_id": "land", "type_name": "Land", "params": {}}
+  ],
+  "events": [{"instance_id": "done", "type_name": "Battery", "params": {"Comparator": "LessOrEqual", "Threshold": 15}}],
+  "edges": [{"source": "trk", "event_id": "done", "target": "land"}],
+  "start_id": "trk"
+}`)
+		ast, err := GraphToAst(g, NewTypeIndex(reg), cfg.Header(), res.Engines)
+		if err != nil {
+			t.Fatalf("GraphToAst: %v", err)
+		}
+		plugin, err := os.ReadFile("testdata/driver.plugin.toml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		bin, err := c.Build(ctx, BuildRequest{Ast: ast, Arch: "amd64", Plugin: plugin, Flow: res.Flow, Manifest: res.Manifest})
+		if err != nil {
+			t.Fatalf("Build with flow: %v", err)
+		}
+		if got, err := ElfArch(bin); err != nil || got != "amd64" {
+			t.Errorf("ElfArch = %q, %v; want amd64", got, err)
+		}
+	})
+}
+
+func TestSDKCompilerPassesFlowAndManifest(t *testing.T) {
+	apply := func(req BuildRequest) buildtools.Options {
+		var o buildtools.Options
+		for _, opt := range buildOptions(req, "out.bin") {
+			opt(&o)
+		}
+		return o
+	}
+	o := apply(BuildRequest{Flow: []byte("FLOW"), Manifest: []byte("MANIFEST"), Plugin: []byte("PLUGIN"), GeoJSON: []byte("GEO")})
+	if string(o.FlowToml) != "FLOW" || string(o.ManifestToml) != "MANIFEST" || string(o.PluginToml) != "PLUGIN" || string(o.GeoJson) != "GEO" || o.OutputFile != "out.bin" {
+		t.Fatalf("options %+v", o)
+	}
+	if o := apply(BuildRequest{}); o.FlowToml != nil || o.ManifestToml != nil || o.PluginToml != nil || o.GeoJson != nil {
+		t.Fatalf("options without inputs %+v", o)
 	}
 }

@@ -4,7 +4,7 @@ import { CALLBACK_COLOR } from './flowView.js';
 
 const LOCATION_COLORS = { local: '#a3e8a0', remote: '#7ecfff' };
 
-// An engine service on some daemon. The bottom handle starts callbacks; it
+// An engine service on the vehicle's daemon or the orchestrator. The bottom handle starts callbacks; it
 // stays mounted (invisible and unconnectable) when the engine declares no
 // events, so an existing callback edge never loses its anchor.
 function EngineNode({ data, selected }) {
@@ -15,10 +15,10 @@ function EngineNode({ data, selected }) {
         <NodeShell kind="Engine" label={node.engine} data={data} selected={selected}>
             <Handle type="target" id="in" position={Position.Left} />
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--node-chip-text)', marginTop: 2 }}>
-                <span>{node.daemon.name}</span>
-                {location && (
-                    <span style={{ fontSize: 8, padding: '1px 4px', borderRadius: 3, background: LOCATION_COLORS[location], color: '#000' }}>
-                        {location}
+                <span>{data.daemonName}</span>
+                {(location || location === null) && (
+                    <span style={{ fontSize: 8, padding: '1px 4px', borderRadius: 3, background: LOCATION_COLORS[location] ?? '#ff8888', color: '#000' }}>
+                        {location ?? 'unreachable'}
                     </span>
                 )}
                 {resolution?.category && (

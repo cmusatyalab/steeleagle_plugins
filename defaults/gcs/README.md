@@ -43,6 +43,15 @@ the WebRTC data channel) until the vehicle is put on hold, which restores the GC
 flow. The vehicle list is unaffected: it reads telemetry from the daemon,
 independently of the flow.
 
+## Flow catalog and TOML import
+
+`GET /api/flows/catalog` lists, per daemon, the vehicles with their streams and
+the engines with their input and result types (503 without a daemon).
+`POST /api/flows/from_toml` with `{"toml": "..."}` parses the TOML of a flow
+config into a flow template without a vehicle; it needs no daemon. It answers 422
+with a `detail` for TOML that isn't a flow config (unknown keys, such as an old
+`[gabriel.flow]` export) or has no producers or engines.
+
 ## Missions
 
 The GCS compiles missions (`/api/schema`, `compile`, `render_dsl`, `parse_dsl`,
@@ -68,8 +77,30 @@ Compiling runs `go build`, so the first build needs network access (`GOPROXY`)
 or a warm Go module cache. If the config is invalid, or the compiler can't
 start, the server still runs and the compiler routes answer 503 with the reason.
 
-The end-to-end compiler test is opt-in: `GCS_COMPILER_E2E=1 pixi run go test
-./internal/mission/` builds a real mission, which needs the same access.
+### Flows in missions
+
+A flow designed on the Flow Builder tab ships with Deploy: the Plan page sends it
+with the mission, and Deploy resolves it for each vehicle and builds it into the
+mission as the mission's flow and manifest (vehicles that build the same share a
+binary). A flow engine is either local or remote:
+
+- a local engine runs on the vehicle's own daemon. It is written with its bare
+  name (`yolo`), and Deploy qualifies it with the vehicle's daemon IP
+  (`100.64.0.2.yolo`), so a vehicle whose daemon doesn't run it fails with
+  `flow needs local engine yolo, which daemon 100.64.0.2 doesn't run`;
+- a remote engine runs on the orchestrator (the GCS's daemon). It is written
+  with its full service name (`100.64.0.1.h264_encoder`) and is the same for
+  every vehicle.
+
+A mission action can name a flow engine, such as the `Engine` of `Track`, by the
+template's name for it. The manifest declares each engine's result type. The SDK
+only generates typed engine fields for detection, classification, guidance,
+position and generic results, so an engine with any other result type is
+declared with the Generic stand-in (`messages/result/GenericResult`).
+
+The end-to-end tests are opt-in: `GCS_COMPILER_E2E=1 pixi run go test
+./internal/mission/ ./cmd/gcsmock/` builds real missions (including one with a
+flow, and a mock Deploy that sends it), which needs the same access.
 
 ## Pixi tasks
 
@@ -93,6 +124,9 @@ prebuilt native library (the release `go.mod` requires) into the Pixi environmen
 - hosts a real Uriel server with each vehicle's `front` camera and `telemetry`
   producers, and mock `h264_encoder` engines that answer camera frames with a
   generated H.264 test clip (ffmpeg, cached in `bin/mockclips/`);
+- lists a `yolo` detection engine (RawFrame in, DetectionResult out) on every
+  vehicle daemon, so the flow catalog has an engine to offer. Nothing runs it:
+  it is only listed. Every listed engine carries a real engine plugin config;
 - runs the real `bin/gcs` as its child, as the daemon runs an engine plugin.
 
 Run it in `gcs/` and open <http://localhost:8002>:
@@ -117,6 +151,7 @@ Flags (`./bin/gcsmock -h`; `pixi run mock` passes `-gcs` and `-web`):
 | `-gcs-ip` | `100.64.0.1` | the IP of the GCS's daemon |
 | `-vehicles` | `100.64.0.1.alpha,100.64.0.1.bravo,100.64.0.2.charlie` | vehicle names: each a daemon IP, a dot and a name |
 | `-no-encoder-daemons` | none | daemon IPs without an `h264_encoder` |
+| `-no-yolo-daemons` | none | daemon IPs without a `yolo` engine |
 | `-daemon-arch` | `amd64` for every daemon | `ip=arch[,ip=arch]` (`amd64` or `arm64`): the architecture a daemon reports. Only daemons other than `-gcs-ip` are reported as remotes, as with real eagled. E.g. `-daemon-arch 100.64.0.2=arm64` tests "no binary for arm64" |
 
 Uriel names are shared by every process on the machine, so two mocks (or a mock
@@ -133,6 +168,9 @@ Scenarios to try:
   stops and the video panel shows the no-video label.
 - **Hold brings it back.** Press Esc (hold). The mission stops, the GCS pushes
   the vehicle's GCS flow again, and the video returns.
+- **Missing engine.** `./bin/gcsmock -no-yolo-daemons 100.64.0.2` leaves charlie's
+  daemon without `yolo`, to see a flow that needs a local engine its daemon
+  lacks.
 - **No encoder.** `./bin/gcsmock -no-encoder-daemons 100.64.0.2` leaves charlie's
   daemon without an encoder, so charlie gets a telemetry-only flow and the UI
   shows the no-video reason.

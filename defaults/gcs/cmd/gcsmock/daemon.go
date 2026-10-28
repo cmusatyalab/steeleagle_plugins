@@ -49,6 +49,28 @@ type Topology struct {
 	// Archs maps a daemon IP to its architecture, "amd64" or "arm64". An IP
 	// that isn't listed is "amd64".
 	Archs map[string]string
+	// YoloDaemons are the IPs of the vehicle daemons that list a mock "yolo"
+	// engine. Nothing runs it in Uriel; it's only listed.
+	YoloDaemons map[string]bool
+}
+
+const (
+	rawFrameID     = "steeleagle_protocol/v1/messages/frame/RawFrame"
+	encodedFrameID = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
+	telemetryID    = "steeleagle_protocol/v1/messages/telemetry/Telemetry"
+	detectionID    = "steeleagle_protocol/v1/messages/result/DetectionResult"
+
+	// yoloService is the bare name of the mock detection engine.
+	yoloService = "yolo"
+)
+
+// engineConfig is the plugin config of a mock engine.
+func engineConfig(name, kind string, inputs []string, result string) ([]byte, error) {
+	pc := config.PluginConfig{
+		Plugin: config.PluginRoot{Name: name, Type: "engine"},
+		Engine: &config.EngineCap{Type: kind, Inputs: inputs, Result: result},
+	}
+	return pc.ToBytes()
 }
 
 // Daemon is the mock daemon: it lists the topology and serves the vehicle
@@ -120,7 +142,7 @@ func driverConfig() ([]byte, error) {
 		Driver: &config.DriverCap{
 			Type: "copter",
 			Cameras: []config.DriverCamera{{
-				Name: "front", Type: "rgb", HRes: 1280, VRes: 720, HFov: 90, VFov: 60,
+				Name: "front", Type: "steeleagle_protocol/v1/messages/frame/RawFrame", HRes: 1280, VRes: 720, HFov: 90, VFov: 60,
 				Fps: 30, Primary: true, Encode: true,
 			}},
 			Supported: config.DriverSupported{Services: []string{
@@ -141,6 +163,18 @@ func (d *Daemon) ListServices(
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
+	encoderConf, err := engineConfig(fleet.EncoderService, "filter", []string{rawFrameID}, "")
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	gcsConf, err := engineConfig("gcs", "generic", []string{encodedFrameID, telemetryID}, "")
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	yoloConf, err := engineConfig(yoloService, "detection", []string{rawFrameID}, detectionID)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
 	var out []*daemonpb.Service
 	for _, n := range d.top.Vehicles {
 		out = append(out, daemonpb.Service_builder{
@@ -155,13 +189,20 @@ func (d *Daemon) ListServices(
 			seen[ip] = true
 			out = append(out, daemonpb.Service_builder{
 				Name: ip + "." + fleet.EncoderService, Category: daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE,
-				Plugin: fleet.EncoderService, Running: true, Auth: "admin",
+				Plugin: fleet.EncoderService, Config: encoderConf, Running: true, Auth: "admin",
+			}.Build())
+		}
+		if d.top.YoloDaemons[ip] && !seen[ip+"/yolo"] {
+			seen[ip+"/yolo"] = true
+			out = append(out, daemonpb.Service_builder{
+				Name: ip + "." + yoloService, Category: daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE,
+				Plugin: yoloService, Config: yoloConf, Running: true, Auth: "admin",
 			}.Build())
 		}
 	}
 	out = append(out, daemonpb.Service_builder{
 		Name: d.top.GCSIP + ".gcs", Category: daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE,
-		Plugin: "gcs", Running: true, Auth: "admin",
+		Plugin: "gcs", Config: gcsConf, Running: true, Auth: "admin",
 	}.Build())
 	// Like eagled, list the other daemons that have vehicles, but not the
 	// GCS's own

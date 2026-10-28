@@ -36,7 +36,7 @@ func TestBareAndQualifier(t *testing.T) {
 
 func TestKinds(t *testing.T) {
 	ix := exIndex(t)
-	for typ, want := range map[string]string{
+	for goType, want := range map[string]string{
 		"params.Polygon":     "feature",
 		"enums.AltitudeMode": "enum",
 		"actions.PatrolMode": "enum",
@@ -48,8 +48,8 @@ func TestKinds(t *testing.T) {
 		"string":             "string",
 		"chan int":           "unknown",
 	} {
-		if got := ix.Kind(typ); got != want {
-			t.Errorf("Kind(%q) = %q, want %q", typ, got, want)
+		if got := ix.Kind(goType); got != want {
+			t.Errorf("Kind(%q) = %q, want %q", goType, got, want)
 		}
 	}
 }
@@ -166,7 +166,7 @@ func TestCollidingBareNamesFallBackToQualifiedKeys(t *testing.T) {
 	}
 }
 
-func TestUnparseableDefaultsAreKeptAsStrings(t *testing.T) {
+func TestUnparsableDefaultsAreKeptAsStrings(t *testing.T) {
 	for _, value := range []string{"abc", ""} {
 		ix := NewTypeIndex(jsonMap(t, `{"actions": {"a.X": {"type": "a.X", "fields": [],
   "optFields": [{"name": "N", "type": "float32", "value": "`+value+`"}]}}}`))
@@ -184,7 +184,7 @@ func TestUnparseableDefaultsAreKeptAsStrings(t *testing.T) {
 
 func graphToAst(t *testing.T, g Graph) map[string]any {
 	t.Helper()
-	ast, err := GraphToAst(g, exIndex(t), exHeader(t))
+	ast, err := GraphToAst(g, exIndex(t), exHeader(t), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +298,7 @@ func TestArraysBecomeArrayValues(t *testing.T) {
 	ix := NewTypeIndex(jsonMap(t, `{"actions": {"a.Fly": {"type": "a.Fly", "fields": [{"name": "Speeds", "type": "[]float32"}]}}}`))
 	g := Graph{Nodes: []GraphNode{{InstanceID: "f", TypeName: "Fly", Params: jsonMap(t, `{"Speeds": [1, 2.5]}`)}}}
 
-	ast, err := GraphToAst(g, ix, exHeader(t))
+	ast, err := GraphToAst(g, ix, exHeader(t), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestObjectForANonObjectFieldIsRejected(t *testing.T) {
 	g.Nodes = []GraphNode{{InstanceID: "p", TypeName: "Patrol", Params: jsonMap(t, `{"Altitude": {"x": 1}}`)}}
 	g.Edges = nil
 
-	_, err := GraphToAst(g, exIndex(t), exHeader(t))
+	_, err := GraphToAst(g, exIndex(t), exHeader(t), nil)
 
 	if err == nil || !strings.Contains(err.Error(), "float32") {
 		t.Fatalf("err = %v", err)
@@ -586,4 +586,62 @@ func TestUpgradeLegacyDSLLeavesCurrentDSLAlone(t *testing.T) {
 			t.Errorf("warnings = %v for %q", warnings, dsl)
 		}
 	}
+}
+
+func engineIndex(t *testing.T) *TypeIndex {
+	t.Helper()
+	return NewTypeIndex(jsonMap(t, `{"actions": {"actions.Track": {"type": "actions.Track", "fields": [{"name": "Engine", "type": "params.DetectionEngine"}]}}}`))
+}
+
+func engineGraph(t *testing.T, engine string) Graph {
+	t.Helper()
+	return Graph{Nodes: []GraphNode{{InstanceID: "trk", TypeName: "Track", Params: jsonMap(t, `{"Engine": "`+engine+`"}`)}}}
+}
+
+func engineIdent(t *testing.T, ast map[string]any) any {
+	t.Helper()
+	attrs := decls(ast, "Actions")[0].(map[string]any)["Attrs"].([]any)
+	return attrs[0].(map[string]any)["Value"].(map[string]any)["Ident"]
+}
+
+func TestSchemaEngineField(t *testing.T) {
+	schema := RegistryToSchema(engineIndex(t))
+
+	f := schema["actions"].(map[string]any)["Track"].(map[string]any)["fields"].([]any)[0].(map[string]any)
+	eq(t, f["type"], "string")
+	eq(t, f["engine_type"], "DetectionEngine")
+}
+
+func TestGraphToAstEngineVerbatim(t *testing.T) {
+	ast, err := GraphToAst(engineGraph(t, "yolo"), engineIndex(t), exHeader(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eq(t, engineIdent(t, ast), "DetectionEngine_yolo")
+}
+
+func TestGraphToAstEngineResolved(t *testing.T) {
+	ast, err := GraphToAst(engineGraph(t, "yolo"), engineIndex(t), exHeader(t), map[string]string{"yolo": "100.64.0.2.yolo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eq(t, engineIdent(t, ast), "DetectionEngine_100_64_0_2_yolo")
+}
+
+func TestGraphToAstEngineUnknown(t *testing.T) {
+	_, err := GraphToAst(engineGraph(t, "yolo"), engineIndex(t), exHeader(t), map[string]string{})
+
+	if err == nil || err.Error() != "mission uses engine yolo in trk.Engine, but the flow has no such engine" {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAstToGraphEngine(t *testing.T) {
+	ast := jsonMap(t, `{"Actions": {"Decls": [{"Type": "actions.Track", "Name": "trk", "Attrs": [{"Key": "Engine", "Value": {"Ident": "DetectionEngine_yolo"}}]}]}}`)
+
+	g := AstToGraph(ast, engineIndex(t))
+
+	eq(t, g["nodes"].([]any)[0].(map[string]any)["params"], map[string]any{"Engine": "yolo"})
 }

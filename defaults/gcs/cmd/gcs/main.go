@@ -25,9 +25,11 @@ import (
 	"time"
 
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
+	"github.com/cmusatyalab/steeleagle/config"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/control"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/feed"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/rtc"
 	"github.com/rs/zerolog"
@@ -149,9 +151,9 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	controller := control.New(grpcConn(conn), control.DefaultTimeout, log)
 	vehicles := noDaemonHandler()
 	if conn != nil {
-		flows := fleet.NewFlows(conn, fleet.FlowSpec{Engine: engine}, log)
-		controller.OnHold(flows.PushAfterHold)
-		vehicles = http.HandlerFunc(fleet.NewVehicles(conn, flows, log).ServeVehicles)
+		fleetFlows := fleet.NewFlows(conn, fleet.FlowSpec{Engine: engine}, log)
+		controller.OnHold(fleetFlows.PushAfterHold)
+		vehicles = http.HandlerFunc(fleet.NewVehicles(conn, fleetFlows, log).ServeVehicles)
 	}
 
 	cfg, err := mission.ResolveConfig(a.Compiler)
@@ -162,15 +164,26 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	} else {
 		compiler = mission.NewSDKCompiler(cfg, 2)
 	}
-	missions := missionRoutes{svc: mission.NewService(compiler, cfg, log), upload: noDaemonHandler(), deploy: noDaemonHandler()}
+	gcsIP, _ := fleet.SplitName(engine)
+	var gcsHostname string
 	if conn != nil {
-		list := func(ctx context.Context) ([]fleet.Vehicle, error) {
-			snap, err := fleet.List(ctx, daemonpb.NewDaemonServiceClient(conn))
-			return snap.Vehicles, err
+		gcsHostname = daemonHostname(context.Background(), daemonpb.NewDaemonServiceClient(conn), log)
+	}
+	var list mission.Lister
+	var catalog mission.CatalogFunc
+	if conn != nil {
+		list = daemonLister(daemonpb.NewDaemonServiceClient(conn), gcsIP, gcsHostname)
+		catalog = func(ctx context.Context) (flows.Catalog, error) {
+			_, cat, err := list(ctx)
+			return cat, err
 		}
+	}
+	missions := missionRoutes{svc: mission.NewService(compiler, cfg, gcsIP, catalog, log), upload: noDaemonHandler(), deploy: noDaemonHandler(), catalog: noDaemonHandler()}
+	if conn != nil {
 		uploads := mission.NewUploads(list, mission.NewSender(conn, 1<<20, 30*time.Second), missions.svc, log)
 		missions.upload = http.HandlerFunc(uploads.ServeUpload)
 		missions.deploy = http.HandlerFunc(uploads.ServeDeploy)
+		missions.catalog = http.HandlerFunc(flows.NewCatalogHandler(daemonpb.NewDaemonServiceClient(conn), gcsIP, gcsHostname).ServeCatalog)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -208,6 +221,58 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	return err
 }
 
+// listedClient is a daemon client whose ListServices answers with a listing
+// already made, so fleet.List can read it without listing again.
+type listedClient struct {
+	daemonpb.DaemonServiceClient
+	resp *daemonpb.ListServicesResponse
+}
+
+func (c listedClient) ListServices(context.Context, *daemonpb.ListServicesRequest, ...grpc.CallOption) (*daemonpb.ListServicesResponse, error) {
+	return c.resp, nil
+}
+
+// daemonLister lists the running vehicles and the flow catalog from one
+// ListServices call. gcsIP and gcsHostname are the IP and hostname of the
+// GCS's own daemon.
+func daemonLister(c daemonpb.DaemonServiceClient, gcsIP, gcsHostname string) mission.Lister {
+	return func(ctx context.Context) ([]fleet.Vehicle, flows.Catalog, error) {
+		resp, err := c.ListServices(ctx, &daemonpb.ListServicesRequest{})
+		if err != nil {
+			return nil, flows.Catalog{}, err
+		}
+		snap, err := fleet.List(ctx, listedClient{c, resp})
+		if err != nil {
+			return nil, flows.Catalog{}, err
+		}
+		return snap.Vehicles, flows.BuildCatalog(resp, gcsIP, gcsHostname), nil
+	}
+}
+
+// defaultHostname is the hostname eagled uses if its config sets none.
+const defaultHostname = "eagled"
+
+// daemonHostname returns the hostname the GCS's own daemon goes by, from its
+// config, which is how other daemons and flows name it. If the config can't be
+// read it warns and falls back to the machine's hostname.
+func daemonHostname(ctx context.Context, c daemonpb.DaemonServiceClient, log zerolog.Logger) string {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	resp, err := c.GetConfiguration(ctx, &daemonpb.GetConfigurationRequest{})
+	if err == nil {
+		var cfg *config.DaemonConfig
+		if cfg, err = config.ParseDaemonConfigFromBytes(resp.GetConfigToml()); err == nil {
+			if cfg.Daemon.Hostname == "" {
+				return defaultHostname
+			}
+			return cfg.Daemon.Hostname
+		}
+	}
+	host, _ := os.Hostname()
+	log.Warn().Err(err).Str("hostname", host).Msg("could not read the daemon's hostname; using the machine's")
+	return host
+}
+
 // grpcConn returns conn as a connection interface, which is nil if conn is.
 func grpcConn(conn *grpc.ClientConn) grpc.ClientConnInterface {
 	if conn == nil {
@@ -240,6 +305,8 @@ func (c unavailableCompiler) Build(context.Context, mission.BuildRequest) ([]byt
 type missionRoutes struct {
 	svc            *mission.Service
 	upload, deploy http.Handler
+	// catalog serves the flow catalog.
+	catalog http.Handler
 }
 
 // newHandler serves the API, and the web UI from the directory web. vehicles
@@ -260,6 +327,8 @@ func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Hand
 	mux.HandleFunc("POST /api/build", missions.svc.ServeBuild)
 	mux.Handle("POST /api/upload", missions.upload)
 	mux.Handle("POST /api/deploy", missions.deploy)
+	mux.Handle("GET /api/flows/catalog", missions.catalog)
+	mux.HandleFunc("POST /api/flows/from_toml", flows.ServeFromTOML)
 	mux.HandleFunc("/api/", http.NotFound)
 	if _, err := os.Stat(filepath.Join(web, "index.html")); err != nil {
 		log.Warn().Err(err).Str("web", web).Msg("no web UI to serve; serving only the API")

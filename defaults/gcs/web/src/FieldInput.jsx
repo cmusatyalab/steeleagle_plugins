@@ -67,7 +67,28 @@ function unsetDisplay(field, zeroValue) {
     return field.required ? null : (field.default ?? zeroValue);
 }
 
-function FieldInput({ field, value, onChange, namedAreas = [], enums = {} }) {
+// engines(engineType) -> the flow's matching [{label, value}] (see flowEngines.js).
+const noEngines = () => [];
+
+function FieldInput({ field, value, onChange, namedAreas = [], engines = noEngines, enums = {} }) {
+    if (field.engine_type) {
+        // The value is an engine of the flow on the Flow Builder tab, stored
+        // as its template name ({host}.{name}), filtered to engines whose
+        // result matches the field's engine type.
+        const choices = engines(field.engine_type);
+        return (
+            <Dropdown
+                value={value ?? null}
+                options={choices.length
+                    ? choices
+                    : [{ label: '(add a matching engine on the Flow Builder tab)', value: null }]
+                }
+                onChange={e => onChange(e.value)}
+                className="w-full"
+                placeholder="Select engine"
+            />
+        );
+    }
     if (field.map_feature) {
         // Valid values aren't a fixed list (unlike a real enum) -- they're
         // whatever named features the user has drawn on the Map tab. The
@@ -151,6 +172,7 @@ function FieldInput({ field, value, onChange, namedAreas = [], enums = {} }) {
                                 value={nestedValue}
                                 onChange={val => onChange({ ...(value || {}), [nf.name]: val })}
                                 namedAreas={namedAreas}
+                                engines={engines}
                                 enums={enums}
                             />
                         </div>

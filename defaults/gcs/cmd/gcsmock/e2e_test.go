@@ -680,3 +680,150 @@ func TestE2EUploadNoBinaryForArch(t *testing.T) {
 		t.Errorf("charlie's upload: %+v, want failure with %q", got, "no binary for arm64")
 	}
 }
+
+func TestE2ECatalog(t *testing.T) {
+	r := startMock(t, false)
+	var cat struct {
+		Daemons []struct {
+			IP       string
+			Vehicles []struct {
+				Name    string
+				Streams []struct{ Name string }
+			}
+			Engines []struct{ Name, Bare, Result string }
+		}
+	}
+	if err := r.getJSON("/api/flows/catalog", &cat); err != nil {
+		t.Fatal(err)
+	}
+	byIP := map[string]int{}
+	for i, d := range cat.Daemons {
+		byIP[d.IP] = i
+	}
+	if len(cat.Daemons) < 2 {
+		t.Fatalf("catalog = %+v, want both daemons", cat)
+	}
+	for _, ip := range []string{r.gcsIP, r.remoteIP} {
+		i, ok := byIP[ip]
+		if !ok {
+			t.Fatalf("no daemon %s in %+v", ip, cat)
+		}
+		found := false
+		for _, e := range cat.Daemons[i].Engines {
+			if e.Bare == "yolo" {
+				found = e.Result == "steeleagle_protocol/v1/messages/result/DetectionResult"
+			}
+		}
+		if !found {
+			t.Errorf("daemon %s: no yolo with a DetectionResult in %+v", ip, cat.Daemons[i].Engines)
+		}
+	}
+	front := false
+	for _, v := range cat.Daemons[byIP[r.remoteIP]].Vehicles {
+		for _, s := range v.Streams {
+			front = front || (v.Name == r.charlie && s.Name == "front")
+		}
+	}
+	if !front {
+		t.Errorf("charlie has no front stream in %+v", cat.Daemons[byIP[r.remoteIP]].Vehicles)
+	}
+}
+
+// TestE2EDeployFlow deploys a Track mission with a flow designed for alpha,
+// with its camera, the yolo of its daemon, and an encoder on the GCS's, to
+// alpha and to charlie, whose daemon isn't alpha's: the camera re-homes to
+// charlie's own and the engines, on the orchestrator, are remote for it. It builds with the real
+// compiler, so it needs the network and go build.
+func TestE2EDeployFlow(t *testing.T) {
+	if os.Getenv("GCS_COMPILER_E2E") != "1" {
+		t.Skip("set GCS_COMPILER_E2E=1 (needs network and go build)")
+	}
+	r := startMock(t, false, "-no-yolo-daemons", "{remote}")
+	var cat struct {
+		Daemons []struct {
+			IP       string
+			Hostname string
+		}
+	}
+	if err := r.getJSON("/api/flows/catalog", &cat); err != nil {
+		t.Fatal(err)
+	}
+	// The alpha and GCS daemon is one, named in the flow by its hostname
+	// as the Flow Builder does, or by its IP if it has none.
+	host := r.gcsIP
+	for _, d := range cat.Daemons {
+		if d.IP == r.gcsIP && d.Hostname != "" {
+			host = d.Hostname
+		}
+	}
+	req := map[string]any{
+		"nodes": []map[string]any{
+			{"instance_id": "trk", "type_name": "Track", "params": map[string]any{"Camera": "front", "Engine": host + ".yolo", "Class": "person"}},
+			{"instance_id": "land", "type_name": "Land", "params": map[string]any{}},
+		},
+		"events": []map[string]any{
+			{"instance_id": "low", "type_name": "Battery", "params": map[string]any{"Comparator": "LessOrEqual", "Threshold": 15}},
+		},
+		"edges":    []map[string]any{{"source": "trk", "event_id": "low", "target": "land"}},
+		"start_id": "trk",
+		"geojson":  "",
+		"name":     "flowtest",
+		"vehicles": []string{r.alpha, r.charlie},
+		"flow": map[string]any{
+			"vehicle":   r.alpha,
+			"producers": []map[string]any{{"name": host + ".front"}},
+			"engines": []map[string]any{
+				{"name": host + ".yolo"},
+				{"name": host + ".h264_encoder"},
+			},
+			"edges": []map[string]any{
+				{"from": host + ".front", "to": host + ".yolo", "timeout": "2s"},
+				{"from": host + ".yolo", "to": host + ".h264_encoder", "timeout": "1s"},
+			},
+		},
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(r.url+"/api/deploy", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /api/deploy = %d %s", resp.StatusCode, data)
+	}
+	results := map[string]result{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev struct {
+			Type   string `json:"type"`
+			Detail string `json:"detail"`
+			result
+		}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("deploy event %q: %v", line, err)
+		}
+		switch ev.Type {
+		case "result":
+			results[ev.Vehicle] = ev.result
+		case "error":
+			t.Fatalf("deploy failed: %s", ev.Detail)
+		}
+	}
+	if got := results[r.alpha]; !got.Success {
+		t.Errorf("alpha's deploy: %+v, want success", got)
+	}
+	// The producer re-homes to charlie's own front camera, and the yolo and
+	// encoder are on the orchestrator, so they are remote for charlie.
+	if got := results[r.charlie]; !got.Success {
+		t.Errorf("charlie's deploy: %+v, want success", got)
+	}
+}

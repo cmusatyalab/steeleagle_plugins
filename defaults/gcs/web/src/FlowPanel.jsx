@@ -3,7 +3,7 @@ import { Sidebar } from 'primereact/sidebar';
 import { Dropdown } from 'primereact/dropdown';
 import { InputNumber } from 'primereact/inputnumber';
 import { InputText } from 'primereact/inputtext';
-import { resolveNode, shortType } from './flowCatalog.js';
+import { daemonLabel, resolveHost, resolveNode, shortType, splitTemplateName } from './flowCatalog.js';
 import { forwardedTypes, nodeById, nodeLabel } from './flowModel.js';
 
 function Row({ label, children }) {
@@ -65,12 +65,14 @@ function FlowPanel({ flow, catalog, selection, onUpdateNode, onUpdateEdge, onDel
         );
     } else if (node?.kind === 'engine') {
         const r = resolution(node);
+        const parts = splitTemplateName(node.engine);
+        const daemon = catalog && parts ? resolveHost(catalog, parts.host).daemon : null;
         header = 'Engine';
         body = (
             <>
                 <Row label="Name"><b>{node.engine}</b></Row>
-                <Row label="Daemon">{node.daemon.name} <span className="text-xs text-color-secondary">({node.daemon.address})</span></Row>
-                <Row label="Location">{r?.location ?? '—'}</Row>
+                <Row label="Daemon">{daemon ? daemonLabel(daemon) : (parts?.host ?? '—')}{daemon && <> <span className="text-xs text-color-secondary">({daemon.ip})</span></>}</Row>
+                <Row label="Location">{r ? (r.location ?? 'unreachable') : '—'}</Row>
                 <Row label="Category">{r?.category ?? '—'}</Row>
                 <ProblemRow problem={r?.problem} />
                 <Row label="Accepts">{typeList(r?.accepts)}</Row>
