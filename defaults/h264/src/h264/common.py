@@ -1,4 +1,4 @@
-"""Shared GStreamer plumbing for h264-encode / h264-decode: a pipeline an
+"""Shared GStreamer plumbing for the h264 encoder and decoder: a pipeline an
 engine pushes one buffer into and pulls what it became from, matched by
 timestamp. Mirrors gabriel-h264's Rust lib.rs.
 """
@@ -13,9 +13,13 @@ from gi.repository import Gst, GstApp, GstVideo  # noqa: E402
 
 Gst.init(None)
 
-FRAME_W = 1280
-FRAME_H = 720
-I420_FRAME_SIZE = FRAME_W * FRAME_H * 3 // 2
+# RawFrame pixels are RGB, one byte per channel.
+RGB_CHANNELS = 3
+# Room in a frame for its fields besides its pixels: its ids, timestamp and
+# pose.
+FRAME_HEADROOM = 16 << 10
+# The default largest output of either engine: a 1080p RGB RawFrame.
+MAX_FRAME_SIZE = 1920 * 1080 * RGB_CHANNELS + FRAME_HEADROOM
 
 # Where a pipeline's timestamps start. An encoder based on GstVideoEncoder
 # shifts every timestamp by 1000 hours when a decoding timestamp would
@@ -23,6 +27,28 @@ I420_FRAME_SIZE = FRAME_W * FRAME_H * 3 // 2
 # are never shifted, so outputs keep their inputs' stamps.
 PTS_BASE = 1000 * 60 * 60 * Gst.SECOND
 IFRAME_TRIGGER_SIGNAL = "trigger-iframe"
+
+
+def _rgb_stride(width):
+    """GStreamer pads each row of an RGB frame to a multiple of 4 bytes."""
+    return (width * RGB_CHANNELS + 3) & ~3
+
+
+def pad_rows(data, width, height):
+    """Tightly packed RGB pixels as GStreamer lays them out."""
+    row, stride = width * RGB_CHANNELS, _rgb_stride(width)
+    if row == stride:
+        return data
+    pad = bytes(stride - row)
+    return b"".join(data[y * row : (y + 1) * row] + pad for y in range(height))
+
+
+def unpad_rows(data, width, height):
+    """RGB pixels as GStreamer lays them out, tightly packed."""
+    row, stride = width * RGB_CHANNELS, _rgb_stride(width)
+    if row == stride:
+        return data[: row * height]
+    return b"".join(data[y * stride : y * stride + row] for y in range(height))
 
 
 def _bus_error(pipeline):

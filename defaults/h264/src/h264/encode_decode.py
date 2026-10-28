@@ -1,37 +1,52 @@
-"""Uriel engine: encodes the raw YUV420 frames patchcore-score forwards
-(anomalous frames only) with H.264, and emits each as an EncodedVideoFrame
-for h264-decode on the remote side.
+"""Uriel engines that carry a vehicle's camera frames across the network as
+H.264: the encoder replaces each RawFrame a driver publishes with an
+EncodedFrame (CODEC_H264), and the decoder, on the remote side, replaces each
+EncodedFrame with the RawFrame it decodes to.
 
 Frames reach the decoder only if Uriel carries them there: the crossing to
 the remote server may skip a frame for a newer one, or time it out. Each
-P-frame needs the frames before it, so this engine subscribes to
-h264-decode's events and forces a keyframe whenever a frame it encoded since
-its last keyframe did not reach the decoder cleanly.
+P-frame needs the frames before it, so the encoder subscribes to the remote
+decoder's events and forces a keyframe whenever a frame it encoded since its
+last keyframe did not reach the decoder cleanly.
+
+Each producer (camera) gets an H.264 stream of its own. The encoder numbers
+the frames of a stream in EncodedFrame.id, so the decoder can tell when one
+was lost.
 """
-import argparse
+import logging
 import time
 
 import uriel
+from google.protobuf.message import DecodeError
 
-import h264_pb2
-from common import MAX_FRAME_SIZE
-from h264_common import FRAME_H, FRAME_W, I420_FRAME_SIZE, Pipeline
+import steeleagle_protocol.v1.messages.frame.frame_pb2 as frame_proto
 
-import gi
-gi.require_version("Gst", "1.0")
-from gi.repository import Gst  # noqa: E402
+from h264 import h264_pb2
+from h264.common import RGB_CHANNELS, Gst, Pipeline, pad_rows, unpad_rows
 
-H264_ENCODE_ENGINE = "h264-encode"
-H264_DECODE_ENGINE = "h264-decode"
-DEFAULT_DECODER = "avdec_h264 max-threads=1"
-DEFAULT_ENCODER = "x264enc tune=zerolatency speed-preset=ultrafast pass=quant quantizer=18 key-int-max=300"
-ENCODED_TYPE = h264_pb2.EncodedVideoFrame.DESCRIPTOR.full_name
+logger = logging.getLogger("h264")
+
+# Uriel payload types, as named in plugin configs.
+RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
+ENCODED_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
+DECODE_RESULT_TYPE = "h264/v1/DecodeResult"
+
+# Fields copied from a frame to what it is encoded or decoded to.
+_FRAME_FIELDS = ("timestamp", "gimbal_info", "position_info")
+
 
 def _result(decoded, keyframe_needed):
     r = h264_pb2.DecodeResult()
     r.decoded = decoded
     r.keyframe_needed = keyframe_needed
     return r.SerializeToString()
+
+
+def _copy_fields(src, dst):
+    for field in _FRAME_FIELDS:
+        if src.HasField(field):
+            getattr(dst, field).CopyFrom(getattr(src, field))
+
 
 class KeyframePolicy:
     """Decides when the next frame must be a keyframe: after a frame the
@@ -40,212 +55,288 @@ class KeyframePolicy:
 
     def __init__(self):
         self.needed = True
-        self._keyframe_seq = None
+        self._keyframe_id = None
 
-    def emitted(self, seq, keyframe):
+    def emitted(self, id, keyframe):
         if keyframe:
             self.needed = False
-            self._keyframe_seq = seq
+            self._keyframe_id = id
 
-    def decoder_event(self, seq, result_bytes):
+    def decoder_result(self, id, result_bytes):
         ok = False
-        if result_bytes:
-            try:
-                r = h264_pb2.DecodeResult()
-                r.ParseFromString(bytes(result_bytes))
-                ok = r.decoded and not r.keyframe_needed
-            except Exception:
-                ok = False
+        try:
+            r = h264_pb2.DecodeResult.FromString(result_bytes)
+            ok = r.decoded and not r.keyframe_needed
+        except DecodeError:
+            pass
         if not ok:
-            self._require_if_since_keyframe(seq)
+            self.lost(id)
 
-    def _require_if_since_keyframe(self, seq):
-        if self._keyframe_seq is None or seq is None or seq >= self._keyframe_seq:
+    def lost(self, id):
+        """The frame `id` did not reach the decoder cleanly, which breaks the
+        stream if it was encoded since the last keyframe."""
+        k = self._keyframe_id
+        if k is None or id.session != k.session or id.seq >= k.seq:
             self.needed = True
 
-def encode():
-    ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--encoder",
-        default=DEFAULT_ENCODER,
-        help="H.264 encoder, in gst-launch syntax. On the Tachyon: "
-        "'qtic2venc control-rate=5 b-frames=0'",
+
+class EncodeStream:
+    """The H.264 stream of one producer, at one resolution."""
+
+    def __init__(self, encoder, fps, width, height):
+        uses_iframe_action = "qtic2venc" in encoder
+        encoder_desc = encoder if " name=" in encoder else f"{encoder} name=enc"
+        # Browsers decode 4:2:0 only, which x264enc makes only from I420
+        convert = "videoconvert" if uses_iframe_action else "videoconvert ! video/x-raw,format=I420"
+        self.width = width
+        self.height = height
+        self.pipeline = Pipeline(
+            f"appsrc name=src ! {convert} ! {encoder_desc} "
+            f"! h264parse config-interval=-1 "
+            f"! video/x-h264,stream-format=byte-stream,alignment=au ! appsink name=sink",
+            f"video/x-raw,format=RGB,width={width},height={height},framerate={fps}/1",
+            uses_iframe_action=uses_iframe_action,
+        )
+        self.policy = KeyframePolicy()
+        self.next_number = 0
+        self.start = time.monotonic()
+
+
+def _decoder_event(streams, event):
+    if event.kind in (uriel.EventKind.LOST, uriel.EventKind.DISCONNECTED):
+        # Which frames the lost events were about is unknown
+        for stream in streams.values():
+            stream.policy.needed = True
+        return
+    stream = streams.get(event.id.producer)
+    if stream is None:
+        return
+    if event.kind in (uriel.EventKind.SKIPPED, uriel.EventKind.TIMED_OUT):
+        stream.policy.lost(event.id)
+    elif event.kind == uriel.EventKind.RESULT:
+        stream.policy.decoder_result(event.id, event.result)
+
+
+def _encode_frame(engine, streams, input, args):
+    started = time.perf_counter()
+    if input.payload_type != RAW_FRAME_TYPE:
+        logger.warning("discarding input %d: not a %s", input.id.seq, RAW_FRAME_TYPE)
+        engine.drop()
+        return
+
+    frame = frame_proto.RawFrame.FromString(bytes(input.data))
+    width, height = frame.h_res, frame.v_res
+    if frame.channels != RGB_CHANNELS or len(frame.data) != width * height * RGB_CHANNELS:
+        logger.warning(
+            "discarding input %d: %d bytes, not a %dx%d RGB frame", input.id.seq, len(frame.data), width, height
+        )
+        engine.drop()
+        return
+
+    producer = input.id.producer
+    stream = streams.get(producer)
+    if stream is None or (stream.width, stream.height) != (width, height):
+        if stream is not None:
+            stream.pipeline.stop()
+        logger.info("encoding %s at %dx%d", producer, width, height)
+        stream = streams[producer] = EncodeStream(args["encoder"], args["fps"], width, height)
+    pipeline, policy = stream.pipeline, stream.policy
+
+    pts_ns = int((time.monotonic() - stream.start) * 1e9)
+    if policy.needed:
+        pipeline.force_keyframe()
+    pipeline.push(pad_rows(frame.data, width, height), pts_ns)
+    sample, dropped_late = pipeline.pull(pts_ns, args["timeout_ms"])
+    if dropped_late:
+        policy.needed = True
+
+    number = stream.next_number
+    if sample is None:
+        logger.warning("frame %d of %s took over %d ms to encode; discarding it", number, producer, args["timeout_ms"])
+        policy.needed = True
+        engine.drop()
+        return
+
+    buf = sample.get_buffer()
+    keyframe = not buf.has_flags(Gst.BufferFlags.DELTA_UNIT)
+    ok, mapinfo = buf.map(Gst.MapFlags.READ)
+    try:
+        encoded_bytes = bytes(mapinfo.data)
+    finally:
+        buf.unmap(mapinfo)
+
+    out = frame_proto.EncodedFrame(
+        encoded_data=encoded_bytes,
+        id=number,
+        camera_id=frame.camera_id,
+        codec=frame_proto.CODEC_H264,
+        keyframe=keyframe,
     )
-    ap.add_argument("--fps", type=int, default=30)
-    ap.add_argument("--max-output-size", type=int, default=MAX_FRAME_SIZE)
-    ap.add_argument("--timeout-ms", type=int, default=1000)
-    ap.add_argument("--log-frames", action="store_true")
-    args = ap.parse_args()
+    _copy_fields(frame, out)
+    payload = out.SerializeToString()
+    if len(payload) > args["max_output_size"]:
+        logger.warning("frame %d of %s is %d bytes, over max_output_size; discarding it", number, producer, len(payload))
+        policy.needed = True
+        engine.drop()
+        return
 
-    uses_iframe_action = "qtic2venc" in args.encoder
-    encoder_desc = args.encoder if " name=" in args.encoder else f"{args.encoder} name=enc"
+    out_buf = engine.loan()
+    out_buf[: len(payload)] = payload
+    engine.replace(len(payload), output_type=ENCODED_FRAME_TYPE)
+    stream.next_number += 1
+    policy.emitted(input.id, keyframe)
+    if args["log_frames"]:
+        logger.info(
+            "frame %d of %s input %d keyframe=%s bytes=%d ms=%.2f",
+            number,
+            producer,
+            input.id.seq,
+            keyframe,
+            len(payload),
+            (time.perf_counter() - started) * 1e3,
+        )
 
-    pipeline = Pipeline(
-        f"appsrc name=src ! videoconvert ! {encoder_desc} "
-        f"! h264parse config-interval=-1 "
-        f"! video/x-h264,stream-format=byte-stream,alignment=au ! appsink name=sink",
-        f"video/x-raw,format=I420,width={FRAME_W},height={FRAME_H},framerate={args.fps}/1",
-        uses_iframe_action=uses_iframe_action,
-    )
 
-    policy = KeyframePolicy()
-    start = time.monotonic()
+def encode(name, args, remote_qualifier):
+    """Runs the encoder as the engine `name`. It watches the decoder named
+    by args' decoder_name on the remote daemon, qualified with
+    `remote_qualifier`; with no remote daemon, it watches none. `args` has
+    every arg of encoder.plugin.toml."""
+    streams = {}  # producer name -> EncodeStream
 
-    with uriel.Engine(H264_ENCODE_ENGINE, max_output_size=args.max_output_size) as engine:
-        engine.subscribe(H264_DECODE_ENGINE)
-        print(f"engine {H264_ENCODE_ENGINE} ready; watching {H264_DECODE_ENGINE}", flush=True)
+    with uriel.Engine(name, max_output_size=args["max_output_size"]) as engine:
+        if remote_qualifier:
+            decoder = f"{remote_qualifier}.{args['decoder_name']}"
+            engine.subscribe(decoder)
+            logger.info("engine %s ready; watching %s", name, decoder)
+        else:
+            logger.info("engine %s ready; there is no remote daemon, so no decoder to watch", name)
 
-        frame_number = 0
         try:
             while True:
                 engine.wait(0.1)
-
                 while (event := engine.poll_event()) is not None:
-                    seq = event.id.seq if getattr(event, "id", None) is not None else None
-                    policy.decoder_event(seq, getattr(event, "result", b"") or b"")
-
+                    _decoder_event(streams, event)
                 input = engine.poll()
-                if input is None:
-                    continue
-
-                started = time.perf_counter()
-                data = bytes(input.data)
-                if len(data) != I420_FRAME_SIZE:
-                    print(
-                        f"discarding input {input.id.seq}: {len(data)} bytes, "
-                        f"not a {FRAME_W}x{FRAME_H} I420 frame",
-                        flush=True,
-                    )
-                    engine.drop()
-                    continue
-
-                forced = policy.needed
-                pts_ns = int((time.monotonic() - start) * 1e9)
-                if forced:
-                    pipeline.force_keyframe()
-
-                t_push = time.perf_counter()
-                pipeline.push(data, pts_ns)
-                t_pushed = time.perf_counter()
-                sample, dropped_late = pipeline.pull(pts_ns, args.timeout_ms)
-                t_pulled = time.perf_counter()
-                print(
-                    f"  push={(t_pushed - t_push) * 1e3:.2f}ms pull={(t_pulled - t_pushed) * 1e3:.2f}ms",
-                    flush=True,
-                )
-
-                if dropped_late:
-                    policy.needed = True
-
-                number = frame_number
-                frame_number += 1
-                if sample is None:
-                    print(f"frame {number} took over {args.timeout_ms} ms to encode; discarding it", flush=True)
-                    policy.needed = True
-                    engine.drop()
-                    continue
-
-                buf = sample.get_buffer()
-                keyframe = not buf.has_flags(Gst.BufferFlags.DELTA_UNIT)
-                ok, mapinfo = buf.map(Gst.MapFlags.READ)
-                try:
-                    encoded_bytes = bytes(mapinfo.data)
-                finally:
-                    buf.unmap(mapinfo)
-
-                out = h264_pb2.EncodedVideoFrame()
-                out.frame_number = number
-                out.keyframe = keyframe
-                out.data = encoded_bytes
-                payload = out.SerializeToString()
-                if len(payload) > args.max_output_size:
-                    print(f"frame {number} is {len(payload)} bytes, over --max-output-size; discarding it", flush=True)
-                    policy.needed = True
-                    engine.drop()
-                    continue
-
-                out_buf = engine.loan()
-                out_buf[: len(payload)] = payload
-                engine.replace(len(payload), output_type=ENCODED_TYPE, result=b"")
-                policy.emitted(input.id.seq, keyframe)
-                if args.log_frames:
-                    print(
-                        f"frame {number} input {input.id.seq} keyframe={keyframe} "
-                        f"bytes={len(payload)} ms={(time.perf_counter() - started) * 1e3:.2f}",
-                        flush=True,
-                    )
+                if input is not None:
+                    _encode_frame(engine, streams, input, args)
         finally:
-            pipeline.stop()
+            for stream in streams.values():
+                stream.pipeline.stop()
 
-def decode():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--decoder", default=DEFAULT_DECODER)
-    ap.add_argument("--timeout-ms", type=int, default=1000)
-    ap.add_argument("--log-frames", action="store_true")
-    args = ap.parse_args()
 
-    pipeline = Pipeline(
-        f"appsrc name=src ! h264parse ! {args.decoder} ! videoconvert "
-        f"! video/x-raw,format=I420,width={FRAME_W},height={FRAME_H} ! appsink name=sink",
-        "video/x-h264,stream-format=byte-stream,alignment=au",
-    )
+class DecodeStream:
+    """The H.264 stream of one producer."""
+
+    def __init__(self, decoder):
+        self.pipeline = Pipeline(
+            f"appsrc name=src ! h264parse ! {decoder} ! videoconvert "
+            f"! video/x-raw,format=RGB ! appsink name=sink",
+            "video/x-h264,stream-format=byte-stream,alignment=au",
+        )
+        self.expected = None  # the frame number that must come next to decode
+        self.start = time.monotonic()
+
+
+def decode(name, args):
+    """Runs the decoder as the engine `name`. `args` has every arg of
+    decoder.plugin.toml."""
+    streams = {}  # producer name -> DecodeStream
 
     decoded_result = _result(True, False)
     dropped_result = _result(False, False)
     keyframe_needed_result = _result(False, True)
 
-    expected = None  # the frame_number that must come next to decode
-    start = time.monotonic()
+    with uriel.Engine(name, result_type=DECODE_RESULT_TYPE, max_output_size=args["max_output_size"]) as engine:
+        logger.info("engine %s ready", name)
+        try:
+            for input in engine:
+                started = time.perf_counter()
+                if input.payload_type != ENCODED_FRAME_TYPE:
+                    logger.warning("discarding input %d: not an %s", input.id.seq, ENCODED_FRAME_TYPE)
+                    engine.drop(result=dropped_result)
+                    continue
 
-    with uriel.Engine(H264_DECODE_ENGINE, max_output_size=MAX_FRAME_SIZE) as engine:
-        print(f"engine {H264_DECODE_ENGINE} ready", flush=True)
-        for input in engine:
-            started = time.perf_counter()
-            if input.payload_type != ENCODED_TYPE:
-                print(f"discarding input {input.id.seq}: not an {ENCODED_TYPE}", flush=True)
-                engine.drop(result=dropped_result)
-                continue
+                frame = frame_proto.EncodedFrame.FromString(bytes(input.data))
+                if frame.codec != frame_proto.CODEC_H264:
+                    logger.warning("discarding input %d: not H.264", input.id.seq)
+                    engine.drop(result=dropped_result)
+                    continue
+                number = frame.id
 
-            frame = h264_pb2.EncodedVideoFrame()
-            frame.ParseFromString(bytes(input.data))
-            number = frame.frame_number
+                producer = input.id.producer
+                stream = streams.get(producer)
+                if stream is None:
+                    logger.info("decoding %s", producer)
+                    stream = streams[producer] = DecodeStream(args["decoder"])
 
-            if not frame.keyframe and expected != number:
-                expected = None
-                if args.log_frames:
-                    print(f"frame {number} input {input.id.seq} follows a lost frame; waiting for a keyframe", flush=True)
-                engine.drop(result=keyframe_needed_result)
-                continue
-            # The decoder keeps this frame as a reference whether or not its
-            # output comes in time, so the next one decodes either way.
-            expected = number + 1
+                if not frame.keyframe and stream.expected != number:
+                    stream.expected = None
+                    if args["log_frames"]:
+                        logger.info(
+                            "frame %d of %s input %d follows a lost frame; waiting for a keyframe",
+                            number,
+                            producer,
+                            input.id.seq,
+                        )
+                    engine.drop(result=keyframe_needed_result)
+                    continue
+                # The decoder keeps this frame as a reference whether or not its
+                # output comes in time, so the next one decodes either way.
+                stream.expected = number + 1
 
-            pts_ns = int((time.monotonic() - start) * 1e9)
-            pipeline.push(frame.data, pts_ns)
-            sample, _dropped_late = pipeline.pull(pts_ns, args.timeout_ms)
-            if sample is None:
-                print(f"frame {number} took over {args.timeout_ms} ms to decode; discarding it", flush=True)
-                engine.drop(result=dropped_result)
-                continue
+                pts_ns = int((time.monotonic() - stream.start) * 1e9)
+                stream.pipeline.push(frame.encoded_data, pts_ns)
+                sample, _dropped_late = stream.pipeline.pull(pts_ns, args["timeout_ms"])
+                if sample is None:
+                    logger.warning(
+                        "frame %d of %s took over %d ms to decode; discarding it", number, producer, args["timeout_ms"]
+                    )
+                    engine.drop(result=dropped_result)
+                    continue
 
-            buf = sample.get_buffer()
-            ok, mapinfo = buf.map(Gst.MapFlags.READ)
-            try:
-                pixels = bytes(mapinfo.data)
-            finally:
-                buf.unmap(mapinfo)
+                caps = sample.get_caps().get_structure(0)
+                _, width = caps.get_int("width")
+                _, height = caps.get_int("height")
+                buf = sample.get_buffer()
+                ok, mapinfo = buf.map(Gst.MapFlags.READ)
+                try:
+                    pixels = unpad_rows(bytes(mapinfo.data), width, height)
+                finally:
+                    buf.unmap(mapinfo)
 
-            if len(pixels) != I420_FRAME_SIZE:
-                print(f"frame {number} decoded to {len(pixels)} bytes, not {I420_FRAME_SIZE}; discarding it", flush=True)
-                engine.drop(result=dropped_result)
-                continue
-
-            out = engine.loan()
-            out[: len(pixels)] = pixels
-            engine.replace(len(pixels), output_type="", result=decoded_result)
-            if args.log_frames:
-                print(
-                    f"frame {number} input {input.id.seq} keyframe={frame.keyframe} "
-                    f"ms={(time.perf_counter() - started) * 1e3:.2f}",
-                    flush=True,
+                out = frame_proto.RawFrame(
+                    data=pixels,
+                    h_res=width,
+                    v_res=height,
+                    channels=RGB_CHANNELS,
+                    id=number,
+                    camera_id=frame.camera_id,
                 )
+                _copy_fields(frame, out)
+                payload = out.SerializeToString()
+                if len(payload) > args["max_output_size"]:
+                    logger.warning(
+                        "frame %d of %s decoded to %d bytes, over max_output_size; discarding it",
+                        number,
+                        producer,
+                        len(payload),
+                    )
+                    engine.drop(result=dropped_result)
+                    continue
+
+                out_buf = engine.loan()
+                out_buf[: len(payload)] = payload
+                engine.replace(len(payload), output_type=RAW_FRAME_TYPE, result=decoded_result)
+                if args["log_frames"]:
+                    logger.info(
+                        "frame %d of %s input %d keyframe=%s ms=%.2f",
+                        number,
+                        producer,
+                        input.id.seq,
+                        frame.keyframe,
+                        (time.perf_counter() - started) * 1e3,
+                    )
+        finally:
+            for stream in streams.values():
+                stream.pipeline.stop()

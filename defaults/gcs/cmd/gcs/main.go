@@ -43,6 +43,15 @@ const (
 	shutdownTimeout = 5 * time.Second
 )
 
+// Defaults of the args, matching gcs.plugin.toml. The daemon passes only the
+// args set in its config, so any arg left unset is defaulted here; the others
+// default to their zero values (no ICE servers, any WebRTC port, and the
+// compiler's own defaults).
+const (
+	defaultHTTPAddr     = ":8002"
+	defaultMaxInputSize = 4 << 20
+)
+
 // args are the plugin's args.
 type args struct {
 	HTTPAddr     string   `json:"http_addr"`
@@ -56,7 +65,7 @@ type args struct {
 // parseArgs reads the plugin's args from JSON, defaulting the ones it leaves
 // out as gcs.plugin.toml does.
 func parseArgs(content string) (args, error) {
-	a := args{HTTPAddr: ":8002", MaxInputSize: 4 << 20}
+	a := args{HTTPAddr: defaultHTTPAddr, MaxInputSize: defaultMaxInputSize}
 	if content != "" {
 		if err := json.Unmarshal([]byte(content), &a); err != nil {
 			return args{}, fmt.Errorf("invalid plugin args: %w", err)

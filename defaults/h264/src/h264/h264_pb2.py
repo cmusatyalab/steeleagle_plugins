@@ -24,15 +24,13 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nh264.proto\x12\x1apatchcore_pipeline.v1.h264\"f\n\x11\x45ncodedVideoFrame\x12!\n\x0c\x66rame_number\x18\x01 \x01(\x04R\x0b\x66rameNumber\x12\x1a\n\x08keyframe\x18\x02 \x01(\x08R\x08keyframe\x12\x12\n\x04\x64\x61ta\x18\x03 \x01(\x0cR\x04\x64\x61ta\"Q\n\x0c\x44\x65\x63odeResult\x12\x18\n\x07\x64\x65\x63oded\x18\x01 \x01(\x08R\x07\x64\x65\x63oded\x12\'\n\x0fkeyframe_needed\x18\x02 \x01(\x08R\x0ekeyframeNeededb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nh264.proto\x12\x07h264.v1\"Q\n\x0c\x44\x65\x63odeResult\x12\x18\n\x07\x64\x65\x63oded\x18\x01 \x01(\x08R\x07\x64\x65\x63oded\x12\'\n\x0fkeyframe_needed\x18\x02 \x01(\x08R\x0ekeyframeNeededb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'h264_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_ENCODEDVIDEOFRAME']._serialized_start=42
-  _globals['_ENCODEDVIDEOFRAME']._serialized_end=144
-  _globals['_DECODERESULT']._serialized_start=146
-  _globals['_DECODERESULT']._serialized_end=227
+  _globals['_DECODERESULT']._serialized_start=23
+  _globals['_DECODERESULT']._serialized_end=104
 # @@protoc_insertion_point(module_scope)

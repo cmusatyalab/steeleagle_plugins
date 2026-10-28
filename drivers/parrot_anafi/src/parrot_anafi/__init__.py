@@ -54,7 +54,9 @@ def main():
     """Runs the driver with the args and listen socket the daemon gives it.
     """
     args = json.loads(os.getenv('STEELEAGLE_PLUGIN_ARGS') or '{}')
-    ip = args.get('ip', DEFAULT_IP)
+    ip = args.get('ip')
+    if ip is None:
+        ip = DEFAULT_IP
 
     listen_address = os.getenv('STEELEAGLE_LISTEN_SOCKET')
     if not listen_address:

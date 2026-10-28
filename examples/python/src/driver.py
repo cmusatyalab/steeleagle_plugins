@@ -1,13 +1,16 @@
 import json
 
+# Default args, matching driver.plugin.toml. The daemon passes only the args
+# set in its config, so any arg left unset is defaulted here.
+DEFAULT_ARGS = {
+    "message": "Hello World!",
+}
+
 def run_driver(args):
     print("Ran driver")
-    if not args:
-        print("No args provided")
-        return
+    args = json.loads(args) if args else {}
+    for name, default in DEFAULT_ARGS.items():
+        if args.get(name) is None:
+            args[name] = default
     # This should output the message argument
-    args = json.loads(args)
-    if 'message' not in args:
-        print("Args could not be parsed or don't contain message")
-        return
     print("Using message "+ args['message'])
