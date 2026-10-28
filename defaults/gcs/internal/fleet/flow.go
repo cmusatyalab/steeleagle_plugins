@@ -10,7 +10,7 @@ import (
 // vehicle's camera frames before they are sent to the GCS: the plugin
 // encoder.plugin.toml of the h264 package. Its service may have any name.
 const (
-	EncoderPlugin  = "encoder"
+	EncoderPlugin  = "encoder.plugin.toml"
 	EncoderPackage = "h264"
 )
 

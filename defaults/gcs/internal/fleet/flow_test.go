@@ -84,7 +84,7 @@ func TestBuildFlowNoVideo(t *testing.T) {
 			config.DriverCamera{Name: "rear", Encode: true}), nil, enc, "camera front cannot be encoded", false},
 		{"encoder only on gcs daemon", driverWith(config.DriverCamera{Name: "front", Encode: true}), nil,
 			map[string]string{"100.64.1.5": "100.64.1.5.encoder"},
-			"no encoder plugin of the h264 package on the vehicle's daemon 100.64.2.9", false},
+			"no encoder.plugin.toml plugin of the h264 package on the vehicle's daemon 100.64.2.9", false},
 		{"no daemon address", driverWith(config.DriverCamera{Name: "front", Encode: true}), nil,
 			map[string]string{"": "encoder"},
 			"no encoder: vehicle has no daemon address", true},
