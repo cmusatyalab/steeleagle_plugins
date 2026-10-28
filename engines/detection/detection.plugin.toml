@@ -1,0 +1,64 @@
+[plugin]
+name = "Object Detection"
+type = "engine"
+description = "Detects objects in camera frames with YOLO26 or RF-DETR, optionally only of some classes and only inside a geofence"
+
+[[args]]
+name = "model"
+type = "string"
+description = "Model file in the daemon's models directory: a .pt file is Ultralytics YOLO (e.g. yolo26n.pt; yolo26n/s/m/l/x are downloaded if absent) and a .pth file is RF-DETR. \"rfdetr\" is the stock pretrained RF-DETR of rfdetr_size"
+default = "yolo26x"
+
+[[args]]
+name = "rfdetr_size"
+type = "string"
+description = "RF-DETR model size, which a .pth checkpoint does not record: nano, small, medium or large. Ignored for YOLO"
+default = "large"
+
+[[args]]
+name = "rfdetr_labels"
+type = "array"
+description = "Names of the classes of a custom-trained RF-DETR checkpoint, in class id order; empty to use the model's own"
+default = []
+
+[[args]]
+name = "only_classes"
+type = "array"
+description = "Class names to report, ignoring case (e.g. [\"person\", \"car\"]); empty to report every class"
+default = []
+
+[[args]]
+name = "confidence"
+type = "number"
+description = "Confidence threshold (0.0-1.0]"
+default = 0.5
+
+[[args]]
+name = "geofence"
+type = "string"
+description = "Name of a KML file (e.g. exported from Google Maps) in the daemon's files directory; only detections whose estimated location is inside one of its polygons are reported. Empty for no geofence"
+default = ""
+
+[[args]]
+name = "hfov"
+type = "number"
+description = "Horizontal field of view of the camera, in degrees"
+default = 69.0
+
+[[args]]
+name = "vfov"
+type = "number"
+description = "Vertical field of view of the camera, in degrees"
+default = 43.0
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest result sent, in bytes"
+default = 65536
+
+[engine]
+type = "detection"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# The frame is forwarded unchanged, and its detections are its result
+result = "steeleagle_protocol/v1/messages/result/DetectionResult"
