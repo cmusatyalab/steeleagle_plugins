@@ -46,10 +46,10 @@ with engines other than the GCS and the encoder.
 Mission flows replace the GCS flow while a mission runs. As a mission-design best
 practice, every mission flow should include an edge from `telemetry` to the GCS
 engine. For video during the mission, it should also include the camera, encoder,
-GCS path. Without those edges the GCS shows no video (and gets no telemetry over
-the WebRTC data channel) until the vehicle is put on hold, which restores the GCS
-flow. The vehicle list is unaffected: it reads telemetry from the daemon,
-independently of the flow.
+GCS path. Without those edges the GCS shows no video and gets no telemetry until
+the vehicle is put on hold, which restores the GCS flow. The vehicle list also
+reads its telemetry from the flow, never from the daemon, so a vehicle whose
+mission flow sends the GCS no telemetry shows as disconnected until the hold.
 
 ## Flow catalog and TOML import
 

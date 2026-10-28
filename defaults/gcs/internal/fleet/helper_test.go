@@ -6,7 +6,6 @@ import (
 	"sync"
 	"testing"
 
-	telemetrypb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/telemetry"
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
 	vehiclepb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/vehicle"
 	"google.golang.org/grpc"
@@ -27,15 +26,12 @@ type fakeDaemon struct {
 
 	services []*daemonpb.Service
 	// remotes are the remote daemons ListServices lists, some with an error.
-	remotes   []*daemonpb.Daemon
-	telemetry map[string]*telemetrypb.Telemetry // by vehicle
-	flows     map[string][]byte                 // by vehicle
-	block     map[string]bool
-	// blockTelemetry is like block, but only for GetTelemetry.
-	blockTelemetry map[string]bool
-	listErr        error         // returned by ListServices when set
-	setErr         error         // returned by SetDataflow when set
-	setGate        chan struct{} // if set, SetDataflow waits for it to be closed
+	remotes []*daemonpb.Daemon
+	flows   map[string][]byte // by vehicle
+	block   map[string]bool
+	listErr error         // returned by ListServices when set
+	setErr  error         // returned by SetDataflow when set
+	setGate chan struct{} // if set, SetDataflow waits for it to be closed
 	// getFail is how many more GetFlow calls fail, by vehicle.
 	getFail map[string]int
 
@@ -44,17 +40,17 @@ type fakeDaemon struct {
 	mu       sync.Mutex
 	setCalls []string // vehicles SetDataflow was called for, in order
 	getCalls []string // vehicles GetFlow was called for, in order
+	// telemetryCalls is how many GetTelemetry calls there were.
+	telemetryCalls int
 }
 
 // newFakeDaemon serves a fake daemon on a bufconn, until the test ends.
 func newFakeDaemon(t *testing.T) *fakeDaemon {
 	t.Helper()
 	d := &fakeDaemon{
-		telemetry:      map[string]*telemetrypb.Telemetry{},
-		flows:          map[string][]byte{},
-		block:          map[string]bool{},
-		blockTelemetry: map[string]bool{},
-		getFail:        map[string]int{},
+		flows:   map[string][]byte{},
+		block:   map[string]bool{},
+		getFail: map[string]int{},
 	}
 	ln := bufconn.Listen(1 << 20)
 	server := grpc.NewServer()
@@ -137,27 +133,11 @@ func (d *fakeDaemon) SetDataflow(ctx context.Context, req *vehiclepb.SetDataflow
 	return &vehiclepb.SetDataflowResponse{}, nil
 }
 
-func (d *fakeDaemon) GetTelemetry(ctx context.Context, _ *vehiclepb.GetTelemetryRequest) (*vehiclepb.GetTelemetryResponse, error) {
-	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		if keys := md.Get(routeHeader); len(keys) == 1 {
-			d.mu.Lock()
-			blocked := d.blockTelemetry[keys[0]]
-			d.mu.Unlock()
-			if blocked {
-				<-ctx.Done()
-				return nil, status.FromContextError(ctx.Err()).Err()
-			}
-		}
-	}
-	v, err := d.route(ctx)
-	if err != nil {
-		return nil, err
-	}
+// GetTelemetry counts the call, and answers with no telemetry: the GCS reads
+// telemetry from its flows, not the daemon.
+func (d *fakeDaemon) GetTelemetry(context.Context, *vehiclepb.GetTelemetryRequest) (*vehiclepb.GetTelemetryResponse, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	var out []*telemetrypb.Telemetry
-	if tel, ok := d.telemetry[v]; ok {
-		out = append(out, tel)
-	}
-	return vehiclepb.GetTelemetryResponse_builder{Telemetry: out}.Build(), nil
+	d.telemetryCalls++
+	return &vehiclepb.GetTelemetryResponse{}, nil
 }

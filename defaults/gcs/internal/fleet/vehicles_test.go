@@ -93,13 +93,13 @@ func TestToVehicleJSONNil(t *testing.T) {
 	}
 }
 
-// vehiclesFixture is a fake daemon with two vehicles with telemetry, and a
-// Vehicles handler for it.
+// vehiclesFixture is a fake daemon with two vehicles whose telemetry the GCS
+// received, and a Vehicles handler for it.
 func vehiclesFixture(t *testing.T) (*fakeDaemon, *Flows, *Vehicles) {
 	t.Helper()
 	d, f, _ := flowsFixture(t)
-	d.telemetry[v1] = testTelemetry(time.Now(), 10, 0)
-	d.telemetry[v2] = testTelemetry(time.Now(), 20, 0)
+	f.ReceivedTelemetry(v1, testTelemetry(time.Now(), 10, 0))
+	f.ReceivedTelemetry(v2, testTelemetry(time.Now(), 20, 0))
 	return d, f, NewVehicles(d.conn(), f, zerolog.Nop())
 }
 
@@ -117,37 +117,29 @@ func getVehicles(t *testing.T, h *Vehicles) (int, []VehicleJSON, string) {
 }
 
 func TestVehiclesEndpoint(t *testing.T) {
-	_, f, h := vehiclesFixture(t)
+	d, f, h := vehiclesFixture(t)
 	code, out, _ := getVehicles(t, h)
 	f.Wait()
 	if code != 200 || len(out) != 2 || out[0].Name != v1 || out[1].Name != v2 {
 		t.Fatalf("code %d out %+v", code, out)
 	}
 	if out[0].Current.Alt != 10 || out[1].Current.Alt != 20 {
-		t.Errorf("alts = %v, %v; want telemetry routed per vehicle", out[0].Current.Alt, out[1].Current.Alt)
+		t.Errorf("alts = %v, %v; want each vehicle's own telemetry", out[0].Current.Alt, out[1].Current.Alt)
+	}
+	if d.telemetryCalls != 0 {
+		t.Errorf("GetTelemetry calls = %d, want none", d.telemetryCalls)
 	}
 }
 
+// TestVehiclesNoTelemetry checks that a vehicle whose telemetry the GCS
+// never received is listed as stale, without asking the daemon for it.
 func TestVehiclesNoTelemetry(t *testing.T) {
-	d, f, h := vehiclesFixture(t)
-	delete(d.telemetry, v2)
-	code, out, _ := getVehicles(t, h)
+	d, _, _ := flowsFixture(t)
+	f := NewFlows(d.conn(), FlowSpec{Engine: gcs}, zerolog.Nop())
+	f.ReceivedTelemetry(v1, testTelemetry(time.Now(), 10, 0))
+	code, out, _ := getVehicles(t, NewVehicles(d.conn(), f, zerolog.Nop()))
 	f.Wait()
-	if code != 200 || len(out) != 2 || out[1].LastUpdated < 1e6 {
-		t.Fatalf("code %d out %+v", code, out)
-	}
-}
-
-func TestVehiclesSlowVehicle(t *testing.T) {
-	d, f, h := vehiclesFixture(t)
-	d.blockTelemetry[v2] = true
-	start := time.Now()
-	code, out, _ := getVehicles(t, h)
-	if el := time.Since(start); el > 1500*time.Millisecond {
-		t.Errorf("took %v", el)
-	}
-	f.Wait()
-	if code != 200 || len(out) != 2 || out[1].LastUpdated < 1e6 || out[0].LastUpdated > 100 {
+	if code != 200 || len(out) != 2 || out[0].LastUpdated > 100 || out[1].LastUpdated < 1e6 {
 		t.Fatalf("code %d out %+v", code, out)
 	}
 }

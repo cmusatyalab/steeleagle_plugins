@@ -213,11 +213,16 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	}()
 	go func() {
 		// The flows learn which vehicles' data is arriving, to push the GCS
-		// flow again to those whose data isn't
+		// flow again to those whose data isn't, and keep the last telemetry
+		// for the vehicle list
 		publish := hub.Publish
 		if fleetFlows != nil {
 			publish = func(msg feed.Message) {
-				fleetFlows.Received(msg.Vehicle, msg.Frame != nil)
+				if msg.Telemetry != nil {
+					fleetFlows.ReceivedTelemetry(msg.Vehicle, msg.Telemetry)
+				} else {
+					fleetFlows.ReceivedFrame(msg.Vehicle)
+				}
 				hub.Publish(msg)
 			}
 		}
