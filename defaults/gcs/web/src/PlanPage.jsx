@@ -30,6 +30,7 @@ import { runValidation } from './validation.js';
 import { missionRequestBody, renderDsl } from './missionGraph.js';
 import { OLD_VERSION_MESSAGE, emptyFlow, parseFlowJson, serializeFlow, toTemplate, validateFlow } from './flowModel.js';
 import { engineChoices } from './flowEngines.js';
+import { loadMissionDraft, saveMissionDraft, highestNodeNumber } from './missionDraft.js';
 
 const FLOW_DRAFT_KEY = 'steeleagle-flow-draft';
 
@@ -310,14 +311,30 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
         return draft.flow;
     });
     const [catalog, setCatalog] = useState(null);
-    const [nodes, setNodes] = useState([]);
-    const [edges, setEdges] = useState([]);
-    const [eventInstances, setEventInstances] = useState([]);
-    const [startNodeId, setStartNodeId] = useState(null);
+    const [panelNodeId, setPanelNodeId] = useState(null);
+    // Nodes keep a callback and their type's schema in data; neither is
+    // stored, so put them back on nodes coming from a draft or snapshot.
+    const schemaRef = useRef(null);
+    const hydrateNodes = (ns) => ns.map(n => ({
+        ...n,
+        data: {
+            ...n.data,
+            schema: schemaRef.current?.actions[n.data.type_name],
+            onOpenPanel: () => setPanelNodeId(n.id),
+        },
+    }));
+    const [missionDraft] = useState(() => {
+        const draft = loadMissionDraft();
+        _nodeIdCounter = Math.max(_nodeIdCounter, highestNodeNumber(draft.nodes) + 1);
+        return draft;
+    });
+    const [nodes, setNodes] = useState(() => hydrateNodes(missionDraft.nodes));
+    const [edges, setEdges] = useState(missionDraft.edges);
+    const [eventInstances, setEventInstances] = useState(missionDraft.eventInstances);
+    const [startNodeId, setStartNodeId] = useState(missionDraft.startNodeId);
     const [schema, setSchema] = useState({ actions: {}, events: {}, enums: {} });
     const [missionCompiled, setMissionCompiled] = useState(false);
-    const [features, setFeatures] = useState(JSON.stringify({ type: 'FeatureCollection', features: [] }));
-    const [panelNodeId, setPanelNodeId] = useState(null);
+    const [features, setFeatures] = useState(missionDraft.features);
     const panelNode = panelNodeId ? nodes.find(n => n.id === panelNodeId) : null;
     const [panelEdgeId, setPanelEdgeId] = useState(null);
     const panelEdge = panelEdgeId ? edges.find(e => e.id === panelEdgeId) : null;
@@ -342,7 +359,6 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     // Undo / redo history
     const pastRef = useRef([]);
     const futureRef = useRef([]);
-    const schemaRef = useRef(schema);
     const [canUndo, setCanUndo] = useState(false);
     const [canRedo, setCanRedo] = useState(false);
     useEffect(() => { schemaRef.current = schema; }, [schema]);
@@ -403,14 +419,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     }
 
     function applySnapshot(snap) {
-        setNodes(snap.nodes.map(n => ({
-            ...n,
-            data: {
-                ...n.data,
-                schema: schemaRef.current.actions[n.data.type_name],
-                onOpenPanel: () => setPanelNodeId(n.id),
-            },
-        })));
+        setNodes(hydrateNodes(snap.nodes));
         setEdges(snap.edges);
         setEventInstances(snap.eventInstances);
         setStartNodeId(snap.startNodeId);
@@ -460,6 +469,20 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     }, []);
 
     useEffect(() => saveFlowDraft(flow), [flow]);
+
+    // Debounced, since dragging a node changes it every frame; pagehide
+    // flushes whatever the debounce hasn't written yet.
+    const missionDraftRef = useRef(null);
+    useEffect(() => {
+        missionDraftRef.current = { ...snapshotCurrent(), features };
+        const timer = setTimeout(() => saveMissionDraft(missionDraftRef.current), 500);
+        return () => clearTimeout(timer);
+    }, [nodes, edges, eventInstances, startNodeId, features]);
+    useEffect(() => {
+        const flush = () => { if (missionDraftRef.current) saveMissionDraft(missionDraftRef.current); };
+        window.addEventListener('pagehide', flush);
+        return () => window.removeEventListener('pagehide', flush);
+    }, []);
 
     // An old-format draft is dropped at load; say so once after mount.
     useEffect(() => {
