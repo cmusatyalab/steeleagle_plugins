@@ -24,7 +24,7 @@ include = ["steeleagle_protocol*"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64"]
+platforms = ["linux-aarch64"]
 
 [tool.pixi.pypi-dependencies]
 patchcore-score = { path = ".", editable = true }
