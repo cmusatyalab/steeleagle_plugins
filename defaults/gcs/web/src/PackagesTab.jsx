@@ -6,7 +6,7 @@ import { Message } from 'primereact/message';
 import { Tag } from 'primereact/tag';
 import { confirmDialog } from 'primereact/confirmdialog';
 import InstallPackageDialog from './InstallPackageDialog.jsx';
-import { fetchPackages, removePackage } from './daemonsApi.js';
+import { fetchPackages, installPackage, removePackage } from './daemonsApi.js';
 
 const formatTime = (iso) => {
     const t = new Date(iso);
@@ -14,14 +14,16 @@ const formatTime = (iso) => {
 };
 
 // The Packages tab: the packages installed on one daemon, with the plugins
-// each holds, installing and removing them. Changes take effect when the
+// each holds, installing, reinstalling and removing them. Reinstalling
+// installs a package's own URI again, fetching its branch's latest commit. Changes take effect when the
 // daemon next restarts; `pending` holds the ones this page made since then
 // ({uri: 'install' | 'remove'}), and onRestartNow restarts it.
 function PackagesTab({ daemon, toast, pending, onPending, onRestartNow, disabled }) {
     const [packages, setPackages] = useState(null);
     const [error, setError] = useState(null);
     const [installing, setInstalling] = useState(false);
-    const [removing, setRemoving] = useState(() => new Set());
+    // The packages being reinstalled or removed: {uri: 'reinstall' | 'remove'}
+    const [busy, setBusy] = useState({});
 
     const latest = useRef(0);
 
@@ -40,19 +42,36 @@ function PackagesTab({ daemon, toast, pending, onPending, onRestartNow, disabled
         load();
     }, [load, daemon.state]);
 
-    const remove = async (uri) => {
-        setRemoving((prev) => new Set(prev).add(uri));
-        const failure = await removePackage(daemon.ip, uri);
-        setRemoving((prev) => {
-            const next = new Set(prev);
-            next.delete(uri);
+    // Runs request on uri, marking it busy with action until it answers
+    const run = async (uri, action, request) => {
+        setBusy((prev) => ({ ...prev, [uri]: action }));
+        const failure = await request(daemon.ip, uri);
+        setBusy((prev) => {
+            const next = { ...prev };
+            delete next[uri];
             return next;
         });
+        return failure;
+    };
+
+    const remove = async (uri) => {
+        const failure = await run(uri, 'remove', removePackage);
         if (failure) {
             toast.current.show({ severity: 'error', summary: 'Remove package', detail: failure });
             return;
         }
         onPending(uri, 'remove');
+        load();
+    };
+
+    const reinstall = async (uri) => {
+        const failure = await run(uri, 'reinstall', installPackage);
+        if (failure) {
+            toast.current.show({ severity: 'error', summary: 'Reinstall package', detail: failure });
+            return;
+        }
+        toast.current.show({ severity: 'success', summary: 'Reinstall package', detail: `Reinstalled ${uri}` });
+        onPending(uri, 'install');
         load();
     };
 
@@ -102,9 +121,14 @@ function PackagesTab({ daemon, toast, pending, onPending, onRestartNow, disabled
                 )} />
                 <Column header="Plugins" body={(p) => p.plugins.map((pl) => pl.name).join(', ') || '—'} />
                 <Column field="modified" header="Modified" sortable body={(p) => formatTime(p.modified)} />
-                <Column header="" style={{ width: '6rem' }} body={(p) => (
-                    <Button label="Remove" size="small" text severity="danger" onClick={() => confirmRemove(p.uri)}
-                        loading={removing.has(p.uri)} disabled={disabled || removing.has(p.uri) || pending[p.uri] === 'remove'} />
+                <Column header="" style={{ width: '14rem' }} body={(p) => (
+                    <span className="flex gap-1 justify-content-end">
+                        <Button label="Reinstall" icon="pi pi-sync" size="small" text onClick={() => reinstall(p.uri)}
+                            tooltip="Fetch this package again from its URI" tooltipOptions={{ position: 'top' }}
+                            loading={busy[p.uri] === 'reinstall'} disabled={disabled || p.uri in busy} />
+                        <Button label="Remove" icon="pi pi-trash" size="small" text severity="danger" onClick={() => confirmRemove(p.uri)}
+                            loading={busy[p.uri] === 'remove'} disabled={disabled || p.uri in busy || pending[p.uri] === 'remove'} />
+                    </span>
                 )} />
             </DataTable>
         </div>
