@@ -12,12 +12,16 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/control"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/daemons"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/presence"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/rtc"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 )
@@ -87,6 +91,35 @@ func TestParsePorts(t *testing.T) {
 var stubVehicles = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, "stub vehicles")
 })
+
+// TestServesPresence ensures that /ws/presence is a websocket rather than
+// the web UI's index.html.
+func TestServesPresence(t *testing.T) {
+	web := t.TempDir()
+	os.WriteFile(filepath.Join(web, "index.html"), []byte("index"), 0o644)
+	hub, err := rtc.NewHub(rtc.Options{}, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), uiConfig{}, web, zerolog.Nop()))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/ws/presence", nil)
+	if err != nil {
+		t.Fatalf("dial /ws/presence: %v", err)
+	}
+	defer conn.CloseNow()
+	var msg presence.Message
+	if err := wsjson.Read(ctx, conn, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.Viewers) != 1 || msg.Viewers[0].ID != msg.You {
+		t.Errorf("presence = %+v, want just this viewer", msg)
+	}
+}
 
 // TestHandler ensures that the web UI's files are served, with its
 // index.html for the paths it routes, and that unknown API paths aren't.

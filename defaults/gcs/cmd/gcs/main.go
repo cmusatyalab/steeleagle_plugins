@@ -33,6 +33,7 @@ import (
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/presence"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/rtc"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
@@ -385,6 +386,7 @@ func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Hand
 	mux.Handle("POST /api/deploy", missions.deploy)
 	mux.Handle("GET /api/flows/catalog", missions.catalog)
 	mux.HandleFunc("POST /api/flows/from_toml", flows.ServeFromTOML)
+	mux.Handle("GET /ws/presence", presence.New(log))
 	for pattern, h := range orchestration {
 		mux.Handle(pattern, h)
 	}
