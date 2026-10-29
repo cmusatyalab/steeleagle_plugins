@@ -2,7 +2,7 @@
 authors = ["Natan Zmudzinski <nzmudzin@andrew.cmu.edu>"]
 channels = ["conda-forge"]
 name = "patchcore-embed"
-platforms = ["linux-64"]
+platforms = ["linux-aarch64"]
 version = "0.1.0"
 
 [tasks]

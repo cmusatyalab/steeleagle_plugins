@@ -26,7 +26,12 @@ def resolve(path):
     return path if os.path.isabs(path) else os.path.join(plugin_dir, path)
 
 
-os.environ["ADSP_LIBRARY_PATH"] = os.path.join(plugin_dir, "libs")
+# Prepend rather than replace: ADSP_LIBRARY_PATH overrides the DSP's default
+# search path, so the system skel dirs must stay on it (separator is ';').
+os.environ["ADSP_LIBRARY_PATH"] = ";".join(
+    [os.path.join(plugin_dir, "libs"), os.environ.get("ADSP_LIBRARY_PATH", ""),
+     "/usr/lib/rfsa/adsp", "/usr/lib/dsp/cdsp", "/dsp"]
+)
 
 os.execvp(
     os.path.join(plugin_dir, "inference-server-uriel"),
