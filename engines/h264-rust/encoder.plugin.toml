@@ -1,0 +1,51 @@
+[plugin]
+name = "H.264 Encoder (Rust)"
+type = "engine"
+description = "Encodes camera frames with H.264, to send across the network to the H.264 decoder on the remote daemon. Each camera gets a stream of its own"
+
+[[args]]
+name = "decoder_name"
+type = "string"
+description = "Service name of the H.264 decoder on the remote daemon, whose results tell the encoder when to send a keyframe"
+default = "h264_decoder"
+
+[[args]]
+name = "encoder"
+type = "string"
+description = "H.264 encoder, in gst-launch syntax"
+default = "x264enc tune=zerolatency speed-preset=ultrafast bitrate=3000 key-int-max=300"
+
+[[args]]
+name = "input_format"
+type = "string"
+description = "4:2:0 pixel format the encoder is given: I420 for software encoders, NV12 for hardware ones such as qtic2venc"
+default = "I420"
+
+[[args]]
+name = "fps"
+type = "number"
+description = "Frame rate the encoder is told the frames come at"
+default = 30
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest encoded frame sent, in bytes"
+default = 2097152
+
+[[args]]
+name = "timeout_ms"
+type = "number"
+description = "Milliseconds a frame may take to encode before it is discarded"
+default = 1000
+
+[[args]]
+name = "log_frames"
+type = "boolean"
+description = "Log every frame encoded"
+default = false
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# No result: each frame is replaced with an EncodedFrame (CODEC_H264)

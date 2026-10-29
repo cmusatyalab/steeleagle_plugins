@@ -1,0 +1,41 @@
+[plugin]
+name = "H.264 Decoder (Rust)"
+type = "engine"
+description = "Decodes the H.264 frames the H.264 encoder on a vehicle sends, back into camera frames"
+
+[[args]]
+name = "decoder"
+type = "string"
+description = "H.264 decoder, in gst-launch syntax"
+default = "avdec_h264 max-threads=1"
+
+[[args]]
+name = "max_width"
+type = "number"
+description = "Widest frame decoded, in pixels"
+default = 1920
+
+[[args]]
+name = "max_height"
+type = "number"
+description = "Tallest frame decoded, in pixels"
+default = 1080
+
+[[args]]
+name = "timeout_ms"
+type = "number"
+description = "Milliseconds a frame may take to decode before it is discarded"
+default = 1000
+
+[[args]]
+name = "log_frames"
+type = "boolean"
+description = "Log every frame decoded"
+default = false
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]
+# Each frame is replaced with the RawFrame it decodes to; the result tells the encoder whether it
+# decoded, or a keyframe is needed
+result = "h264/v1/DecodeResult"

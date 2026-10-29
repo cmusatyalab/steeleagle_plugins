@@ -1,0 +1,76 @@
+# Tests the Rust H.264 plugin, cross-compiles it for aarch64 devices, and on a tag
+# h264-rust-v<version> publishes the engines as a GitHub release, which the plugin's pixi `build`
+# task downloads on a device (see engines/h264-rust/tools/fetch-binary.sh).
+name: h264-rust
+
+on:
+  push:
+    tags: ["h264-rust-v*"]
+  pull_request:
+    paths:
+      - "engines/h264-rust/**"
+      - ".github/workflows/h264-rust.yml"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: engines/h264-rust
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pixi
+        run: |
+          curl -fsSL https://pixi.sh/install.sh | bash
+          echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
+
+      # --locked fails if pixi.lock is out of date
+      - run: pixi run --locked test
+
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag is the package's version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          source tools/release-name.sh
+          [[ $GITHUB_REF_NAME == "$tag" ]] || {
+            echo "tag $GITHUB_REF_NAME is not $tag, the version in Cargo.toml" >&2
+            exit 1
+          }
+
+      - run: tools/package-release.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h264-rust-aarch64
+          path: engines/h264-rust/dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/h264-rust-v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: h264-rust-aarch64
+          path: dist
+
+      - name: Create the release
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "H.264 (Rust) ${GITHUB_REF_NAME#h264-rust-v}" \
+            --notes "Engines of the H.264 (Rust) plugin for aarch64 devices with Ubuntu 20.04's GStreamer 1.16, such as a Particle Tachyon. The plugin's pixi build task downloads them."

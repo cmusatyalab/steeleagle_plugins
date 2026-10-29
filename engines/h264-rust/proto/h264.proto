@@ -1,0 +1,65 @@
+// SPDX-FileCopyrightText: 2026 Carnegie Mellon University
+//
+// SPDX-License-Identifier: Apache-2.0
+
+// The messages the H.264 encoder and decoder engines read and write. The encoded frame is
+// SteelEagle's EncodedFrame, so the Python H.264 plugin's encoder and decoder work with these.
+syntax = "proto3";
+
+package h264.v1;
+
+// The decoder's result for an encoded frame. It has the fields of the Python H.264 plugin's.
+message DecodeResult {
+  // Whether the frame was decoded and emitted.
+  bool decoded = 1;
+  // The decoder dropped the frame because a frame before it was lost, and
+  // waits for a keyframe. The encoder subscribes to the decoder's events, and
+  // makes its next frame one.
+  bool keyframe_needed = 2;
+}
+
+// The codecs of SteelEagle's EncodedFrame.
+enum Codec {
+  CODEC_UNSPECIFIED = 0;
+  CODEC_JPEG = 1;
+  CODEC_H264 = 2;
+}
+
+// The fields of a SteelEagle RawFrame that the engines read and write, with
+// the same field numbers. The messages in it (the timestamp, the gimbal and
+// the position) are bytes here: a message and bytes are written the same way,
+// so they pass through unchanged without these engines knowing their fields.
+// They are optional, to tell a missing message from an empty one.
+message RawFrameView {
+  optional bytes timestamp = 1;
+  // Packed 8-bit pixels, row by row.
+  bytes data = 2;
+  // Width in pixels.
+  uint64 h_res = 3;
+  // Height in pixels.
+  uint64 v_res = 4;
+  // Channels per pixel; 3 for RGB.
+  uint64 channels = 6;
+  uint64 id = 7;
+  optional bytes position_info = 8;
+  optional bytes gimbal_info = 9;
+  uint64 camera_id = 10;
+}
+
+// The fields of a SteelEagle EncodedFrame, with the same field numbers.
+message EncodedFrameView {
+  optional bytes timestamp = 1;
+  // One H.264 access unit, in Annex B byte-stream format.
+  bytes encoded_data = 2;
+  // Counts the frames the encoder encoded for a camera, from 0. A frame that
+  // does not follow the last one the decoder decoded means frames were lost,
+  // and the decoder waits for a keyframe. The decoder gives it to the raw
+  // frame as its id.
+  uint64 id = 3;
+  optional bytes gimbal_info = 4;
+  optional bytes position_info = 5;
+  uint64 camera_id = 6;
+  Codec codec = 7;
+  // An IDR frame, with its SPS and PPS: it decodes without earlier frames.
+  bool keyframe = 8;
+}

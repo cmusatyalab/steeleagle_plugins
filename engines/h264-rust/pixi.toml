@@ -1,0 +1,63 @@
+# Pixi workspace of the Rust H.264 plugin. The daemon starts the plugin with `pixi run start`.
+#
+# On a device (linux-aarch64, e.g. a Particle Tachyon) the plugin must link the device's own
+# GStreamer, since its hardware encoder (qtic2venc) is a plugin of that GStreamer, which a
+# conda-forge GStreamer does not load. So there the build task downloads the engines that CI built
+# against Ubuntu 20.04's GStreamer 1.16 (see Dockerfile.aarch64), and the environment holds no
+# GStreamer of its own. Leave the plugin's isolation unset in the daemon config: a sandbox or a
+# container cannot reach the encoder's device nodes.
+#
+# On linux-64, for development, the build task compiles the engines against conda-forge's
+# GStreamer, which comes with the environment.
+[workspace]
+name = "steeleagle-h264-rust"
+channels = ["conda-forge"]
+# Uriel only supports Linux
+platforms = ["linux-64", "linux-aarch64"]
+
+[target.linux-aarch64.dependencies]
+# Downloads the prebuilt engines (tools/fetch-binary.sh)
+curl = "*"
+
+[target.linux-64.dependencies]
+rust = ">=1.93"
+c-compiler = "*"
+# Uriel's iceoryx2 generates its bindings with libclang
+libclang = "*"
+pkg-config = "*"
+# The .pc files of glib's dependencies, which pkg-config reads when it links GStreamer
+zlib = "*"
+# Cargo fetches Uriel from its repository
+git = "*"
+# GStreamer, with the elements the pipelines use: appsrc/appsink and videoconvert (base),
+# h264parse (bad), x264enc (ugly) and avdec_h264 (libav)
+gstreamer = "*"
+gst-plugins-base = "*"
+gst-plugins-bad = "*"
+gst-plugins-ugly = "*"
+gst-libav = "*"
+
+[target.linux-64.activation.env]
+LIBCLANG_PATH = "$CONDA_PREFIX/lib"
+# pkg-config searches the environment, not the system
+PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig:$CONDA_PREFIX/share/pkgconfig"
+
+# Puts the engines in bin/. It checks bin/ itself, so Pixi's cache never skips it (which would
+# go stale when the version changes or bin/ is deleted).
+[target.linux-aarch64.tasks.build]
+cmd = "tools/fetch-binary.sh"
+
+[target.linux-64.tasks.build]
+cmd = "cargo build --release --locked && install -D -t bin target/release/h264-plugin target/release/h264-encode target/release/h264-decode"
+inputs = ["Cargo.toml", "Cargo.lock", "build.rs", "proto/**", "src/**"]
+outputs = ["bin/h264-plugin"]
+
+# The start task is what the plugin runner invokes; it runs the encoder or the decoder as
+# STEELEAGLE_PLUGIN says. The plugin's args come in STEELEAGLE_PLUGIN_ARGS, and its Uriel engine
+# name in STEELEAGLE_ENGINE_ENDPOINT.
+[tasks.start]
+cmd = "./bin/h264-plugin"
+depends-on = ["build"]
+
+[target.linux-64.tasks.test]
+cmd = "cargo test --locked"
