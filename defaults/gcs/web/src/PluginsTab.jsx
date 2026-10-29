@@ -58,6 +58,9 @@ function PluginsTab({ daemon, toast, onRestarted }) {
             dataKey="name"
             sortField="bare"
             sortOrder={1}
+            // The table otherwise redraws a cell only when its row changes,
+            // so the restart spinner wouldn't show
+            cellMemo={false}
         >
             <Column field="bare" header="Name" sortable />
             <Column field="category" header="Category" sortable body={(s) => <Tag value={s.category} severity="info" />} />

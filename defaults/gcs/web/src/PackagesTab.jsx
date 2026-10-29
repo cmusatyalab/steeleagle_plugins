@@ -110,7 +110,9 @@ function PackagesTab({ daemon, toast, pending, onPending, onRestartNow, disabled
                 </div>
             )}
             {error && <Message severity="error" text={error} className="w-full" />}
-            <DataTable value={packages ?? []} size="small" dataKey="uri" sortField="uri" sortOrder={1}
+            {/* cellMemo off: the table otherwise redraws a cell only when its
+                row changes, so the busy spinners and pending tags never show */}
+            <DataTable value={packages ?? []} size="small" dataKey="uri" sortField="uri" sortOrder={1} cellMemo={false}
                 emptyMessage={packages === null ? (error ? 'No packages listed.' : 'Loading packages...') : 'No packages installed.'}>
                 <Column field="uri" header="Package" sortable body={(p) => (
                     <span className="flex align-items-center gap-2">
