@@ -14,7 +14,9 @@ from h264.common import MAX_FRAME_SIZE
 from h264.encode_decode import decode, encode
 
 ENCODER_PLUGIN = "encoder.plugin.toml"
+ENCODER_SYSTEM_PLUGIN = "encoder-system.plugin.toml"
 DECODER_PLUGIN = "decoder.plugin.toml"
+DECODER_SYSTEM_PLUGIN = "decoder-system.plugin.toml"
 
 # Defaults of the args of each plugin, matching its plugin.toml. The daemon
 # passes only the args set in its config, so any arg left unset is defaulted
@@ -27,12 +29,16 @@ DEFAULTS = {
         "max_output_size": MAX_FRAME_SIZE,
         "timeout_ms": 1000,
         "log_frames": False,
+        "gstreamer_path": "/usr/lib/gstreamer-1.0",
+        "lib_path": "/usr/lib",
     },
     DECODER_PLUGIN: {
         "decoder": "avdec_h264 max-threads=1",
         "max_output_size": MAX_FRAME_SIZE,
         "timeout_ms": 1000,
         "log_frames": False,
+        "gstreamer_path": "/usr/lib/gstreamer-1.0",
+        "lib_path": "/usr/lib",
     },
 }
 
@@ -57,7 +63,12 @@ def main():
         sys.exit("STEELEAGLE_ENGINE_ENDPOINT is not set")
     args = parse_args(plugin, os.environ.get("STEELEAGLE_PLUGIN_ARGS"))
 
-    if plugin == ENCODER_PLUGIN:
+    # Overwrite environment variables for system use
+    if plugin == ENCODER_SYSTEM_PLUGIN or plugin == DECODER_SYSTEM_PLUGIN:
+        os.environ['GST_PLUGIN_SYSTEM_PATH'] = args['gstreamer_path']
+        os.environ['LD_LIBRARY_PATH'] = args['lib_path']
+
+    if plugin == ENCODER_PLUGIN or plugin == ENCODER_SYSTEM_PLUGIN:
         encode(name, args, remote_qualifier=os.environ.get("STEELEAGLE_REMOTE_QUALIFIER", ""))
     else:
         decode(name, args)
