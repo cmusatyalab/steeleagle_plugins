@@ -1,0 +1,15 @@
+[project]
+name = "detection-client-example"
+version = "0.1.0"
+description = "Sends a picture to a running detection engine and prints its detections"
+requires-python = ">=3.11"
+dependencies = [
+    "pillow",
+    "protobuf>=7.35.1",
+    "steeleagle-protocol>=0.3.4",
+    "uriel>=0.2.0",
+]
+
+[tool.uv]
+# A set of scripts, not a package to install
+package = false

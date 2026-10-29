@@ -9,7 +9,7 @@ Start the engine first (eagled normally does this), e.g. from engines/detection:
 
 Then, on the same machine:
 
-    pixi run python examples/detect_image.py photo.jpg --engine detector
+    cd examples && uv run detect_image.py photo.jpg --engine detector
 """
 
 import argparse
