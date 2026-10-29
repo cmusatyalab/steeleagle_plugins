@@ -100,7 +100,7 @@ func vehiclesFixture(t *testing.T) (*fakeDaemon, *Flows, *Vehicles) {
 	d, f, _ := flowsFixture(t)
 	f.ReceivedTelemetry(v1, testTelemetry(time.Now(), 10, 0))
 	f.ReceivedTelemetry(v2, testTelemetry(time.Now(), 20, 0))
-	return d, f, NewVehicles(d.conn(), f, zerolog.Nop())
+	return d, f, NewVehicles(daemonpb.NewDaemonServiceClient(d.conn()), f, zerolog.Nop())
 }
 
 func getVehicles(t *testing.T, h *Vehicles) (int, []VehicleJSON, string) {
@@ -140,7 +140,7 @@ func TestVehiclesNoTelemetry(t *testing.T) {
 	d, _, _ := flowsFixture(t)
 	f := NewFlows(d.conn(), FlowSpec{Engine: gcs}, zerolog.Nop())
 	f.ReceivedTelemetry(v1, testTelemetry(time.Now(), 10, 0))
-	code, out, _ := getVehicles(t, NewVehicles(d.conn(), f, zerolog.Nop()))
+	code, out, _ := getVehicles(t, NewVehicles(daemonpb.NewDaemonServiceClient(d.conn()), f, zerolog.Nop()))
 	f.Wait()
 	if code != 200 || len(out) != 2 || out[0].LastUpdated > 100 || out[1].LastUpdated < 1e6 {
 		t.Fatalf("code %d out %+v", code, out)
@@ -251,7 +251,7 @@ func TestVehiclesDaemonBackWithoutVehicle(t *testing.T) {
 func TestVehiclesLogsUnavailableOnce(t *testing.T) {
 	d, f, _ := vehiclesFixture(t)
 	var buf syncBuffer
-	h := NewVehicles(d.conn(), f, zerolog.New(&buf))
+	h := NewVehicles(daemonpb.NewDaemonServiceClient(d.conn()), f, zerolog.New(&buf))
 	unavailable(d)
 	for range 3 {
 		getVehicles(t, h)
