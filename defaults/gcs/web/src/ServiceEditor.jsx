@@ -4,19 +4,26 @@ import { Checkbox } from 'primereact/checkbox';
 import { Dropdown } from 'primereact/dropdown';
 import { InputText } from 'primereact/inputtext';
 import ArgsEditor from './ArgsEditor.jsx';
+import { SimEntryEditor } from './SimEditors.jsx';
 import { AUTH_LEVELS, SERVICE_TYPES, setPlugin } from './configForm.js';
+import { SIM_LISTS, prefillPlugin } from './simForm.js';
 
 const TYPE_OPTIONS = SERVICE_TYPES.map((t) => ({ label: t, value: t }));
-const AUTH_OPTIONS = AUTH_LEVELS.map((a) => ({ label: a || 'default', value: a }));
+// The Dropdown takes an option valued '' for one with no value and hands
+// back the whole option, so the daemon's default ('') is picked as this
+const DEFAULT_AUTH = 'default';
+const AUTH_OPTIONS = AUTH_LEVELS.map((a) => ({ label: a || 'default', value: a || DEFAULT_AUTH }));
 // A plugin is picked by package and name together
 const SEP = '\u0000';
 
 // One service in the Configure dialog: a collapsible card with its name,
 // type, auth, plugin (picked from the daemon's installed packages, or typed
 // in) and the plugin's args. `errors` maps a field to its message, with
-// `args` mapping an arg to its message. hasSimulator is whether the config
-// has a [simulator], which a simulated service needs.
-function ServiceEditor({ svc, packages, hasSimulator, errors = {}, expanded, onToggle, onChange, onRemove, onDuplicate, disabled }) {
+// `args` mapping an arg to its message and `sim` its simulator entry's
+// fields to theirs. hasSimulator is whether the config has a [simulator],
+// which a simulated service needs; simPackage is its package, which a newly
+// simulated service's plugin is taken from.
+function ServiceEditor({ svc, packages, hasSimulator, simPackage, errors = {}, expanded, onToggle, onChange, onRemove, onDuplicate, disabled }) {
     const pluginOptions = (packages ?? []).flatMap((p) => p.plugins.map((pl) => ({
         label: `${pl.name} — ${p.uri}`,
         value: `${p.uri}${SEP}${pl.name}`,
@@ -40,11 +47,12 @@ function ServiceEditor({ svc, packages, hasSimulator, errors = {}, expanded, onT
     );
 
     return (
-        <div className="border-round" style={{ border: '1px solid var(--surface-border)' }}>
+        <div id={`service-${svc.key}`} className="border-round" style={{ border: '1px solid var(--surface-border)' }}>
             <div className="flex align-items-center gap-2 p-2 cursor-pointer" onClick={onToggle}>
                 <i className={expanded ? 'pi pi-chevron-down' : 'pi pi-chevron-right'} />
                 <span className="font-semibold">{svc.name.trim() || <span className="text-color-secondary">(unnamed)</span>}</span>
                 <span className="text-sm text-color-secondary">{svc.type}</span>
+                {svc.simulate && <span className="text-sm" style={{ color: 'var(--primary-color)' }}>simulated</span>}
                 <span className="text-sm text-color-secondary flex-1 white-space-nowrap overflow-hidden text-overflow-ellipsis">{svc.plugin}</span>
                 {Object.keys(errors).length > 0 && <i className="pi pi-exclamation-circle" style={{ color: 'var(--red-500)' }} title="Has errors" />}
                 <span className="flex gap-1" onClick={(e) => e.stopPropagation()}>
@@ -63,7 +71,7 @@ function ServiceEditor({ svc, packages, hasSimulator, errors = {}, expanded, onT
                         </div>
                         <div className="flex flex-column gap-1">
                             <label className="text-sm">Auth</label>
-                            <Dropdown value={svc.auth} options={AUTH_OPTIONS} onChange={(e) => onChange({ ...svc, auth: e.value })} disabled={disabled} style={{ width: '9rem' }} />
+                            <Dropdown value={svc.auth || DEFAULT_AUTH} options={AUTH_OPTIONS} onChange={(e) => onChange({ ...svc, auth: e.value === DEFAULT_AUTH ? '' : e.value })} disabled={disabled} style={{ width: '9rem' }} />
                         </div>
                     </div>
                     <div className="flex flex-column gap-1">
@@ -72,14 +80,14 @@ function ServiceEditor({ svc, packages, hasSimulator, errors = {}, expanded, onT
                             <Checkbox
                                 inputId={`${svc.key}-simulate`}
                                 checked={svc.simulate}
-                                onChange={(e) => onChange({ ...svc, simulate: !!e.checked })}
+                                onChange={(e) => onChange(e.checked ? prefillPlugin({ ...svc, simulate: true }, simPackage, packages) : { ...svc, simulate: false })}
                                 disabled={disabled || (!hasSimulator && !svc.simulate)}
                             />
                             <label htmlFor={`${svc.key}-simulate`} className="text-sm">Simulated: this daemon's simulator plays this service instead of its plugin</label>
                         </div>
-                        {!hasSimulator && (
-                            <small className={svc.simulate ? 'p-error' : 'text-color-secondary'}>Needs a simulator (Simulator tab).</small>
-                        )}
+                        {errors.simulate ? (
+                            <small className="p-error">{errors.simulate}</small>
+                        ) : !hasSimulator && <small className="text-color-secondary">Needs a simulator (Simulator tab).</small>}
                     </div>
                     <div className="flex flex-column gap-1">
                         <label className="text-sm">Plugin</label>
@@ -108,7 +116,9 @@ function ServiceEditor({ svc, packages, hasSimulator, errors = {}, expanded, onT
                             </div>
                         </>
                     )}
-                    {svc.simulate && <small className="text-color-secondary">Configure it in the simulator's args, under the same name; this plugin's args and isolation are ignored.</small>}
+                    {svc.simulate && SIM_LISTS[svc.type] && (
+                        <SimEntryEditor type={svc.type} sim={svc.sim} errors={errors.sim ?? {}} onChange={(sim) => onChange({ ...svc, sim })} disabled={disabled} />
+                    )}
                 </div>
             )}
         </div>

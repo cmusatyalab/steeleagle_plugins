@@ -10,9 +10,12 @@
 // The `extra` maps hold the keys the form doesn't know; they pass through
 // untouched. A service's args are shown from its plugin's TOML (the
 // daemon's package list): each declared arg is prefilled with its default,
-// and args the plugin doesn't declare are free-form rows.
+// and args the plugin doesn't declare are free-form rows. The simulator's
+// vehicles, engines and actors are split out of its args (simForm.js): a
+// simulated service's entry is edited as its sim.
 
 import { fromRows, toRows } from './kvArgs.js';
+import { SIM_LISTS, actorValue, entryState, entryValue, splitSimulatorArgs } from './simForm.js';
 
 export const SERVICE_TYPES = ['vehicle', 'engine', 'extra'];
 // '' is the daemon's default: privileged for vehicles, external otherwise
@@ -122,7 +125,7 @@ export function argsValue(state) {
     return { value, errors };
 }
 
-function serviceState(s, packages) {
+function serviceState(s, packages, sim) {
     const plugin = s.plugin ?? {};
     return {
         key: serviceKey(),
@@ -131,6 +134,8 @@ function serviceState(s, packages) {
         type: s.type ?? '',
         auth: s.auth ?? '',
         simulate: !!s.simulate,
+        // Kept while unsimulated, so unticking Simulated loses nothing
+        sim: sim ?? entryState(),
         plugin: plugin.plugin ?? '',
         package: plugin.package ?? '',
         isolation: plugin.isolation ?? '',
@@ -196,6 +201,7 @@ export function setPlugin(svc, packages, uri, name) {
 export function formToState(form, packages) {
     const daemon = form.daemon ?? {};
     const sim = form.simulator;
+    const split = splitSimulatorArgs(sim?.args, form.services ?? []);
     return {
         daemon: {
             port: daemon.port ?? null,
@@ -205,10 +211,17 @@ export function formToState(form, packages) {
             orchestrator: daemon.orchestrator ?? null,
         },
         daemonExtra: daemon.extra ?? null,
-        simulator: sim
-            ? { present: true, package: sim.package ?? '', argRows: toRows(sim.args), hadArgs: sim.args != null, extra: sim.extra ?? null }
-            : { present: false, package: '', argRows: [], hadArgs: false, extra: null },
-        services: (form.services ?? []).map((s) => serviceState(s, packages)),
+        simulator: {
+            present: !!sim,
+            package: sim?.package ?? '',
+            argRows: toRows(split.rest),
+            hadArgs: sim?.args != null,
+            extra: sim?.extra ?? null,
+            actors: split.actors,
+            orphans: split.orphans,
+            lists: split.lists,
+        },
+        services: (form.services ?? []).map((s, i) => serviceState(s, packages, split.claimed[i])),
         extra: form.extra ?? null,
     };
 }
@@ -227,17 +240,8 @@ export function stateToForm(state) {
     }
     const daemon = { port: d.port, lcs: d.lcs, hostname: text(d.hostname), cert: text(d.cert), orchestrator: text(d.orchestrator), extra: state.daemonExtra };
 
-    let simulator = null;
-    if (state.simulator.present) {
-        const args = fromRows(state.simulator.argRows);
-        if (Object.keys(args.errors).length) errors['simulator.args'] = args.errors;
-        simulator = {
-            package: state.simulator.package.trim(),
-            args: state.simulator.hadArgs || state.simulator.argRows.length ? args.value : null,
-            extra: state.simulator.extra,
-        };
-    }
-
+    // The simulator entries of the simulated services, by list
+    const simEntries = { vehicles: [], engines: [] };
     // The daemon wants names unique across all services, whatever their type
     const seen = new Set();
     const services = state.services.map((s) => {
@@ -252,6 +256,15 @@ export function stateToForm(state) {
         if (!s.package.trim()) errors[at('package')] = 'Required';
         const args = argsValue(s.args);
         if (Object.keys(args.errors).length) errors[at('args')] = args.errors;
+        if (s.simulate) {
+            if (!state.simulator.present) errors[at('simulate')] = 'Needs a simulator (Simulator tab)';
+            else if (!SIM_LISTS[s.type]) errors[at('simulate')] = 'Only vehicles and engines can be simulated';
+            else {
+                const entry = entryValue(s);
+                if (Object.keys(entry.errors).length) errors[at('sim')] = entry.errors;
+                simEntries[SIM_LISTS[s.type]].push(entry.value);
+            }
+        }
         return {
             name,
             type: s.type,
@@ -267,6 +280,35 @@ export function stateToForm(state) {
             extra: s.extra,
         };
     });
+    let simulator = null;
+    if (state.simulator.present) {
+        const sim = state.simulator;
+        const args = fromRows(sim.argRows);
+        const argErrors = { ...args.errors };
+        for (const row of sim.argRows) {
+            const key = row.key.trim();
+            if (['vehicles', 'engines', 'actors'].includes(key) && !argErrors[row.id]) argErrors[row.id] = `"${key}" is edited above`;
+        }
+        if (Object.keys(argErrors).length) errors['simulator.args'] = argErrors;
+        const value = { ...args.value };
+        for (const o of sim.orphans) simEntries[SIM_LISTS[o.kind]].push(o.entry);
+        for (const [list, entries] of Object.entries(simEntries)) {
+            if (entries.length || sim.lists[list]) value[list] = entries;
+        }
+        const actorErrors = {};
+        const actors = sim.actors.map((a) => {
+            const actor = actorValue(a);
+            if (Object.keys(actor.errors).length) actorErrors[a.key] = actor.errors;
+            return actor.value;
+        });
+        if (Object.keys(actorErrors).length) errors['simulator.actors'] = actorErrors;
+        if (actors.length || sim.lists.actors) value.actors = actors;
+        simulator = {
+            package: sim.package.trim(),
+            args: sim.hadArgs || Object.keys(value).length ? value : null,
+            extra: sim.extra,
+        };
+    }
     return { form: { daemon, simulator, services, extra: state.extra }, errors };
 }
 

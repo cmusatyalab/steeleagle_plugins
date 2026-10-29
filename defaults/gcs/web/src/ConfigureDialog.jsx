@@ -10,6 +10,7 @@ import { SelectButton } from 'primereact/selectbutton';
 import { TabPanel, TabView } from 'primereact/tabview';
 import KeyValueEditor from './KeyValueEditor.jsx';
 import ServiceEditor from './ServiceEditor.jsx';
+import { ActorEditor } from './SimEditors.jsx';
 import { applyConfig, checkConfig, convertConfig, daemonName, fetchConfig, fetchPackages } from './daemonsApi.js';
 import {
     applyOutcome,
@@ -21,8 +22,11 @@ import {
     restartWarning,
     stateToForm,
 } from './configForm.js';
+import { DEFAULT_INTERFACE, SIM_LISTS, newActor, orphanService } from './simForm.js';
 
 const MODES = [{ label: 'Form', value: 'form' }, { label: 'Raw TOML', value: 'raw' }];
+const TABS = { daemon: 0, simulator: 1, services: 2 };
+const formatPoint = (p) => [p.lat, p.lon, p.alt ?? 0].join(', ');
 const DAEMON_FIELDS = [
     { key: 'hostname', label: 'Hostname', type: 'text' },
     { key: 'port', label: 'Port', type: 'port' },
@@ -47,6 +51,7 @@ function ConfigureDialog({ daemon, onHide, onApplied }) {
     const [state, setState] = useState(null);
     const [raw, setRaw] = useState('');
     const [expanded, setExpanded] = useState(() => new Set());
+    const [tab, setTab] = useState(TABS.daemon);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState(null);
     const [errorList, setErrorList] = useState(null);
@@ -190,6 +195,26 @@ function ConfigureDialog({ daemon, onHide, onApplied }) {
         setExpanded((prev) => new Set(prev).add(svc.key));
     };
 
+    // Shows a service's card, from the Simulator tab
+    const showService = (key) => {
+        setExpanded((prev) => new Set(prev).add(key));
+        setTab(TABS.services);
+        requestAnimationFrame(() => document.getElementById(`service-${key}`)?.scrollIntoView({ block: 'nearest' }));
+    };
+    const setSimulator = (patch) => setState((s) => ({ ...s, simulator: { ...s.simulator, ...patch } }));
+    const updateActor = (key, actor) => setState((s) => ({ ...s, simulator: { ...s.simulator, actors: s.simulator.actors.map((a) => (a.key === key ? actor : a)) } }));
+    const removeOrphan = (key) => setState((s) => ({ ...s, simulator: { ...s.simulator, orphans: s.simulator.orphans.filter((o) => o.key !== key) } }));
+    const adoptOrphan = (orphan) => {
+        const svc = orphanService(orphan, newService(), state.simulator.package, packages);
+        removeOrphan(orphan.key);
+        addService(svc);
+        showService(svc.key);
+    };
+    const simulated = state ? state.services.filter((s) => s.simulate && SIM_LISTS[s.type]) : [];
+    const actorErrors = shown['simulator.actors'] ?? {};
+    // Errors on simulator arg rows that the rows editor doesn't show itself
+    const simArgErrors = Object.values(shown['simulator.args'] ?? {}).filter((e) => e.endsWith('is edited above'));
+
     const serviceErrors = (key) => {
         const prefix = `services.${key}.`;
         return Object.fromEntries(Object.entries(shown).filter(([k]) => k.startsWith(prefix)).map(([k, v]) => [k.slice(prefix.length), v]));
@@ -279,11 +304,11 @@ function ConfigureDialog({ daemon, onHide, onApplied }) {
                         <InputTextarea value={raw} onChange={(e) => setRaw(e.target.value)} rows={24} disabled={busy} style={{ fontFamily: 'monospace', width: '100%' }} />
                     )}
                     {mode === 'form' && state && (
-                        <TabView>
+                        <TabView activeIndex={tab} onTabChange={(e) => setTab(e.index)}>
                             <TabPanel header="Daemon">
                                 <div className="flex flex-wrap gap-3">{DAEMON_FIELDS.map(daemonField)}</div>
                             </TabPanel>
-                            <TabPanel header="Simulator">
+                            <TabPanel header={`Simulator${Object.keys(shown).some((k) => k.startsWith('simulator.')) ? ' ⚠' : ''}`}>
                                 <div className="flex flex-column gap-3">
                                     <div className="flex align-items-center gap-2">
                                         <Checkbox
@@ -305,12 +330,59 @@ function ConfigureDialog({ daemon, onHide, onApplied }) {
                                                     disabled={busy}
                                                 />
                                             </div>
-                                            <span className="font-semibold text-sm">Simulator args</span>
+                                            <div className="flex flex-column gap-2">
+                                                <span className="font-semibold text-sm">Simulated vehicles and engines</span>
+                                                <small className="text-color-secondary">Edited on their service cards (Services tab): tick Simulated on a vehicle or engine service.</small>
+                                                {simulated.length === 0 && <div className="text-color-secondary text-sm">None.</div>}
+                                                {simulated.map((s) => (
+                                                    <div key={s.key} className="flex align-items-center gap-3 text-sm">
+                                                        <Button label={s.name.trim() || '(unnamed)'} link size="small" className="p-0" onClick={() => showService(s.key)} />
+                                                        <span className="text-color-secondary">{s.type}</span>
+                                                        <span className="text-color-secondary">{s.sim.interface.trim() || DEFAULT_INTERFACE[s.type]}</span>
+                                                        {s.type === 'vehicle' && (
+                                                            <span className="text-color-secondary">
+                                                                {s.sim.originRaw !== undefined ? JSON.stringify(s.sim.originRaw) : s.sim.origin.lat !== null && s.sim.origin.lon !== null ? formatPoint(s.sim.origin) : 'no origin'}
+                                                            </span>
+                                                        )}
+                                                        {shown[`services.${s.key}.sim`] && <i className="pi pi-exclamation-circle" style={{ color: 'var(--red-500)' }} title="Has errors" />}
+                                                    </div>
+                                                ))}
+                                                {state.simulator.orphans.map((o) => (
+                                                    <div key={o.key} className="flex align-items-center gap-2">
+                                                        <Message
+                                                            severity="warn"
+                                                            className="flex-1"
+                                                            text={`The simulator has ${o.kind} "${o.entry.name ?? '(unnamed)'}", but no simulated ${o.kind} service has that name, so the daemon won't use it.`}
+                                                        />
+                                                        <Button label="Create service" size="small" text onClick={() => adoptOrphan(o)} disabled={busy} />
+                                                        <Button label="Remove" size="small" text severity="danger" onClick={() => removeOrphan(o.key)} disabled={busy} />
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            <div className="flex flex-column gap-2">
+                                                <span className="font-semibold text-sm">Actors ({state.simulator.actors.length})</span>
+                                                <small className="text-color-secondary">Objects in the simulated world, such as people or cars, that simulated detectors report.</small>
+                                                {state.simulator.actors.map((a) => (
+                                                    <ActorEditor
+                                                        key={a.key}
+                                                        actor={a}
+                                                        errors={actorErrors[a.key]}
+                                                        onChange={(actor) => updateActor(a.key, actor)}
+                                                        onRemove={() => setSimulator({ actors: state.simulator.actors.filter((x) => x.key !== a.key) })}
+                                                        disabled={busy}
+                                                    />
+                                                ))}
+                                                <div>
+                                                    <Button label="Add actor" icon="pi pi-plus" text size="small" onClick={() => setSimulator({ actors: [...state.simulator.actors, newActor()] })} disabled={busy} />
+                                                </div>
+                                            </div>
+                                            <span className="font-semibold text-sm">Other simulator args</span>
                                             <KeyValueEditor
                                                 rows={state.simulator.argRows}
-                                                onChange={(argRows) => setState((s) => ({ ...s, simulator: { ...s.simulator, argRows } }))}
+                                                onChange={(argRows) => setSimulator({ argRows })}
                                                 disabled={busy}
                                             />
+                                            {simArgErrors.map((e) => <small key={e} className="p-error">{e}</small>)}
                                         </>
                                     )}
                                 </div>
@@ -323,6 +395,7 @@ function ConfigureDialog({ daemon, onHide, onApplied }) {
                                             svc={svc}
                                             packages={packages}
                                             hasSimulator={state.simulator.present}
+                                            simPackage={state.simulator.package}
                                             errors={serviceErrors(svc.key)}
                                             expanded={expanded.has(svc.key)}
                                             onToggle={() => toggle(svc.key)}
