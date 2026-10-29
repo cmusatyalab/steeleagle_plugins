@@ -41,6 +41,16 @@ Edge cases:
 
 Accuracy assumes a level vehicle (the telemetry has no vehicle pitch or roll), flat terrain, no gimbal roll, and correct `hfov`/`vfov`. It is best at moderate distances on flat ground.
 
+## Older GPUs
+
+The default environment installs torch built for CUDA 13, which has no kernels
+for Pascal GPUs (e.g. GTX 1080 Ti) and needs a recent NVIDIA driver. The
+`cuda126` environment installs torch built for CUDA 12.6 instead. Select it in
+the eagled config with `environment = "cuda126"` in the service's `[services.plugin]`
+table, or run it directly with `pixi run -e cuda126 start`. The plugin code is
+the same in both. Pascal GPUs have no fast FP16, so prefer a smaller model such
+as `yolo26s.pt` over the default `yolo26x.pt`.
+
 ## Development
 
 ```
