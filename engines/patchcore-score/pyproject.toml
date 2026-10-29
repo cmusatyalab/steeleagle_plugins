@@ -1,0 +1,39 @@
+[project]
+name = "patchcore-score"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "uriel>=0.2.0",
+    "faiss-cpu",
+    "numpy",
+    "torch",
+    "anomalib",
+    "protobuf",
+]
+
+# steeleagle_protocol/ and embedding_result_pb2.py in this folder are vendored
+# generated code, not a pip dependency: generated via `buf generate` from
+# cmusatyalab/steeleagle @ 3406577a (detached commit, not yet merged to main
+# Regenerate and re-copy them in if/when that's resolved.
+
+[tool.setuptools]
+py-modules = ["main", "score"]
+
+[tool.setuptools.packages.find]
+include = ["steeleagle_protocol*"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.pypi-dependencies]
+patchcore-score = { path = ".", editable = true }
+
+[tool.pixi.dependencies]
+cython = "*"
+pkg-config = "*"
+c-compiler = "*"
+cxx-compiler = "*"
+
+[tool.pixi.tasks]
+start = "uv run main.py"
