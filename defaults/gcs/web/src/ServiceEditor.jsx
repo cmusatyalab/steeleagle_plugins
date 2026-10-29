@@ -14,8 +14,9 @@ const SEP = '\u0000';
 // One service in the Configure dialog: a collapsible card with its name,
 // type, auth, plugin (picked from the daemon's installed packages, or typed
 // in) and the plugin's args. `errors` maps a field to its message, with
-// `args` mapping an arg to its message.
-function ServiceEditor({ svc, packages, errors = {}, expanded, onToggle, onChange, onRemove, onDuplicate, disabled }) {
+// `args` mapping an arg to its message. hasSimulator is whether the config
+// has a [simulator], which a simulated service needs.
+function ServiceEditor({ svc, packages, hasSimulator, errors = {}, expanded, onToggle, onChange, onRemove, onDuplicate, disabled }) {
     const pluginOptions = (packages ?? []).flatMap((p) => p.plugins.map((pl) => ({
         label: `${pl.name} — ${p.uri}`,
         value: `${p.uri}${SEP}${pl.name}`,
@@ -65,9 +66,20 @@ function ServiceEditor({ svc, packages, errors = {}, expanded, onToggle, onChang
                             <Dropdown value={svc.auth} options={AUTH_OPTIONS} onChange={(e) => onChange({ ...svc, auth: e.value })} disabled={disabled} style={{ width: '9rem' }} />
                         </div>
                     </div>
-                    <div className="flex align-items-center gap-2">
-                        <Checkbox inputId={`${svc.key}-simulate`} checked={svc.simulate} onChange={(e) => onChange({ ...svc, simulate: !!e.checked })} disabled={disabled} />
-                        <label htmlFor={`${svc.key}-simulate`} className="text-sm">Run in the simulator</label>
+                    <div className="flex flex-column gap-1">
+                        <div className="flex align-items-center gap-2">
+                            {/* Unchecking stays possible without a simulator, so a config that needs one can be fixed */}
+                            <Checkbox
+                                inputId={`${svc.key}-simulate`}
+                                checked={svc.simulate}
+                                onChange={(e) => onChange({ ...svc, simulate: !!e.checked })}
+                                disabled={disabled || (!hasSimulator && !svc.simulate)}
+                            />
+                            <label htmlFor={`${svc.key}-simulate`} className="text-sm">Simulated: this daemon's simulator plays this service instead of its plugin</label>
+                        </div>
+                        {!hasSimulator && (
+                            <small className={svc.simulate ? 'p-error' : 'text-color-secondary'}>Needs a simulator (Simulator tab).</small>
+                        )}
                     </div>
                     <div className="flex flex-column gap-1">
                         <label className="text-sm">Plugin</label>
@@ -96,7 +108,7 @@ function ServiceEditor({ svc, packages, errors = {}, expanded, onToggle, onChang
                             </div>
                         </>
                     )}
-                    {svc.simulate && <small className="text-color-secondary">A simulated service is run by the simulator, configured through the simulator's args; its plugin args and isolation are ignored.</small>}
+                    {svc.simulate && <small className="text-color-secondary">Configure it in the simulator's args, under the same name; this plugin's args and isolation are ignored.</small>}
                 </div>
             )}
         </div>

@@ -145,11 +145,12 @@ function OrchestrationPage({ toast }) {
         }
     };
 
+    // The same warning banner as the Configure dialog's Apply step
     const confirmRestart = (daemon) => confirmDialog({
-        message: restartWarning({ own: daemon.local }),
+        message: <Message severity="warn" text={restartWarning({ own: daemon.local })} style={{ maxWidth: '36rem' }} />,
         header: `Restart ${daemonName(daemon)}`,
-        icon: 'pi pi-exclamation-triangle',
         acceptLabel: 'Restart',
+        acceptIcon: 'pi pi-refresh',
         acceptClassName: 'p-button-danger',
         accept: () => doRestart(daemon),
     });

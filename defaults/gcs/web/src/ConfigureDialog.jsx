@@ -322,6 +322,7 @@ function ConfigureDialog({ daemon, onHide, onApplied }) {
                                             key={svc.key}
                                             svc={svc}
                                             packages={packages}
+                                            hasSimulator={state.simulator.present}
                                             errors={serviceErrors(svc.key)}
                                             expanded={expanded.has(svc.key)}
                                             onToggle={() => toggle(svc.key)}
