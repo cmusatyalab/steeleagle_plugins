@@ -47,7 +47,7 @@ default = "/usr/lib/gstreamer-1.0"
 
 [[args]]
 name = "lib_path"
-type = string
+type = "string"
 description = "Path to the system library directory"
 default = "/usr/lib/"
 
