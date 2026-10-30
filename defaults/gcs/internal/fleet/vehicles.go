@@ -11,7 +11,6 @@ import (
 	telemetrypb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/telemetry"
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
 	"github.com/rs/zerolog"
-	"google.golang.org/grpc"
 )
 
 const (
@@ -106,12 +105,12 @@ type Vehicles struct {
 	unavailable map[string]Unavailable
 }
 
-// NewVehicles returns a handler that lists vehicles from the daemon at conn.
-// flows may be nil, in which case no dataflows are managed, gcs_flow is
-// empty, and no vehicle has telemetry.
-func NewVehicles(conn grpc.ClientConnInterface, flows *Flows, log zerolog.Logger) *Vehicles {
+// NewVehicles returns a handler that lists vehicles from daemon. flows may
+// be nil, in which case no dataflows are managed, gcs_flow is empty, and no
+// vehicle has telemetry.
+func NewVehicles(daemon daemonpb.DaemonServiceClient, flows *Flows, log zerolog.Logger) *Vehicles {
 	return &Vehicles{
-		daemon:      daemonpb.NewDaemonServiceClient(conn),
+		daemon:      daemon,
 		flows:       flows,
 		log:         log,
 		known:       map[string]Vehicle{},

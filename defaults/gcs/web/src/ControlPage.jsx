@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Button } from 'primereact/button';
 import { Toolbar } from 'primereact/toolbar';
 import { ButtonGroup } from 'primereact/buttongroup';
@@ -14,7 +14,7 @@ import { toggleVehicleInSquad } from './squadUtils.js';
 import { STYLE_OPTIONS } from './mapStyles.js';
 import { streamUpload, initialUploadState, applyUploadEvent, isUploadFinished, finishUpload, validMissionName, defaultMissionName } from './missionUpload.js';
 import { displayName } from './vehicleNames.js';
-import { useVehicleVideo } from './useVehicleVideo.js';
+import VehicleVideoPanel from './VehicleVideoPanel.jsx';
 
 const vehicleOptionTemplate = (name) => (name ? <span title={name}>{displayName(name)}</span> : null);
 const vehicleValueTemplate = (name, props) => (name ? <span title={name}>{displayName(name)}</span> : props.placeholder);
@@ -29,16 +29,11 @@ const uploadOptions = { icon: 'pi pi-fw pi-cloud-upload', iconOnly: true, classN
 // Swarm Controls Panel wrapper below frees up the vertical room for it.
 const videoPanelHeight = '26rem';
 
-function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, tracking, setTracking,
+function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, resultsEngine, setResultsEngine, tracking, setTracking,
   showDetections, onToggleDetections, toast, onCommand,
   setManualControl, squadList, setSquadList, takeOffAltitude, controlGroups,
   uploadState, setUploadState }) {
   const mapPanelSize = 0;
-  const video = useVehicleVideo(selectedVehicle || null);
-  const videoRef = useRef(null);
-  useEffect(() => {
-    if (videoRef.current) videoRef.current.srcObject = video.stream;
-  }, [video.stream]);
   const gcsFlow = vehicles?.find?.((v) => v.name === selectedVehicle)?.gcs_flow || '';
   const noVideoLabel = 'No video: the vehicle isn\'t sending video to the GCS (a mission dataflow may be active; Hold restores it)'
     + (gcsFlow.startsWith('no video:') || gcsFlow.startsWith('error:') ? ` (${gcsFlow})` : '');
@@ -191,19 +186,8 @@ function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, tracking, 
               mapHeight={videoPanelHeight} squadList={squadList} onToggleVehicle={onToggleVehicle} controlGroups={controlGroups} mapStyle={mapStyle} />
           </div>
           <div className="col-12 lg:col-6 p-2">
-            <div style={{ height: videoPanelHeight, backgroundColor: '#000', position: 'relative' }}>
-              {video.stream && (video.status === 'live' || video.status === 'stale') && (
-                <video ref={videoRef} autoPlay muted playsInline style={{ width: '100%', height: '100%', objectFit: 'contain', position: 'absolute', inset: 0 }} />
-              )}
-              {video.status !== 'live' && (
-                <div style={{ position: 'absolute', inset: 0 }}>
-                  {video.status !== 'stale' && <img src="nostream.png" alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />}
-                  <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: '0.5rem', color: '#fff', background: 'rgba(0,0,0,0.6)', fontSize: '0.85rem' }}>
-                    {video.status === 'idle' ? 'Select a video feed' : video.status === 'connecting' ? 'Connecting to video…' : noVideoLabel}
-                  </div>
-                </div>
-              )}
-            </div>
+            <VehicleVideoPanel vehicle={selectedVehicle} engine={resultsEngine} setEngine={setResultsEngine}
+              height={videoPanelHeight} noVideoLabel={noVideoLabel} />
           </div>
         </div>
         <div className="my-2" style={{ overflowX: 'auto' }}>

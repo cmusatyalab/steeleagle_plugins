@@ -44,6 +44,9 @@ function App() {
   const [gamePadButton, setGamePadButton] = useState(-99);
   const [gamePadAxis, setGamePadAxis] = useState({ 'index': -99, 'value': -99 });
   const [selectedVehicle, setSelectedVehicle] = useState("");
+  // The engine whose results the Control page's video shows; kept here, like
+  // the selected vehicle, so it survives leaving the Control tab
+  const [resultsEngine, setResultsEngine] = useState(null);
   const [, setError] = useState(null);
   const [tracking, setTracking] = useState(true);
   const [theme, setTheme] = useState(() => localStorage.getItem('se-theme') || 'dark');
@@ -496,6 +499,7 @@ function App() {
             uploadState={missionUploadState} setUploadState={setMissionUploadState} />}
         </div>
         {selectedMenu == "Control" && <ControlPage vehicles={vehicles} selectedVehicle={selectedVehicle} setSelectedVehicle={setSelectedVehicle}
+          resultsEngine={resultsEngine} setResultsEngine={setResultsEngine}
           tracking={tracking} setTracking={setTracking} showDetections={showDetections} onToggleDetections={onToggleDetections}
           toast={toast} onCommand={onCommand}
           setManualControl={setManualControl} squadList={squadList} setSquadList={setSquadList}

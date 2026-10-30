@@ -89,7 +89,7 @@ describe('simulator entries', () => {
 
     it('turns an orphan into a simulated service', () => {
         const st = formToState(simForm({ vehicles: [{ name: 'lost', origin: [1, 2, 3] }] }, []), packages);
-        const base = { key: 'k', origName: null, name: '', type: 'engine', auth: '', simulate: false, plugin: '', package: '', isolation: '', args: { declared: [], rows: [] }, hadArgs: false, extra: null, pluginExtra: null };
+        const base = { key: 'k', origName: null, name: '', type: 'engine', auth: '', simulate: false, plugin: '', package: '', isolation: '', environment: '', args: { declared: [], rows: [] }, hadArgs: false, extra: null, pluginExtra: null };
         const svc = orphanService(st.simulator.orphans[0], base, SIM_PKG, packages);
         expect(svc).toMatchObject({ name: 'lost', type: 'vehicle', simulate: true, plugin: 'sim_vehicle', package: SIM_PKG });
         st.services.push(svc);

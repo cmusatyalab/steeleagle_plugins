@@ -219,7 +219,7 @@ func TestHandlerWithoutDaemon(t *testing.T) {
 // unavailable compiler.
 func testMissions() missionRoutes {
 	svc := mission.NewService(unavailableCompiler{errors.New("no go")}, mission.CompilerConfig{}, "", nil, nil, zerolog.Nop())
-	return missionRoutes{svc: svc, upload: noDaemonHandler(), deploy: noDaemonHandler(), catalog: noDaemonHandler()}
+	return missionRoutes{svc: svc, upload: noDaemonHandler(), deploy: noDaemonHandler(), pushFlow: noDaemonHandler(), catalog: noDaemonHandler()}
 }
 
 // TestParseArgsCompiler ensures that the compiler's config is read from the
@@ -244,7 +244,7 @@ func TestNoDaemonMissionRoutes(t *testing.T) {
 	defer hub.Close()
 	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
-	for _, path := range []string{"/api/upload", "/api/deploy"} {
+	for _, path := range []string{"/api/upload", "/api/deploy", "/api/flows/push"} {
 		resp, err := http.Post(server.URL+path, "application/json", strings.NewReader("{}"))
 		if err != nil {
 			t.Fatal(err)

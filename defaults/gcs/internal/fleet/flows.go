@@ -384,6 +384,33 @@ func (f *Flows) pushOnce(name string) string {
 	return "ok"
 }
 
+// SetFlow sets the vehicle's flow to toml, a flow from the Flow Builder, and
+// disarms the vehicle like MissionStarted, so that the GCS flow doesn't
+// replace it until the vehicle is held or reconnects. A GCS push still
+// running is not repeated.
+func (f *Flows) SetFlow(ctx context.Context, name string, toml []byte) error {
+	f.mu.Lock()
+	st := f.state(name)
+	st.armed, st.again = false, false
+	// The daemon ignores a flow that is byte for byte the one it runs, so
+	// each push differs, to set the flow again
+	toml = append([]byte(fmt.Sprintf("# Flow Builder flow, pushed %s\n", f.now().Format(time.RFC3339Nano))), toml...)
+	f.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, pushTimeout)
+	defer cancel()
+	_, err := f.data.SetDataflow(route(ctx, name), vehiclepb.SetDataflowRequest_builder{Toml: toml}.Build())
+	if err != nil {
+		f.log.Warn().Err(err).Str("vehicle", name).Msg("could not set the vehicle's flow to the Flow Builder's")
+		return err
+	}
+	f.mu.Lock()
+	// The vehicle doesn't run the GCS flow, so no GCS push status applies
+	f.state(name).status = ""
+	f.mu.Unlock()
+	f.log.Info().Str("vehicle", name).Msg("set the vehicle's flow to the Flow Builder's")
+	return nil
+}
+
 // Status says how the last push to the vehicle went: "" if unknown or still
 // pending, "ok" if it set a flow with video, "no video: <reason>" if it set
 // a telemetry-only flow, or "error: <message>" if it failed.

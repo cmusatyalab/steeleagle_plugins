@@ -109,7 +109,10 @@ function ServiceEditor({ svc, packages, hasSimulator, simPackage, errors = {}, e
                     </div>
                     {!svc.simulate && (
                         <>
-                            {text('Isolation', 'isolation', { placeholder: 'empty for a process; "sandbox", or a container image' })}
+                            <div className="flex gap-2">
+                                {text('Isolation', 'isolation', { placeholder: 'empty for a process; "sandbox", or a container image' })}
+                                {text('Pixi environment', 'environment', { placeholder: "empty for the package's default environment" })}
+                            </div>
                             <div className="flex flex-column gap-1">
                                 <span className="font-semibold text-sm">Plugin args</span>
                                 <ArgsEditor args={svc.args} errors={errors.args ?? {}} onChange={(args) => onChange({ ...svc, args })} disabled={disabled} />

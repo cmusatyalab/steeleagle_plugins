@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getApiUrl } from './urls.js';
 import { createVideoSession, startStreamMonitor } from './webrtcVideo.js';
 
@@ -7,8 +7,24 @@ const IDLE = { stream: null, status: 'idle', error: null };
 // Live video of `vehicle` (full vehicle name) over WebRTC. Polls /api/streams
 // until the vehicle has a video producer, then connects; the peer connection
 // is closed when the vehicle changes or the component unmounts.
-export function useVehicleVideo(vehicle) {
+//
+// `engine` (a full engine service name, or null) is the engine whose results
+// are wanted; each one, about the camera shown, is passed to `onResult` as the
+// GCS sends it (rtc.DataMessage). Changing either doesn't reconnect.
+export function useVehicleVideo(vehicle, engine = null, onResult = null) {
   const [state, setState] = useState(IDLE);
+  const sessionRef = useRef(null);
+  const engineRef = useRef(engine);
+  const onResultRef = useRef(onResult);
+
+  useEffect(() => {
+    onResultRef.current = onResult;
+  }, [onResult]);
+
+  useEffect(() => {
+    engineRef.current = engine;
+    sessionRef.current?.setResultsEngine(engine);
+  }, [engine]);
 
   useEffect(() => {
     if (!vehicle) {
@@ -24,7 +40,12 @@ export function useVehicleVideo(vehicle) {
       onChange: (s) => {
         if (!cancelled) setState(s);
       },
+      onResult: (message) => {
+        if (!cancelled) onResultRef.current?.(message);
+      },
     });
+    session.setResultsEngine(engineRef.current);
+    sessionRef.current = session;
 
     const stop = startStreamMonitor({
       vehicle,
@@ -37,6 +58,7 @@ export function useVehicleVideo(vehicle) {
 
     return () => {
       cancelled = true;
+      sessionRef.current = null;
       stop();
       session.close();
     };

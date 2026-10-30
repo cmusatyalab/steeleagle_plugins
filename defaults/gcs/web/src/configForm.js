@@ -4,7 +4,7 @@
 //   { daemon: { port, lcs, hostname, cert, orchestrator, extra },  // null = not set
 //     simulator: { package, args, extra } | null,
 //     services: [{ name, type, auth, simulate,
-//                  plugin: { plugin, package, isolation, args, extra }, extra }],
+//                  plugin: { plugin, package, isolation, environment, args, extra }, extra }],
 //     extra }
 //
 // The `extra` maps hold the keys the form doesn't know; they pass through
@@ -139,6 +139,7 @@ function serviceState(s, packages, sim) {
         plugin: plugin.plugin ?? '',
         package: plugin.package ?? '',
         isolation: plugin.isolation ?? '',
+        environment: plugin.environment ?? '',
         args: argsState(plugin.args, pluginSpec(packages, plugin.package, plugin.plugin)),
         hadArgs: plugin.args != null,
         extra: s.extra ?? null,
@@ -196,6 +197,12 @@ export function setPlugin(svc, packages, uri, name) {
         } else rows.push(row);
     }
     return { ...svc, plugin: name, package: uri, args: { declared, rows }, hadArgs: true };
+}
+
+// The key of the card of the service named name in the config as loaded, or
+// null if the config has none (or isn't shown as a form).
+export function serviceKeyByName(state, name) {
+    return state?.services.find((s) => s.origName === name)?.key ?? null;
 }
 
 export function formToState(form, packages) {
@@ -274,6 +281,7 @@ export function stateToForm(state) {
                 plugin: s.plugin.trim(),
                 package: s.package.trim(),
                 isolation: s.isolation.trim(),
+                environment: s.environment.trim(),
                 args: s.hadArgs || Object.keys(args.value).length ? args.value : null,
                 extra: s.pluginExtra,
             },

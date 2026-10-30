@@ -1,8 +1,9 @@
 // Command gcsmock is a fake daemon for exercising the GCS without vehicles. It
 // serves the daemon's gRPC API on a unix socket for simulated vehicles, hosts
 // a Uriel server with their camera and telemetry producers and mock
-// h264_encoder engines, and runs the real GCS binary as its child, as the
-// daemon runs an engine plugin. It exits with the child's exit status.
+// h264_encoder engines, and a mock detector on the GCS's daemon whose
+// detections the GCS can draw on the video, and runs the real GCS binary as
+// its child, as the daemon runs an engine plugin. It exits with the child's exit status.
 package main
 
 import (
@@ -61,6 +62,7 @@ type options struct {
 	vehicles                      []string
 	noEncoder                     map[string]bool
 	noYolo                        map[string]bool
+	noDetector                    bool
 	denyConfig                    map[string]bool
 	archs                         map[string]string // daemon IP -> architecture
 }
@@ -105,6 +107,7 @@ func parseFlags(args []string) (options, error) {
 		"comma-separated vehicle names, each its daemon's IP, a dot and its own name")
 	noEncoder := fs.String("no-encoder-daemons", "", "comma-separated IPs of daemons without an h264_encoder")
 	noYolo := fs.String("no-yolo-daemons", "", "comma-separated IPs of daemons without a yolo engine")
+	fs.BoolVar(&o.noDetector, "no-detector", false, "don't run the mock detector on the GCS's daemon")
 	denyConfig := fs.String("deny-config-daemons", "", "comma-separated IPs of daemons that refuse config, restart and package changes with PermissionDenied")
 	archs := fs.String("daemon-arch", "",
 		"comma-separated ip=arch entries (amd64 or arm64) for daemon architectures; others are amd64")
@@ -162,9 +165,13 @@ func splitList(s string) []string {
 }
 
 // topology returns the names the daemon lists: an encoder and a yolo engine
-// on each vehicle daemon that isn't excluded.
+// on each vehicle daemon that isn't excluded, and the detector on the GCS's
+// daemon unless it is.
 func (o options) topology() Topology {
 	top := Topology{GCSIP: o.gcsIP, Vehicles: o.vehicles, EncoderDaemons: map[string]bool{}, Archs: o.archs, YoloDaemons: map[string]bool{}, DenyConfig: o.denyConfig}
+	if !o.noDetector {
+		top.Detector = o.gcsIP + "." + detectorService
+	}
 	for _, ip := range o.daemonIPs() {
 		if !o.noEncoder[ip] {
 			top.EncoderDaemons[ip] = true
@@ -230,11 +237,11 @@ func run(o options, log zerolog.Logger) (int, error) {
 	defer u.Close()
 	for _, ip := range o.daemonIPs() {
 		if top.EncoderDaemons[ip] {
-			if err := u.StartEngine(ip+"."+encoderService, encoderMaxOutput, Encoder(clips)); err != nil {
+			if err := u.StartEngine(ip+"."+encoderService, "", encoderMaxOutput, Encoder(clips)); err != nil {
 				return 1, err
 			}
 		}
-		if err := u.StartEngine(ip+".mission_sink", sinkMaxOutput, Sink); err != nil {
+		if err := u.StartEngine(ip+".mission_sink", "", sinkMaxOutput, Sink); err != nil {
 			return 1, err
 		}
 	}
@@ -243,6 +250,11 @@ func run(o options, log zerolog.Logger) (int, error) {
 		v := NewVehicle(name, offsetFrom(cmu, 0, float64(i)*15))
 		vehicles[name] = v
 		if err := startVehicle(u, name, v); err != nil {
+			return 1, err
+		}
+	}
+	if top.Detector != "" {
+		if err := u.StartEngine(top.Detector, detectionID, detectorMaxOutput, Detector); err != nil {
 			return 1, err
 		}
 	}

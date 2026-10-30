@@ -46,6 +46,12 @@ const (
 	daemonEnv = "STEELEAGLE_CLIENT_SOCKET"
 	// shutdownTimeout is how long requests may take to finish on shutdown.
 	shutdownTimeout = 5 * time.Second
+	// listCacheTTL is how long a listing of the daemon's services is shared
+	// before the daemon is asked again: the browsers poll the vehicle list
+	// every 500ms each, but the daemon is listed at most once a second.
+	listCacheTTL = time.Second
+	// listTimeout bounds a listing of the daemon's services.
+	listTimeout = 10 * time.Second
 )
 
 // Defaults of the args, matching gcs.plugin.toml. The daemon passes only the
@@ -137,7 +143,11 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	hub, err := rtc.NewHub(rtc.Options{ICEServers: a.ICEServers, PortMin: portMin, PortMax: portMax}, log)
+	// Viewers may be sent the results of the engines on this machine
+	results := func(ctx context.Context, name string, handle func(feed.Result)) {
+		feed.SubscribeResults(ctx, name, log, handle)
+	}
+	hub, err := rtc.NewHub(rtc.Options{ICEServers: a.ICEServers, PortMin: portMin, PortMax: portMax, Results: results}, log)
 	if err != nil {
 		return err
 	}
@@ -156,11 +166,14 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	controller := control.New(grpcConn(conn), control.DefaultTimeout, log)
 	vehicles := noDaemonHandler()
 	var fleetFlows *fleet.Flows
+	// Everything that lists the daemon's services shares one listing
+	var daemonClient daemonpb.DaemonServiceClient
 	if conn != nil {
+		daemonClient = fleet.NewCachedDaemon(daemonpb.NewDaemonServiceClient(conn), listCacheTTL, listTimeout)
 		fleetFlows = fleet.NewFlows(conn, fleet.FlowSpec{Engine: engine}, log)
 		controller.OnHold(fleetFlows.PushAfterHold)
 		controller.OnStart(fleetFlows.MissionStarted)
-		vehicles = http.HandlerFunc(fleet.NewVehicles(conn, fleetFlows, log).ServeVehicles)
+		vehicles = http.HandlerFunc(fleet.NewVehicles(daemonClient, fleetFlows, log).ServeVehicles)
 	}
 
 	cfg, err := mission.ResolveConfig(a.Compiler)
@@ -174,13 +187,13 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	gcsIP, _ := fleet.SplitName(engine)
 	var gcsHostname string
 	if conn != nil {
-		gcsHostname = daemonHostname(context.Background(), daemonpb.NewDaemonServiceClient(conn), log)
+		gcsHostname = daemonHostname(context.Background(), daemonClient, log)
 	}
 	var list mission.Lister
 	var catalog mission.CatalogFunc
 	var running mission.VehiclesFunc
 	if conn != nil {
-		list = daemonLister(daemonpb.NewDaemonServiceClient(conn), gcsIP, gcsHostname)
+		list = daemonLister(daemonClient, gcsIP, gcsHostname)
 		catalog = func(ctx context.Context) (flows.Catalog, error) {
 			_, cat, err := list(ctx)
 			return cat, err
@@ -190,17 +203,18 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 			return vs, err
 		}
 	}
-	missions := missionRoutes{svc: mission.NewService(compiler, cfg, gcsIP, catalog, running, log), upload: noDaemonHandler(), deploy: noDaemonHandler(), catalog: noDaemonHandler()}
+	missions := missionRoutes{svc: mission.NewService(compiler, cfg, gcsIP, catalog, running, log), upload: noDaemonHandler(), deploy: noDaemonHandler(), pushFlow: noDaemonHandler(), catalog: noDaemonHandler()}
 	if conn != nil {
 		uploads := mission.NewUploads(list, mission.NewSender(conn, 1<<20, 30*time.Second), missions.svc, log)
 		missions.upload = http.HandlerFunc(uploads.ServeUpload)
 		missions.deploy = http.HandlerFunc(uploads.ServeDeploy)
-		missions.catalog = http.HandlerFunc(flows.NewCatalogHandler(daemonpb.NewDaemonServiceClient(conn), gcsIP, gcsHostname).ServeCatalog)
+		missions.pushFlow = http.HandlerFunc(mission.NewFlowPush(list, fleetFlows, gcsIP, log).ServePushFlow)
+		missions.catalog = http.HandlerFunc(flows.NewCatalogHandler(daemonClient, gcsIP, gcsHostname).ServeCatalog)
 	}
 
 	daemonsRoutes := noDaemonRoutes()
 	if conn != nil {
-		h := daemons.NewHandler(daemonpb.NewDaemonServiceClient(conn), daemons.Self{IP: gcsIP, Hostname: gcsHostname, Arch: runtime.GOARCH, OS: runtime.GOOS, Engine: engine}, log)
+		h := daemons.NewHandler(daemonClient, daemons.Self{IP: gcsIP, Hostname: gcsHostname, Arch: runtime.GOARCH, OS: runtime.GOOS, Engine: engine}, log)
 		daemonsRoutes = h.Routes()
 	}
 
@@ -334,11 +348,13 @@ func (c unavailableCompiler) Build(context.Context, mission.BuildRequest) ([]byt
 	return nil, c.err
 }
 
-// missionRoutes are what the mission routes are served by. upload and deploy
-// need the daemon.
+// missionRoutes are what the mission routes are served by. upload, deploy
+// and pushFlow need the daemon.
 type missionRoutes struct {
 	svc            *mission.Service
 	upload, deploy http.Handler
+	// pushFlow sets the Flow Builder's flow on its vehicle.
+	pushFlow http.Handler
 	// catalog serves the flow catalog.
 	catalog http.Handler
 }
@@ -385,6 +401,7 @@ func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Hand
 	mux.Handle("POST /api/upload", missions.upload)
 	mux.Handle("POST /api/deploy", missions.deploy)
 	mux.Handle("GET /api/flows/catalog", missions.catalog)
+	mux.Handle("POST /api/flows/push", missions.pushFlow)
 	mux.HandleFunc("POST /api/flows/from_toml", flows.ServeFromTOML)
 	mux.Handle("GET /ws/presence", presence.New(log))
 	for pattern, h := range orchestration {

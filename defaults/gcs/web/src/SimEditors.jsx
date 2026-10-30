@@ -46,7 +46,7 @@ export function PointInput({ label, point, raw, onChange, error, disabled }) {
 export function SimEntryEditor({ type, sim, errors = {}, onChange, disabled }) {
     return (
         <div className="flex flex-column gap-3 p-2 border-round" style={{ background: 'var(--surface-ground)' }}>
-            <small className="text-color-secondary">The simulator plays this service from these settings (its {type === 'vehicle' ? 'vehicles' : 'engines'} entry of this name); the plugin's args and isolation are ignored.</small>
+            <small className="text-color-secondary">The simulator plays this service from these settings (its {type === 'vehicle' ? 'vehicles' : 'engines'} entry of this name); the plugin's args, isolation and environment are ignored.</small>
             <div className="flex flex-column gap-1">
                 <label className="text-sm">Interface</label>
                 <InputText value={sim.interface} placeholder={DEFAULT_INTERFACE[type]} onChange={(e) => onChange({ ...sim, interface: e.target.value })} disabled={disabled} style={{ width: '14rem' }} />

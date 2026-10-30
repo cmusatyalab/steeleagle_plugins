@@ -20,6 +20,7 @@ import FlowPalette from './FlowPalette.jsx';
 import FlowPanel from './FlowPanel.jsx';
 import CanvasContextMenu from './CanvasContextMenu.jsx';
 import VehiclePicker from './VehiclePicker.jsx';
+import { pushButtonState, pushFlow } from './flowPush.js';
 import { flowCanvasThemeVars } from './canvasTheme.js';
 import '@xyflow/react/dist/style.css';
 
@@ -45,6 +46,7 @@ function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog,
     const [contextMenu, setContextMenu] = useState(null); // {x, y, nodeId} | {x, y, edgeId}
     const [loadingCatalog, setLoadingCatalog] = useState(false);
     const [rfNodes, setRfNodes] = useState([]);
+    const [pushing, setPushing] = useState(false);
     const fileInputRef = useRef(null);
     const tomlInputRef = useRef(null);
 
@@ -72,6 +74,7 @@ function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog,
     }, [importCount, fitView]);
 
     const validation = useMemo(() => (catalog ? validateFlow(flow, catalog) : NO_ISSUES), [flow, catalog]);
+    const push = pushButtonState(flow, catalog, validation);
     const onChangeStream = useCallback((id, stream) => setFlow((f) => updateNode(f, id, { stream })), [setFlow]);
     const view = useMemo(
         () => toReactFlow(flow, catalog, validation, selection, { onChangeStream }),
@@ -196,6 +199,15 @@ function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog,
         }
     }
 
+    async function onPush() {
+        const vehicle = displayName(flow.vehicle);
+        setPushing(true);
+        const error = await pushFlow(flow, catalog);
+        setPushing(false);
+        if (error) notify('error', 'Flow not pushed', error);
+        else notify('success', 'Flow pushed', `${vehicle} now runs ${flow.name || 'this flow'}; Hold puts the GCS flow back`);
+    }
+
     function deleteItem(item) {
         if (item?.nodeId) setFlow((f) => removeNode(f, item.nodeId));
         if (item?.edgeId) setFlow((f) => removeEdge(f, item.edgeId));
@@ -242,6 +254,11 @@ function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog,
                     tooltip={validation.errors.length ? 'Fix the errors below first' : undefined}
                     tooltipOptions={{ showOnDisabled: true, position: 'bottom' }}
                     onClick={onExportToml} />
+                <Button label={push.label} icon="pi pi-send" size="small"
+                    disabled={push.disabled || pushing} loading={pushing}
+                    tooltip={push.tooltip}
+                    tooltipOptions={{ showOnDisabled: true, position: 'bottom' }}
+                    onClick={onPush} />
             </div>
             <div className="flex" style={{ flex: 1, minHeight: 0 }}>
                 <FlowPalette flow={flow} catalog={catalog} loading={loadingCatalog} onRefresh={refreshCatalog} />

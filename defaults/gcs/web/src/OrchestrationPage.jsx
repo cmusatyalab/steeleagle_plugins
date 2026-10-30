@@ -67,6 +67,8 @@ function OrchestrationPage({ toast }) {
     const [selectedIp, setSelectedIp] = useState(null);
     const [activeTab, setActiveTab] = useState(0);
     const [configuring, setConfiguring] = useState(null);
+    // The service the Configure dialog opens on, by name; null for none
+    const [configureFocus, setConfigureFocus] = useState(null);
     // Daemons being followed after an apply or restart, by IP:
     // {startedAt, sawDown, name, own}
     const [follows, setFollows] = useState({});
@@ -165,6 +167,7 @@ function OrchestrationPage({ toast }) {
             {configuring && (
                 <ConfigureDialog
                     daemon={configuring}
+                    focus={configureFocus}
                     onHide={() => setConfiguring(null)}
                     onApplied={() => {
                         toast.current.show({ severity: 'info', summary: daemonName(configuring), detail: 'Config applied; restarting...' });
@@ -216,7 +219,7 @@ function OrchestrationPage({ toast }) {
                                 <span className="text-color-secondary ml-2">{selected.ip}</span>
                             </span>
                             <span className="flex gap-2" title={selected.state === 'unreachable' ? stateText(selected) : undefined}>
-                                <Button label="Configure..." icon="pi pi-cog" size="small" onClick={() => setConfiguring(selected)} disabled={actionsDisabled} />
+                                <Button label="Configure..." icon="pi pi-cog" size="small" onClick={() => { setConfigureFocus(null); setConfiguring(selected); }} disabled={actionsDisabled} />
                                 <Button label="Restart Daemon" icon="pi pi-refresh" size="small" severity="danger" outlined onClick={() => confirmRestart(selected)} disabled={actionsDisabled} />
                             </span>
                         </div>
@@ -225,7 +228,11 @@ function OrchestrationPage({ toast }) {
                                 <InfoPanel daemon={selected} />
                             </TabPanel>
                             <TabPanel header="Services">
-                                <PluginsTab daemon={selected} toast={toast} onRestarted={refresh} />
+                                <PluginsTab
+                                    daemon={selected} toast={toast} onRestarted={refresh}
+                                    onConfigure={(svc) => { setConfigureFocus(svc.bare); setConfiguring(selected); }}
+                                    configureDisabled={actionsDisabled}
+                                />
                             </TabPanel>
                             <TabPanel header="Packages">
                                 <PackagesTab

@@ -26,6 +26,8 @@ import (
 	"runtime"
 
 	vehiclepb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/vehicle"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/rtc"
+	"github.com/pion/webrtc/v4"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -825,5 +827,91 @@ func TestE2EDeployFlow(t *testing.T) {
 	// encoder are on the orchestrator, so they are remote for charlie.
 	if got := results[r.charlie]; !got.Success {
 		t.Errorf("charlie's deploy: %+v, want success", got)
+	}
+}
+
+// TestE2EDetectorResults has a browser's peer connection receive alpha's
+// video and ask for the mock detector's results: they arrive on its data
+// channel, about alpha's camera, with the mock objects.
+func TestE2EDetectorResults(t *testing.T) {
+	r := startMock(t, false)
+	r.waitVideo(15*time.Second, "alpha's video", map[string]bool{r.alpha: true})
+	detector := r.gcsIP + "." + detectorService
+	producer := r.alpha + ".front"
+
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo,
+		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil {
+		t.Fatal(err)
+	}
+	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		buf := make([]byte, 1500)
+		for {
+			if _, _, err := track.Read(buf); err != nil {
+				return
+			}
+		}
+	})
+	dc, err := pc.CreateDataChannel("gcs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan rtc.DataMessage, 16)
+	dc.OnOpen(func() {
+		msg, _ := json.Marshal(rtc.ControlMessage{Type: "results", Engine: detector})
+		_ = dc.SendText(string(msg))
+	})
+	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		var m rtc.DataMessage
+		if json.Unmarshal(msg.Data, &m) == nil && m.Type == "result" {
+			select {
+			case results <- m:
+			default:
+			}
+		}
+	})
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gathered := webrtc.GatheringCompletePromise(pc)
+	if err := pc.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	<-gathered
+	body, _ := json.Marshal(rtc.Offer{SDP: pc.LocalDescription().SDP, Video: []string{producer}})
+	resp, err := http.Post(r.url+"/api/webrtc/offer", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var answer rtc.Answer
+	err = json.NewDecoder(resp.Body).Decode(&answer)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || err != nil {
+		t.Fatalf("offer answered %d, %v", resp.StatusCode, err)
+	}
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer.SDP}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case m := <-results:
+		if m.Engine != detector || m.Producer != producer || m.Vehicle != r.alpha || m.ResultType != "DetectionResult" {
+			t.Errorf("got result %+v, want the detector's about %s", m, producer)
+		}
+		var result struct {
+			Detections []struct {
+				ClassName string `json:"className"`
+			} `json:"detections"`
+		}
+		if err := json.Unmarshal(m.Result, &result); err != nil || len(result.Detections) != len(mockObjects) {
+			t.Errorf("result %s has %d detections (%v), want %d", m.Result, len(result.Detections), err, len(mockObjects))
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("no result from the detector")
 	}
 }

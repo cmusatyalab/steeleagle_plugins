@@ -2,6 +2,7 @@ package rtc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,10 +42,16 @@ type viewer struct {
 	hub   *Hub
 	pc    *webrtc.PeerConnection
 	sinks map[string]*sink // by producer
-	log   zerolog.Logger
+	// producers are the producers whose video the viewer receives; never
+	// changed, so they may be read without a lock
+	producers map[string]struct{}
+	log       zerolog.Logger
 	// data is the viewer's open data channel, if any; guarded by the hub's
 	// mu
 	data *webrtc.DataChannel
+	// engine is the engine whose results the viewer wants, if any; guarded
+	// by the hub's mu
+	engine string
 
 	mu      sync.Mutex
 	started bool
@@ -60,6 +67,7 @@ func (h *Hub) Connect(ctx context.Context, offer Offer) (Answer, error) {
 		return Answer{}, fmt.Errorf("asked for %d videos, at most %d are allowed", len(offer.Video), maxVideos)
 	}
 	sinks := map[string]*sink{}
+	producers := map[string]struct{}{}
 	for _, producer := range offer.Video {
 		if producer == "" {
 			return Answer{}, errors.New("asked for a video without a producer")
@@ -68,13 +76,14 @@ func (h *Hub) Connect(ctx context.Context, offer Offer) (Answer, error) {
 			return Answer{}, fmt.Errorf("asked for the video of %q twice", producer)
 		}
 		sinks[producer] = nil
+		producers[producer] = struct{}{}
 	}
 
 	pc, err := h.api.NewPeerConnection(webrtc.Configuration{ICEServers: h.iceServers})
 	if err != nil {
 		return Answer{}, fmt.Errorf("could not create peer connection: %w", err)
 	}
-	v := &viewer{hub: h, pc: pc, sinks: sinks, log: h.log.With().Strs("video", offer.Video).Logger()}
+	v := &viewer{hub: h, pc: pc, sinks: sinks, producers: producers, log: h.log.With().Strs("video", offer.Video).Logger()}
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
@@ -108,6 +117,7 @@ func (v *viewer) answer(ctx context.Context, offer Offer) (Answer, error) {
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
 		dc.OnOpen(func() { v.openData(dc) })
 		dc.OnClose(func() { v.closeData(dc) })
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) { v.control(msg.Data) })
 	})
 
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer.SDP}); err != nil {
@@ -206,6 +216,31 @@ func (v *viewer) openData(dc *webrtc.DataChannel) {
 	}
 }
 
+// maxEngineName bounds the engine name a browser may ask for results of.
+const maxEngineName = 256
+
+// control handles a message the browser sent on its data channel.
+func (v *viewer) control(data []byte) {
+	var msg ControlMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		v.log.Debug().Err(err).Msg("invalid message from viewer")
+		return
+	}
+	if msg.Type != "results" || len(msg.Engine) > maxEngineName {
+		v.log.Debug().Str("type", msg.Type).Msg("unsupported message from viewer")
+		return
+	}
+	h := v.hub
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// A viewer that is gone wants nothing
+	if _, ok := h.viewers[v]; !ok {
+		return
+	}
+	v.log.Debug().Str("engine", msg.Engine).Msg("viewer wants results")
+	h.wantResults(v, msg.Engine)
+}
+
 // closeData stops sending on dc.
 func (v *viewer) closeData(dc *webrtc.DataChannel) {
 	v.hub.mu.Lock()
@@ -229,6 +264,7 @@ func (v *viewer) close() {
 	h := v.hub
 	h.mu.Lock()
 	delete(h.viewers, v)
+	h.wantResults(v, "")
 	h.mu.Unlock()
 	for producer, s := range v.sinks {
 		if s == nil {

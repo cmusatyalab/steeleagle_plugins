@@ -454,3 +454,84 @@ func TestObserveRidesOutUnavailableDaemon(t *testing.T) {
 		t.Errorf("Status after a hold while away = %q, want ok", s)
 	}
 }
+
+// testFlow is a Flow Builder flow that streams only telemetry to the GCS,
+// which a check would take for a GCS flow and replace.
+const testFlow = `[[producers]]
+name = "telemetry"
+
+[[engines]]
+name = "100.64.1.5.gcs"
+location = "remote"
+
+[[edges]]
+from = "telemetry"
+to = "100.64.1.5.gcs"
+timeout = "2s"
+`
+
+// TestSetFlowStopsChecks checks that a flow set from the Flow Builder isn't
+// replaced by the GCS flow while the vehicle's data isn't arriving.
+func TestSetFlowStopsChecks(t *testing.T) {
+	d, f, snap := flowsFixture(t)
+	advance := fakeClock(f)
+	f.Observe(snap)
+	f.Wait()
+	if err := f.SetFlow(context.Background(), v1, []byte(testFlow)); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		advance(retryMax)
+		f.Observe(snap)
+		f.Wait()
+	}
+	if n := d.setCount(v1); n != 2 {
+		t.Errorf("pushes = %d, want 2: the GCS flow, then the set flow", n)
+	}
+	if !sameFlow(t, d.flows[v1], []byte(testFlow)) {
+		t.Errorf("flow = %s, want the set flow", d.flows[v1])
+	}
+}
+
+// TestSetFlowDiffersEachTime checks that setting the same flow twice sends
+// different bytes, since the daemon ignores the flow it already runs.
+func TestSetFlowDiffersEachTime(t *testing.T) {
+	d, f, _ := flowsFixture(t)
+	advance := fakeClock(f)
+	if err := f.SetFlow(context.Background(), v1, []byte(testFlow)); err != nil {
+		t.Fatal(err)
+	}
+	first := string(d.flows[v1])
+	advance(time.Millisecond)
+	if err := f.SetFlow(context.Background(), v1, []byte(testFlow)); err != nil {
+		t.Fatal(err)
+	}
+	if string(d.flows[v1]) == first {
+		t.Errorf("both pushes sent %q", first)
+	}
+	if !sameFlow(t, d.flows[v1], []byte(testFlow)) {
+		t.Errorf("flow = %s, want the set flow", d.flows[v1])
+	}
+}
+
+func TestSetFlowError(t *testing.T) {
+	d, f, _ := flowsFixture(t)
+	d.setErr = status.Error(codes.InvalidArgument, "bad flow")
+	err := f.SetFlow(context.Background(), v1, []byte(testFlow))
+	if err == nil || !strings.Contains(err.Error(), "bad flow") {
+		t.Errorf("err = %v, want the daemon's error", err)
+	}
+}
+
+// TestHoldAfterSetFlow checks that a hold puts the GCS flow back.
+func TestHoldAfterSetFlow(t *testing.T) {
+	d, f, snap := flowsFixture(t)
+	if err := f.SetFlow(context.Background(), v1, []byte(testFlow)); err != nil {
+		t.Fatal(err)
+	}
+	f.PushAfterHold([]string{v1})
+	f.Wait()
+	if !sameFlow(t, d.flows[v1], wantFlow(t, snap, v1)) {
+		t.Errorf("flow = %s, want the GCS flow", d.flows[v1])
+	}
+}
