@@ -36,4 +36,4 @@ c-compiler = "*"
 cxx-compiler = "*"
 
 [tool.pixi.tasks]
-start = "uv run main.py"
+start = "python run main.py"
