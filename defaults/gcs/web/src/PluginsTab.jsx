@@ -7,9 +7,10 @@ import { confirmDialog } from 'primereact/confirmdialog';
 import { restartService } from './daemonsApi.js';
 
 // The Services tab: every service one daemon runs, from the daemons list the
-// Orchestrate page polls, with its run state and a restart. The GCS's daemon
-// forwards a restart to the daemon the service is on.
-function PluginsTab({ daemon, toast, onRestarted }) {
+// Orchestrate page polls, with its run state, a restart, and a shortcut to
+// its card in the Configure dialog (onConfigure). The GCS's daemon forwards a
+// restart to the daemon the service is on.
+function PluginsTab({ daemon, toast, onRestarted, onConfigure, configureDisabled }) {
     // The services being restarted, by full name: a restart can take tens of
     // seconds, and a second one while it runs would restart the service twice.
     const [restarting, setRestarting] = useState(() => new Set());
@@ -73,20 +74,33 @@ function PluginsTab({ daemon, toast, onRestarted }) {
             />
             <Column
                 header=""
-                style={{ width: '4rem' }}
+                style={{ width: '6rem' }}
                 body={(s) => (
-                    <Button
-                        icon="pi pi-refresh"
-                        size="small"
-                        text
-                        rounded
-                        tooltip={`Restart ${s.bare}`}
-                        tooltipOptions={{ position: 'top' }}
-                        aria-label={`Restart ${s.bare}`}
-                        loading={restarting.has(s.name)}
-                        disabled={restarting.has(s.name)}
-                        onClick={() => confirmRestart(s)}
-                    />
+                    <span className="flex">
+                        <Button
+                            icon="pi pi-cog"
+                            size="small"
+                            text
+                            rounded
+                            tooltip={`Configure ${s.bare}`}
+                            tooltipOptions={{ position: 'top' }}
+                            aria-label={`Configure ${s.bare}`}
+                            disabled={configureDisabled}
+                            onClick={() => onConfigure(s)}
+                        />
+                        <Button
+                            icon="pi pi-refresh"
+                            size="small"
+                            text
+                            rounded
+                            tooltip={`Restart ${s.bare}`}
+                            tooltipOptions={{ position: 'top' }}
+                            aria-label={`Restart ${s.bare}`}
+                            loading={restarting.has(s.name)}
+                            disabled={restarting.has(s.name)}
+                            onClick={() => confirmRestart(s)}
+                        />
+                    </span>
                 )}
             />
         </DataTable>

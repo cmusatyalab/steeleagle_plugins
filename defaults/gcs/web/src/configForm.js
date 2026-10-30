@@ -199,6 +199,12 @@ export function setPlugin(svc, packages, uri, name) {
     return { ...svc, plugin: name, package: uri, args: { declared, rows }, hadArgs: true };
 }
 
+// The key of the card of the service named name in the config as loaded, or
+// null if the config has none (or isn't shown as a form).
+export function serviceKeyByName(state, name) {
+    return state?.services.find((s) => s.origName === name)?.key ?? null;
+}
+
 export function formToState(form, packages) {
     const daemon = form.daemon ?? {};
     const sim = form.simulator;

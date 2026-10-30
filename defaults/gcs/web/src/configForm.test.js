@@ -8,6 +8,7 @@ import {
     guards,
     pluginSpec,
     restartWarning,
+    serviceKeyByName,
     stateToForm,
 } from './configForm.js';
 
@@ -289,5 +290,17 @@ describe('setPlugin', () => {
         const next = setPlugin(svc, packages, GCS_PKG, 'gcs');
         expect(next.args.declared.find((d) => d.name === 'mapbox')).toMatchObject({ value: 'pk.test', present: true });
         expect(next.args.rows).toEqual([]);
+    });
+});
+
+describe('serviceKeyByName', () => {
+    it("finds a service's card by its name in the loaded config", () => {
+        const state = formToState(serverForm(), packages);
+        expect(serviceKeyByName(state, 'gcs')).toBe(state.services[0].key);
+    });
+
+    it('finds nothing for a service the config lacks, or with no form', () => {
+        expect(serviceKeyByName(formToState(serverForm(), packages), 'yolo')).toBeNull();
+        expect(serviceKeyByName(null, 'gcs')).toBeNull();
     });
 });

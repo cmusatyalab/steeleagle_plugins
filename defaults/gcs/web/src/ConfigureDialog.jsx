@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Dialog } from 'primereact/dialog';
 import { Button } from 'primereact/button';
 import { Checkbox } from 'primereact/checkbox';
@@ -20,6 +20,7 @@ import {
     hasErrors,
     newService,
     restartWarning,
+    serviceKeyByName,
     stateToForm,
 } from './configForm.js';
 import { DEFAULT_INTERFACE, SIM_LISTS, newActor, orphanService } from './simForm.js';
@@ -40,8 +41,9 @@ const DAEMON_FIELDS = [
 // The form's plugin args come from the daemon's installed packages. Apply
 // checks the config first (validation, packages the daemon lacks), then asks
 // for confirmation with the restart warning. The load's config_hash makes a
-// concurrent change a conflict rather than an overwrite.
-function ConfigureDialog({ daemon, onHide, onApplied }) {
+// concurrent change a conflict rather than an overwrite. `focus`, a
+// service's name, opens on that service's card.
+function ConfigureDialog({ daemon, focus, onHide, onApplied }) {
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState(null);
     const [notice, setNotice] = useState(null);
@@ -60,6 +62,8 @@ function ConfigureDialog({ daemon, onHide, onApplied }) {
     // The confirmation step: the check's result and the guards' confirmations
     const [confirm, setConfirm] = useState(null);
     const [ticked, setTicked] = useState(() => new Set());
+    // The focused service's card, to scroll to once the form shows it
+    const scrollTo = useRef(null);
 
     const name = daemonName(daemon);
 
@@ -85,8 +89,15 @@ function ConfigureDialog({ daemon, onHide, onApplied }) {
         const { config } = cfg;
         setRaw(config.raw_toml);
         if (config.form) {
-            setState(formToState(config.form, list));
+            const st = formToState(config.form, list);
+            setState(st);
             setMode('form');
+            const key = focus ? serviceKeyByName(st, focus) : null;
+            if (key) {
+                setExpanded(new Set([key]));
+                setTab(TABS.services);
+                scrollTo.current = key;
+            } else if (focus) notices.push(`${focus} isn't in this daemon's config.`);
         } else {
             setState(null);
             setMode('raw');
@@ -99,12 +110,20 @@ function ConfigureDialog({ daemon, onHide, onApplied }) {
             original: config.form ? formToState(config.form, list) : null,
         });
         setNotice(notices.length ? notices.join(' ') : null);
-    }, [daemon.ip]);
+    }, [daemon.ip, focus]);
 
     useEffect(() => {
         // eslint-disable-next-line react-hooks/set-state-in-effect
         load();
     }, [load]);
+
+    useEffect(() => {
+        const key = scrollTo.current;
+        if (loading || !key) return undefined;
+        scrollTo.current = null;
+        const raf = requestAnimationFrame(() => document.getElementById(`service-${key}`)?.scrollIntoView({ block: 'start' }));
+        return () => cancelAnimationFrame(raf);
+    }, [loading]);
 
     const { form, errors } = state ? stateToForm(state) : { form: null, errors: {} };
     const shown = showErrors ? errors : {};
