@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
-import { defaultFeatureName, featuresToGeoJson, featuresToKml, parseImportFile, bboxFromFeature, vehicleColor, vehicleSpeed, isVehicleDisconnected, isVehicleSelectable, vehicleStatus, vehicleStatusColor, vehicleStatusRailFill, vehicleStatusMapColor, vehicleStatusTextColor, sortVehiclesForDisplay } from './mapUtils.js';
+import { defaultFeatureName, featuresToGeoJson, featuresToKml, parseImportFile, bboxFromFeature, vehicleColor, vehicleSpeed, hasTelemetry, isVehicleDisconnected, isVehicleSelectable, vehicleStatus, vehicleStatusColor, vehicleStatusRailFill, vehicleStatusMapColor, vehicleStatusTextColor, sortVehiclesForDisplay } from './mapUtils.js';
 
 const SAMPLE_FC = {
     type: 'FeatureCollection',
@@ -167,17 +167,27 @@ describe('vehicleSpeed', () => {
     });
 });
 
+describe('hasTelemetry', () => {
+    it('is true when telemetry was just seen', () => {
+        expect(hasTelemetry({ last_updated: 0 })).toBe(true);
+    });
+
+    it('is true right at the boundary', () => {
+        expect(hasTelemetry({ last_updated: 5 })).toBe(true);
+    });
+
+    it('is false once telemetry is stale beyond the boundary', () => {
+        expect(hasTelemetry({ last_updated: 5.01 })).toBe(false);
+    });
+});
+
 describe('isVehicleDisconnected', () => {
-    it('is false when telemetry was just seen', () => {
-        expect(isVehicleDisconnected({ last_updated: 0 })).toBe(false);
+    it('is false for a controllable vehicle with no telemetry', () => {
+        expect(isVehicleDisconnected({ reachable: true, last_updated: 1e6 })).toBe(false);
     });
 
-    it('is false right at the boundary', () => {
-        expect(isVehicleDisconnected({ last_updated: 5 })).toBe(false);
-    });
-
-    it('is true once telemetry is stale beyond the boundary', () => {
-        expect(isVehicleDisconnected({ last_updated: 5.01 })).toBe(true);
+    it('is true for a vehicle whose daemon is unavailable', () => {
+        expect(isVehicleDisconnected({ reachable: false, last_updated: 1e6 })).toBe(true);
     });
 });
 
@@ -266,28 +276,28 @@ describe('vehicleStatusTextColor', () => {
 });
 
 describe('sortVehiclesForDisplay', () => {
-    const v = (name, last_updated) => ({ name, last_updated });
+    const v = (name, reachable = true) => ({ name, reachable, last_updated: 0 });
 
     it('puts selected vehicles before online, and online before offline', () => {
-        const vehicles = [v('offline-1', 10), v('online-1', 0), v('selected-1', 0)];
+        const vehicles = [v('offline-1', false), v('online-1'), v('selected-1')];
         const result = sortVehiclesForDisplay(vehicles, ['selected-1']);
         expect(result.map((x) => x.name)).toEqual(['selected-1', 'online-1', 'offline-1']);
     });
 
     it('sorts alphabetically by name within the same status group', () => {
-        const vehicles = [v('bravo', 0), v('alpha', 0), v('charlie', 0)];
+        const vehicles = [v('bravo'), v('alpha'), v('charlie')];
         const result = sortVehiclesForDisplay(vehicles, []);
         expect(result.map((x) => x.name)).toEqual(['alpha', 'bravo', 'charlie']);
     });
 
     it('treats a null squadList as no selection', () => {
-        const vehicles = [v('a', 0), v('b', 0)];
+        const vehicles = [v('a'), v('b')];
         const result = sortVehiclesForDisplay(vehicles, null);
         expect(result.map((x) => x.name)).toEqual(['a', 'b']);
     });
 
     it('does not mutate the input array', () => {
-        const vehicles = [v('b', 0), v('a', 0)];
+        const vehicles = [v('b'), v('a')];
         sortVehiclesForDisplay(vehicles, []);
         expect(vehicles.map((x) => x.name)).toEqual(['b', 'a']);
     });

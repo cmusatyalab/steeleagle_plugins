@@ -24,17 +24,28 @@ export function vehicleSpeed(velocity) {
     return Math.sqrt(velocity.x_vel ** 2 + velocity.y_vel ** 2 + velocity.z_vel ** 2);
 }
 
-// Matches the "Disconnected" threshold already used by the status card.
-export function isVehicleDisconnected(vehicle) {
-    return vehicle.last_updated > 5;
+// How old the latest telemetry may be (seconds) for it to count as flowing.
+export const TELEMETRY_STALE_SECONDS = 5;
+
+// Whether the vehicle's telemetry is reaching the GCS. A vehicle without it
+// may still be controllable, e.g. after a bad dataflow was pushed.
+export function hasTelemetry(vehicle) {
+    return vehicle.last_updated <= TELEMETRY_STALE_SECONDS;
 }
 
 // Whether the vehicle can be selected (and so held or controlled): its
-// daemon lists it, even if none of its data is reaching the GCS -- holding
-// it is how its data gets flowing again. A vehicle whose daemon is
-// unavailable (reachable: false) can't be.
+// service is running on a daemon that answers, even if none of its data is
+// reaching the GCS -- holding it is how its data gets flowing again. A
+// vehicle whose daemon is unavailable (reachable: false) can't be.
 export function isVehicleSelectable(vehicle) {
     return vehicle.reachable !== false;
+}
+
+// Whether control messages can't reach the vehicle: its daemon is
+// unavailable. This alone makes a vehicle "offline"; missing telemetry or
+// video doesn't (see hasTelemetry).
+export function isVehicleDisconnected(vehicle) {
+    return !isVehicleSelectable(vehicle);
 }
 
 // A single source of truth for "what state is this vehicle in," reused by
