@@ -178,3 +178,40 @@ func TestParseFormSyntaxError(t *testing.T) {
 		t.Errorf("line = %d, want 1", te.Line)
 	}
 }
+
+// TestParseFormEnvironment checks that a service's pixi environment is a
+// field of its plugin, written back only when set.
+func TestParseFormEnvironment(t *testing.T) {
+	in := []byte(`
+[[services]]
+name = "yolo"
+type = "engine"
+[services.plugin]
+plugin = "yolo"
+package = "github.com/org/repo//yolo"
+environment = "cuda126"
+`)
+	f, err := ParseForm(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := f.Services[0].Plugin
+	if p.Environment != "cuda126" || p.Extra != nil {
+		t.Fatalf("plugin = %+v, want environment cuda126 and no extra keys", p)
+	}
+	out, err := RenderForm(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := decodeMap(t, out), decodeMap(t, in); !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip =\n%v\nwant\n%v", got, want)
+	}
+	f.Services[0].Plugin.Environment = ""
+	if out, err = RenderForm(f); err != nil {
+		t.Fatal(err)
+	}
+	plugin := decodeMap(t, out)["services"].([]map[string]any)[0]["plugin"].(map[string]any)
+	if _, ok := plugin["environment"]; ok {
+		t.Errorf("rendered an empty environment:\n%s", out)
+	}
+}

@@ -58,11 +58,13 @@ type ServiceForm struct {
 // PluginForm is a service's [services.plugin] table. Empty strings are keys
 // the config doesn't set; nil Args is no args key.
 type PluginForm struct {
-	Plugin    string         `json:"plugin"`
-	Package   string         `json:"package"`
-	Isolation string         `json:"isolation"`
-	Args      map[string]any `json:"args"`
-	Extra     map[string]any `json:"extra"`
+	Plugin    string `json:"plugin"`
+	Package   string `json:"package"`
+	Isolation string `json:"isolation"`
+	// Environment is the pixi environment of the package the plugin runs in.
+	Environment string         `json:"environment"`
+	Args        map[string]any `json:"args"`
+	Extra       map[string]any `json:"extra"`
 }
 
 // TOMLError is a TOML syntax error, in the {message, line, column} shape the
@@ -195,7 +197,7 @@ func parseService(t map[string]any) (ServiceForm, error) {
 		return s, err
 	}
 	prest := copyMap(plugin)
-	for key, dst := range map[string]*string{"plugin": &s.Plugin.Plugin, "package": &s.Plugin.Package, "isolation": &s.Plugin.Isolation} {
+	for key, dst := range map[string]*string{"plugin": &s.Plugin.Plugin, "package": &s.Plugin.Package, "isolation": &s.Plugin.Isolation, "environment": &s.Plugin.Environment} {
 		v, err := takeString(prest, "plugin."+key)
 		if err != nil {
 			return s, err
@@ -244,6 +246,7 @@ func RenderForm(f Form) ([]byte, error) {
 			setString(plugin, "plugin", s.Plugin.Plugin)
 			setString(plugin, "package", s.Plugin.Package)
 			setString(plugin, "isolation", s.Plugin.Isolation)
+			setString(plugin, "environment", s.Plugin.Environment)
 			if s.Plugin.Args != nil {
 				plugin["args"] = s.Plugin.Args
 			}

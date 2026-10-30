@@ -35,7 +35,7 @@ function serverForm(overrides = {}) {
         services: [
             {
                 name: 'gcs', type: 'engine', auth: 'admin', simulate: false,
-                plugin: { plugin: 'gcs', package: GCS_PKG, isolation: '', args: { http_addr: ':8002', mapbox: 'pk.test' }, extra: { pin: true } },
+                plugin: { plugin: 'gcs', package: GCS_PKG, isolation: '', environment: 'cuda126', args: { http_addr: ':8002', mapbox: 'pk.test' }, extra: { pin: true } },
                 extra: { weight: 2 },
             },
         ],
@@ -118,6 +118,15 @@ describe('formToState and stateToForm', () => {
         const { form: out, errors } = stateToForm(formToState(form, packages));
         expect(errors).toEqual({});
         expect(out).toEqual(form);
+    });
+
+    it('writes the pixi environment trimmed, and empty for the default', () => {
+        const state = formToState(serverForm(), packages);
+        expect(state.services[0].environment).toBe('cuda126');
+        state.services[0].environment = '  cpu ';
+        expect(stateToForm(state).form.services[0].plugin.environment).toBe('cpu');
+        state.services[0].environment = '';
+        expect(stateToForm(state).form.services[0].plugin.environment).toBe('');
     });
 
     it('validates names, types, plugins, packages and ports', () => {
