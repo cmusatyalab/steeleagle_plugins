@@ -1,4 +1,7 @@
-"""Sends one image to a running detection engine and prints its detections.
+"""Sends an image to a running detection engine and prints its detections.
+
+The image can be sent several times to time the engine: the first --warmup
+results are discarded and the rest are summarized as round-trip latencies.
 
 Start the engine first (eagled normally does this), e.g. from engines/detection:
 
@@ -10,9 +13,12 @@ Start the engine first (eagled normally does this), e.g. from engines/detection:
 Then, on the same machine:
 
     cd examples && uv run detect_image.py photo.jpg --engine detector
+    cd examples && uv run detect_image.py photo.jpg --iterations 50 --warmup 5
 """
 
 import argparse
+import contextlib
+import statistics
 import sys
 import time
 import uuid
@@ -46,6 +52,13 @@ timeout = "{timeout_s}s"
 """
 FAILED_EVENTS = (uriel.EventKind.SKIPPED, uriel.EventKind.TIMED_OUT)
 BOX_COLOR = "red"
+DEFAULT_ITERATIONS = 1
+DEFAULT_WARMUP = 0
+MS_PER_S = 1000.0
+# statistics.quantiles cuts the data into this many groups, so index
+# P95_CUT - 1 is the 95th percentile
+PERCENTILE_GROUPS = 100
+P95_CUT = 95
 
 
 def make_frame(image):
@@ -61,27 +74,21 @@ def make_frame(image):
     )
 
 
-def detect(frame, engine_name, timeout_s):
-    """The DetectionResult the engine reports for `frame`."""
+@contextlib.contextmanager
+def engine_session(engine_name, max_payload_bytes, timeout_s):
+    """Connects a producer to the engine once and yields `detect(payload)`,
+    which sends a serialized frame and returns its DetectionResult."""
     suffix = uuid.uuid4().hex[:8]
     producer_name = f"client-camera-{suffix}"
-    payload = frame.SerializeToString()
     server = uriel.Server(f"client-server-{suffix}")
     client = uriel.Client(f"client-{suffix}", f"client-server-{suffix}")
     producer = uriel.Producer(
         producer_name,
         input_type=RAW_FRAME_TYPE,
-        max_input_size=len(payload) + FRAME_OVERHEAD_BYTES,
+        max_input_size=max_payload_bytes + FRAME_OVERHEAD_BYTES,
     )
-    try:
-        events = client.add_producer_with_events(producer_name)
-        server.add_engine(engine_name)
-        client.add_flow(
-            f"flow-{suffix}",
-            FLOW_SPEC.format(
-                producer=producer_name, engine=engine_name, timeout_s=int(timeout_s)
-            ),
-        )
+
+    def detect(payload):
         seq = producer.send(payload)
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
@@ -95,10 +102,40 @@ def detect(frame, engine_name, timeout_s):
             if event.kind in FAILED_EVENTS:
                 raise RuntimeError(f"engine {engine_name!r}: {event.kind.name}")
         raise TimeoutError(f"no result from engine {engine_name!r} in {timeout_s}s")
+
+    try:
+        events = client.add_producer_with_events(producer_name)
+        server.add_engine(engine_name)
+        client.add_flow(
+            f"flow-{suffix}",
+            FLOW_SPEC.format(
+                producer=producer_name, engine=engine_name, timeout_s=int(timeout_s)
+            ),
+        )
+        yield detect
     finally:
         producer.close()
         client.close()
         server.close()
+
+
+def summarize(latencies_s):
+    """Latency statistics, in milliseconds, of a list of times in seconds."""
+    ms = [t * MS_PER_S for t in latencies_s]
+    many = len(ms) > 1
+    cuts = (
+        statistics.quantiles(ms, n=PERCENTILE_GROUPS, method="inclusive")
+        if many
+        else ms
+    )
+    return {
+        "mean": statistics.fmean(ms),
+        "median": statistics.median(ms),
+        "stdev": statistics.stdev(ms) if many else 0.0,
+        "min": min(ms),
+        "max": max(ms),
+        "p95": cuts[P95_CUT - 1] if many else ms[0],
+    }
 
 
 def annotate(image, result, path):
@@ -125,11 +162,34 @@ def main():
         "--engine", default="detector", help="name the engine is served as"
     )
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=DEFAULT_ITERATIONS,
+        help="total times to send the image, including the warmup",
+    )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=DEFAULT_WARMUP,
+        help="results to discard from the start, e.g. while the model warms up",
+    )
     parser.add_argument("--output", help="save a copy of the image with boxes drawn")
     args = parser.parse_args()
 
+    if args.warmup < 0 or args.iterations <= args.warmup:
+        parser.error("--iterations must exceed --warmup, which cannot be negative")
+
     image = Image.open(args.image)
-    result = detect(make_frame(image), args.engine, args.timeout)
+    payload = make_frame(image).SerializeToString()
+    latencies = []
+    with engine_session(args.engine, len(payload), args.timeout) as detect:
+        for i in range(args.iterations):
+            started = time.perf_counter()
+            result = detect(payload)
+            elapsed = time.perf_counter() - started
+            if i >= args.warmup:
+                latencies.append(elapsed)
 
     if not result.detections:
         print("no detections")
@@ -142,6 +202,13 @@ def main():
     if args.output:
         annotate(image, result, args.output)
         print(f"wrote {args.output}", file=sys.stderr)
+    if args.iterations > 1:
+        stats = summarize(latencies)
+        print(
+            f"\n{len(latencies)} timed runs after {args.warmup} discarded (ms): "
+            + "  ".join(f"{name} {value:.1f}" for name, value in stats.items())
+            + f"  ({MS_PER_S / stats['mean']:.1f} runs/s)"
+        )
 
 
 if __name__ == "__main__":
