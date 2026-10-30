@@ -365,10 +365,10 @@ function App() {
 
   const items = useMemo(() => [
     {
-      label: 'Orchestrate',
-      icon: 'pi pi-sitemap',
+      label: 'Control',
+      icon: 'pi pi-sliders-v',
       command: () => {
-        setSeletectedMenu('Orchestration');
+        setSeletectedMenu('Control');
       },
     },
     {
@@ -379,10 +379,10 @@ function App() {
       },
     },
     {
-      label: 'Control',
-      icon: 'pi pi-sliders-v',
+      label: 'Orchestrate',
+      icon: 'pi pi-sitemap',
       command: () => {
-        setSeletectedMenu('Control');
+        setSeletectedMenu('Orchestration');
       },
     },
 
