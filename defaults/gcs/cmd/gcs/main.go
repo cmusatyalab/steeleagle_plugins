@@ -199,11 +199,12 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 			return vs, err
 		}
 	}
-	missions := missionRoutes{svc: mission.NewService(compiler, cfg, gcsIP, catalog, running, log), upload: noDaemonHandler(), deploy: noDaemonHandler(), catalog: noDaemonHandler()}
+	missions := missionRoutes{svc: mission.NewService(compiler, cfg, gcsIP, catalog, running, log), upload: noDaemonHandler(), deploy: noDaemonHandler(), pushFlow: noDaemonHandler(), catalog: noDaemonHandler()}
 	if conn != nil {
 		uploads := mission.NewUploads(list, mission.NewSender(conn, 1<<20, 30*time.Second), missions.svc, log)
 		missions.upload = http.HandlerFunc(uploads.ServeUpload)
 		missions.deploy = http.HandlerFunc(uploads.ServeDeploy)
+		missions.pushFlow = http.HandlerFunc(mission.NewFlowPush(list, fleetFlows, gcsIP, log).ServePushFlow)
 		missions.catalog = http.HandlerFunc(flows.NewCatalogHandler(daemonClient, gcsIP, gcsHostname).ServeCatalog)
 	}
 
@@ -343,11 +344,13 @@ func (c unavailableCompiler) Build(context.Context, mission.BuildRequest) ([]byt
 	return nil, c.err
 }
 
-// missionRoutes are what the mission routes are served by. upload and deploy
-// need the daemon.
+// missionRoutes are what the mission routes are served by. upload, deploy
+// and pushFlow need the daemon.
 type missionRoutes struct {
 	svc            *mission.Service
 	upload, deploy http.Handler
+	// pushFlow sets the Flow Builder's flow on its vehicle.
+	pushFlow http.Handler
 	// catalog serves the flow catalog.
 	catalog http.Handler
 }
@@ -394,6 +397,7 @@ func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Hand
 	mux.Handle("POST /api/upload", missions.upload)
 	mux.Handle("POST /api/deploy", missions.deploy)
 	mux.Handle("GET /api/flows/catalog", missions.catalog)
+	mux.Handle("POST /api/flows/push", missions.pushFlow)
 	mux.HandleFunc("POST /api/flows/from_toml", flows.ServeFromTOML)
 	mux.Handle("GET /ws/presence", presence.New(log))
 	for pattern, h := range orchestration {
