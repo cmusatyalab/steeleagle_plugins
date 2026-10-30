@@ -1,0 +1,55 @@
+[plugin]
+name = "QNN Object Detection"
+type = "engine"
+description = "Quantized YOLO on the Tachyon's HTP; detects COCO objects in camera frames"
+
+[[args]]
+name = "model"
+type = "string"
+description = "Compiled QNN YOLO model (a .so file name) in the daemon's models directory"
+default = "libs640_v26_quant.so"
+
+[[args]]
+name = "backend"
+type = "string"
+description = "Path to the QNN HTP backend .so, relative to the plugin folder"
+default = "libs/libQnnHtp.so"
+
+[[args]]
+name = "confidence"
+type = "number"
+description = "Minimum class score for a detection to be kept (0.0-1.0]"
+default = 0.5
+
+[[args]]
+name = "nms_score_threshold"
+type = "number"
+description = "Score threshold passed to non-maximum suppression"
+default = 0.5
+
+[[args]]
+name = "nms_iou_threshold"
+type = "number"
+description = "IoU threshold passed to non-maximum suppression"
+default = 0.3
+
+[[args]]
+name = "log_level"
+type = "string"
+description = "inference-server-uriel log level"
+default = "info"
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest DetectionResult this engine will emit, in bytes"
+default = 65536
+
+[engine]
+type = "detection"
+inputs = [
+    "steeleagle_protocol/v1/messages/frame/RawFrame",
+    "steeleagle_protocol/v1/messages/frame/EncodedFrame",
+]
+# The frame is forwarded unchanged, and its detections are its result
+result = "steeleagle_protocol/v1/messages/result/DetectionResult"

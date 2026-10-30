@@ -1,0 +1,9 @@
+[workspace]
+authors = ["Aditya Chanana <achanana@andrew.cmu.edu>"]
+channels = ["conda-forge"]
+name = "detection-qnn"
+platforms = ["linux-aarch64"]
+version = "0.1.0"
+
+[tasks]
+start = { cmd = "python3 start.py" }
