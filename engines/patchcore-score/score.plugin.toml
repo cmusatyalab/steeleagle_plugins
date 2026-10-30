@@ -33,4 +33,4 @@ default = 2000000
 [engine]
 type = "filter"
 inputs = ["patchcore_pipeline/v1/FrameWithEmbedding"]
-result = "messages/result/GenericResult"
+result = "steeleagle_protocol/v1/messages/result/GenericResult"

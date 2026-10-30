@@ -30,7 +30,7 @@ default = 8388608
 [engine]
 type = "filter"
 inputs = [
-    "steeleagle_protocol/v1/messages/telemetry/RawFrame",
-    "steeleagle_protocol/v1/messages/telemetry/EncodedFrame",
+    "steeleagle_protocol/v1/messages/frame/RawFrame",
+    "steeleagle_protocol/v1/messages/frame/EncodedFrame",
 ]
-result = "steeleagle_protocol/v1/messages/result/FrameWithEmbedding"
+result = "patchcore_pipeline/v1/FrameWithEmbedding"
