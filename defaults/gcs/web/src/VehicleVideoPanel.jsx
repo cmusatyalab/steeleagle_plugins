@@ -27,9 +27,9 @@ function DetectionOverlay({ result, w, h }) {
 
 // The vehicle's live video, with a dropdown over it to pick an engine on the
 // GCS's machine whose results are drawn on it: detections as boxes, any other
-// result as JSON along the bottom.
-function VehicleVideoPanel({ vehicle, height, noVideoLabel }) {
-  const [engine, setEngine] = useState(null);
+// result as JSON along the bottom. The engine is the caller's state, so it
+// outlives the panel.
+function VehicleVideoPanel({ vehicle, engine, setEngine, height, noVideoLabel }) {
   // The latest result of the engine, about the camera shown
   const [result, setResult] = useState(null);
   const [catalog, setCatalog] = useState({ daemons: [], unavailable: [], error: null });

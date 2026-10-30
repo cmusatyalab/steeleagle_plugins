@@ -29,7 +29,7 @@ const uploadOptions = { icon: 'pi pi-fw pi-cloud-upload', iconOnly: true, classN
 // Swarm Controls Panel wrapper below frees up the vertical room for it.
 const videoPanelHeight = '26rem';
 
-function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, tracking, setTracking,
+function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, resultsEngine, setResultsEngine, tracking, setTracking,
   showDetections, onToggleDetections, toast, onCommand,
   setManualControl, squadList, setSquadList, takeOffAltitude, controlGroups,
   uploadState, setUploadState }) {
@@ -186,7 +186,8 @@ function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, tracking, 
               mapHeight={videoPanelHeight} squadList={squadList} onToggleVehicle={onToggleVehicle} controlGroups={controlGroups} mapStyle={mapStyle} />
           </div>
           <div className="col-12 lg:col-6 p-2">
-            <VehicleVideoPanel vehicle={selectedVehicle} height={videoPanelHeight} noVideoLabel={noVideoLabel} />
+            <VehicleVideoPanel vehicle={selectedVehicle} engine={resultsEngine} setEngine={setResultsEngine}
+              height={videoPanelHeight} noVideoLabel={noVideoLabel} />
           </div>
         </div>
         <div className="my-2" style={{ overflowX: 'auto' }}>
