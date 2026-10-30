@@ -1,7 +1,7 @@
-"""Uriel engine: the final step. Receives the raw RGB24 frames h264-decode
-reconstructed (output_type="", fixed FRAME_W x FRAME_H RGB), runs RF-DETR
-looking for a person at confidence >= args['confidence'], and shows the frame
-with the box drawn on it if found (when args['show_window'] is set).
+"""Uriel engine: the final step. Receives the RawFrames (RGB24) that
+patchcore-score forwarded as anomalous, runs RF-DETR looking for a person at
+confidence >= args['confidence'], and shows the frame with the box drawn on it
+if found (when args['show_window'] is set).
 """
 import logging
 import time
@@ -9,7 +9,10 @@ import time
 import cv2
 import numpy as np
 import uriel
+from google.protobuf.message import DecodeError
 from PIL import Image
+
+from steeleagle_protocol.v1.messages.frame import frame_pb2
 
 try:
     from rfdetr.util.coco_classes import COCO_CLASSES
@@ -20,8 +23,7 @@ logger = logging.getLogger("verifier")
 
 PERSON_CLASS_ID = next(cid for cid, name in COCO_CLASSES.items() if name == "person")
 
-FRAME_W, FRAME_H = 1280, 720
-EXPECTED_RGB_SIZE = FRAME_W * FRAME_H * 3
+RGB_CHANNELS = 3
 
 WINDOW_NAME = "detected person"
 
@@ -89,17 +91,24 @@ def run_engine(name, args):
         logger.info("engine %s ready", name)
         for input in engine:
             t0 = time.perf_counter()
-            frame_bytes = bytes(input.data)
+            raw_frame = frame_pb2.RawFrame()
+            try:
+                raw_frame.ParseFromString(bytes(input.data))
+            except DecodeError as e:
+                logger.warning("input %d: not a RawFrame (%s); dropping", input.id.seq, e)
+                engine.drop()
+                continue
 
-            if len(frame_bytes) != EXPECTED_RGB_SIZE:
+            width, height = raw_frame.h_res, raw_frame.v_res
+            if raw_frame.channels != RGB_CHANNELS or len(raw_frame.data) != width * height * RGB_CHANNELS:
                 logger.warning(
                     "input %d: %d bytes, not a %dx%d RGB frame; dropping",
-                    input.id.seq, len(frame_bytes), FRAME_W, FRAME_H,
+                    input.id.seq, len(raw_frame.data), width, height,
                 )
                 engine.drop()
                 continue
 
-            rgb = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((FRAME_H, FRAME_W, 3))
+            rgb = np.frombuffer(raw_frame.data, dtype=np.uint8).reshape((height, width, RGB_CHANNELS))
             frame_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
             detections = detect_people(model, frame_bgr, args["confidence"])

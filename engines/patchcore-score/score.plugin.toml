@@ -1,7 +1,7 @@
 [plugin]
 name = "PatchCore Score"
 type = "engine"
-description = "Scores embeddings from the PatchCore embed engine against a FAISS memory bank; forwards anomalous frames, drops normal ones"
+description = "Scores embeddings from the PatchCore embed engine against a FAISS memory bank; forwards anomalous frames as RawFrames, drops normal ones"
 
 [[args]]
 name = "bank_ckpt"
@@ -24,13 +24,9 @@ default = 0
 [[args]]
 name = "max_output_size"
 type = "number"
-description = "Largest frame this engine will accept/forward, in bytes"
-default = 2000000
+description = "Largest RawFrame this engine will forward, in bytes (a 1280x720 RGB frame is 2764800)"
+default = 3145728
 
-# TODO(natan): inputs/result are placeholders until the tachyon's
-# steeleagle_protocol-based proto types (FrameWithEmbedding, etc.) are
-# pushed to git.
 [engine]
 type = "filter"
-inputs = ["patchcore_pipeline/v1/FrameWithEmbedding"]
-result = "steeleagle_protocol/v1/messages/result/GenericResult"
+inputs = ["steeleagle_protocol/v1/messages/result/FrameWithEmbedding"]

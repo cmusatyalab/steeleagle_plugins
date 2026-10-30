@@ -24,7 +24,7 @@ DEFAULTS = {
         "confidence": 0.70,
         "model_path": "",
         "show_window": True,
-        "max_output_size": 2_000_000,
+        "max_output_size": 3_145_728,
     },
 }
 

@@ -23,7 +23,7 @@ DEFAULTS = {
         "bank_ckpt": "",
         "faiss_index": "",
         "threshold": 0,
-        "max_output_size": 2_000_000,
+        "max_output_size": 3_145_728,
     },
 }
 

@@ -9,10 +9,14 @@ dependencies = [
     "torch",
     "pillow",
     "rfdetr",
+    "protobuf",
 ]
 
 [tool.setuptools]
 py-modules = ["main", "verifier"]
+
+[tool.setuptools.packages.find]
+include = ["steeleagle_protocol*"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]

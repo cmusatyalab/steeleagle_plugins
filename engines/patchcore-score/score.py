@@ -1,6 +1,7 @@
 """Uriel engine: scores FrameWithEmbedding (from the C++ embed engine) against
-the PatchCore memory bank via FAISS, forwards the frame if anomalous, drops it
-otherwise. Scoring logic ported verbatim from patchcore_csv_faiss.py.
+the PatchCore memory bank via FAISS, forwards the frame as a RawFrame if
+anomalous, drops it otherwise. Forwards no result. Scoring logic ported
+verbatim from patchcore_csv_faiss.py.
 """
 import logging
 import time
@@ -11,9 +12,18 @@ import torch
 import uriel
 from anomalib.models import Patchcore
 
-from steeleagle_protocol.v1.messages.result import result_pb2
+from frame_with_embedding_pb2 import FrameWithEmbedding
+from steeleagle_protocol.v1.messages.frame import frame_pb2
 
 logger = logging.getLogger("patchcore-score")
+
+# The embed engine passes the decoded frame through as raw RGB24 bytes, with no
+# dimensions, so they are fixed here (same as the verifier).
+FRAME_W, FRAME_H = 1280, 720
+RGB_CHANNELS = 3
+EXPECTED_RGB_SIZE = FRAME_W * FRAME_H * RGB_CHANNELS
+
+RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
 
 
 def load_model_and_threshold(ckpt_path):
@@ -75,7 +85,7 @@ def run_engine(name, args):
         logger.info("engine %s ready", name)
         for input in engine:
             t0 = time.perf_counter()
-            combined = result_pb2.FrameWithEmbedding()
+            combined = FrameWithEmbedding()
             combined.ParseFromString(bytes(input.data))
 
             try:
@@ -87,14 +97,32 @@ def run_engine(name, args):
 
             is_anomalous = anomaly_score > threshold
             elapsed_ms = (time.perf_counter() - t0) * 1000
-            result = f'{{"score": {anomaly_score:.4f}, "anomalous": {is_anomalous}}}'.encode()
 
-            if is_anomalous:
-                frame_bytes = combined.encoded_frame
-                buf = engine.loan()
-                buf[: len(frame_bytes)] = frame_bytes
-                engine.replace(len(frame_bytes), output_type="", result=result)
-                logger.info("ANOMALOUS score=%.4f (%.1fms) -> forwarded", anomaly_score, elapsed_ms)
-            else:
-                engine.drop(result=result)
+            if not is_anomalous:
+                engine.drop()
                 logger.info("normal    score=%.4f (%.1fms) -> dropped", anomaly_score, elapsed_ms)
+                continue
+
+            frame_bytes = combined.encoded_frame
+            if len(frame_bytes) != EXPECTED_RGB_SIZE:
+                logger.error(
+                    "ANOMALOUS score=%.4f but frame is %d bytes, not a %dx%d RGB frame; dropping",
+                    anomaly_score, len(frame_bytes), FRAME_W, FRAME_H,
+                )
+                engine.drop()
+                continue
+
+            payload = frame_pb2.RawFrame(
+                data=frame_bytes, h_res=FRAME_W, v_res=FRAME_H, channels=RGB_CHANNELS,
+            ).SerializeToString()
+            if len(payload) > args["max_output_size"]:
+                logger.error(
+                    "ANOMALOUS score=%.4f but RawFrame of %d bytes exceeds max_output_size %d; dropping",
+                    anomaly_score, len(payload), args["max_output_size"],
+                )
+                engine.drop()
+                continue
+
+            engine.loan()[: len(payload)] = payload
+            engine.replace(len(payload), output_type=RAW_FRAME_TYPE)
+            logger.info("ANOMALOUS score=%.4f (%.1fms) -> forwarded", anomaly_score, elapsed_ms)

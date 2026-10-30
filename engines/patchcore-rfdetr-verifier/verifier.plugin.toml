@@ -30,8 +30,9 @@ default = true
 [[args]]
 name = "max_output_size"
 type = "number"
-description = "Largest frame this engine will accept, in bytes"
-default = 2000000
+description = "Largest RawFrame this engine will accept, in bytes (a 1280x720 RGB frame is 2764800)"
+default = 3145728
 
 [engine]
 type = "detection"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
