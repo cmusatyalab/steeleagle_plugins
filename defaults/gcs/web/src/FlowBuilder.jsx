@@ -269,6 +269,7 @@ function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog,
                         // hidden) keeps the default '1' -- sharing it made url(#…)
                         // resolve to the hidden canvas's defs and draw nothing.
                         id="flow-builder"
+                        className="flow-builder-canvas"
                         colorMode={theme}
                         nodes={rfNodes}
                         edges={view.edges}

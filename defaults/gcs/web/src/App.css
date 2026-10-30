@@ -171,3 +171,11 @@
   background: var(--surface-ground);
   border-left: 2px solid var(--surface-border);
 }
+
+/* The flow builder's handles, big enough to grab when dragging an edge
+   (React Flow's default is 6px) */
+.flow-builder-canvas .react-flow__handle {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
