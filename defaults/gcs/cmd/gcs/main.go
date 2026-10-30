@@ -143,7 +143,11 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	hub, err := rtc.NewHub(rtc.Options{ICEServers: a.ICEServers, PortMin: portMin, PortMax: portMax}, log)
+	// Viewers may be sent the results of the engines on this machine
+	results := func(ctx context.Context, name string, handle func(feed.Result)) {
+		feed.SubscribeResults(ctx, name, log, handle)
+	}
+	hub, err := rtc.NewHub(rtc.Options{ICEServers: a.ICEServers, PortMin: portMin, PortMax: portMax, Results: results}, log)
 	if err != nil {
 		return err
 	}

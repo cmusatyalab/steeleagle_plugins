@@ -56,7 +56,7 @@ function waitForIceComplete(pc) {
 }
 
 // Offers one receive-only video track for `producer` and resolves with the
-// peer connection and its first remote stream. The peer connection is closed
+// peer connection, its first remote stream and its data channel. The peer connection is closed
 // again if anything fails. `onPeer(pc)` is called as soon as the connection
 // exists so a caller can close it while the handshake is still in flight.
 export async function connectVideo({ producer, fetchImpl = fetch, PeerConnection = RTCPeerConnection, onPeer }) {
@@ -84,7 +84,7 @@ export async function connectVideo({ producer, fetchImpl = fetch, PeerConnection
     });
     gotStream.catch(() => {});
     pc.addTransceiver('video', { direction: 'recvonly' });
-    pc.createDataChannel('gcs');
+    const dc = pc.createDataChannel('gcs');
     await guard(pc.setLocalDescription(await guard(pc.createOffer())));
     await guard(waitForIceComplete(pc));
     const res = await guard(fetchImpl(getApiUrl('/api/webrtc/offer'), {
@@ -99,7 +99,7 @@ export async function connectVideo({ producer, fetchImpl = fetch, PeerConnection
     const answer = await guard(res.json());
     await guard(pc.setRemoteDescription({ type: answer.type, sdp: answer.sdp }));
     const stream = await guard(gotStream);
-    return { pc, stream };
+    return { pc, stream, dc };
   } catch (e) {
     pc.close();
     throw e;
@@ -108,12 +108,34 @@ export async function connectVideo({ producer, fetchImpl = fetch, PeerConnection
   }
 }
 
+// The GCS's data channel messages are JSON objects whose first key is
+// "type"; this prefix picks out the results without parsing the telemetry and
+// frame metadata sent on the same channel.
+const RESULT_PREFIX = '{"type":"result"';
+
+// The result message on the data channel in `data`, or null for any other
+// message.
+export function parseResultMessage(data) {
+  if (typeof data !== 'string' || !data.startsWith(RESULT_PREFIX)) return null;
+  try {
+    return JSON.parse(data);
+  } catch {
+    return null;
+  }
+}
+
 // Holds at most one peer connection. onChange({stream, status, error}) only
 // reports for the latest switchTo. A failed or dropped connection is retried
-// after RECONNECT_DELAY_MS until switchTo/close is called.
-export function createVideoSession({ fetchImpl, PeerConnection, onChange }) {
+// after RECONNECT_DELAY_MS until switchTo/close is called. onResult(message)
+// is called with each result of the engine set with setResultsEngine, as the
+// GCS sends it on the data channel (rtc.DataMessage).
+export function createVideoSession({ fetchImpl, PeerConnection, onChange, onResult = () => {} }) {
   let generation = 0;
   let pc = null;
+  // The data channel of the live connection, and the engine whose results
+  // are wanted ('' for none), which every new channel is told once it opens
+  let channel = null;
+  let resultsEngine = '';
   let retryTimer = null;
   let liveStream = null;
   let stale = false;
@@ -124,11 +146,35 @@ export function createVideoSession({ fetchImpl, PeerConnection, onChange }) {
     retryTimer = null;
     liveStream = null;
     stale = false;
+    channel = null;
     if (pc) {
       pc.close();
       pc = null;
     }
     return generation;
+  };
+
+  const sendResultsEngine = () => {
+    if (channel?.readyState !== 'open') return;
+    try {
+      channel.send(JSON.stringify({ type: 'results', engine: resultsEngine }));
+    } catch {
+      // the channel just closed; the next connection is told
+    }
+  };
+
+  const attachChannel = (dc, gen) => {
+    if (!dc) return;
+    channel = dc;
+    dc.onmessage = (ev) => {
+      if (gen !== generation) return;
+      const message = parseResultMessage(ev.data);
+      if (message) onResult(message);
+    };
+    if (dc.readyState === 'open') sendResultsEngine();
+    else dc.onopen = () => {
+      if (gen === generation && channel === dc) sendResultsEngine();
+    };
   };
 
   const connect = (producer, gen) => {
@@ -141,6 +187,7 @@ export function createVideoSession({ fetchImpl, PeerConnection, onChange }) {
       }
       liveStream = null;
       stale = false;
+      channel = null;
       onChange({ stream: null, status: 'failed', error });
       retryTimer = setTimeout(() => {
         retryTimer = null;
@@ -152,12 +199,13 @@ export function createVideoSession({ fetchImpl, PeerConnection, onChange }) {
       onPeer: (p) => {
         pc = p;
       },
-    }).then(({ pc: connected, stream }) => {
+    }).then(({ pc: connected, stream, dc }) => {
       if (gen !== generation) {
         connected.close();
         return;
       }
       pc = connected;
+      attachChannel(dc, gen);
       connected.addEventListener('connectionstatechange', () => {
         if (gen !== generation || pc !== connected) return;
         if (connected.connectionState === 'failed' || connected.connectionState === 'disconnected') {
@@ -180,6 +228,12 @@ export function createVideoSession({ fetchImpl, PeerConnection, onChange }) {
         return;
       }
       connect(producer, gen);
+    },
+    // Asks for the results of `engine` (a full engine service name), or
+    // none for ''; kept across reconnects and camera switches.
+    setResultsEngine(engine) {
+      resultsEngine = engine || '';
+      sendResultsEngine();
     },
     // Marks the live feed as stalled (peer connection stays open) or
     // flowing again. Ignored unless a stream is live.

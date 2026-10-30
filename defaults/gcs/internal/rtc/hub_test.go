@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -195,6 +196,9 @@ type browser struct {
 	pc     *webrtc.PeerConnection
 	tracks chan *webrtc.TrackRemote
 	data   chan DataMessage
+	dc     *webrtc.DataChannel
+	// open is closed once dc opens
+	open chan struct{}
 }
 
 // connect connects a browser receiving the video of producers to the hub
@@ -221,7 +225,7 @@ func newBrowser(t *testing.T, n int) (*browser, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { pc.Close() })
-	b := &browser{pc: pc, tracks: make(chan *webrtc.TrackRemote, n), data: make(chan DataMessage, 64)}
+	b := &browser{pc: pc, tracks: make(chan *webrtc.TrackRemote, n), data: make(chan DataMessage, 64), open: make(chan struct{})}
 	for range n {
 		if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo,
 			webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil {
@@ -233,6 +237,8 @@ func newBrowser(t *testing.T, n int) (*browser, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	b.dc = dc
+	dc.OnOpen(func() { close(b.open) })
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		var m DataMessage
 		if err := json.Unmarshal(msg.Data, &m); err == nil {
@@ -415,5 +421,104 @@ func TestConnectClosed(t *testing.T) {
 	}
 	if _, status := postOffer(t, server, Offer{SDP: offer}); status != http.StatusServiceUnavailable {
 		t.Errorf("got status %d on a closed hub, want %d", status, http.StatusServiceUnavailable)
+	}
+}
+
+// fakeResults stands in for reading engines' results: it records the
+// subscriptions that are running.
+type fakeResults struct {
+	mu      sync.Mutex
+	running map[string]int
+}
+
+func (f *fakeResults) subscribe(ctx context.Context, name string, _ func(feed.Result)) {
+	f.mu.Lock()
+	f.running[name]++
+	f.mu.Unlock()
+	<-ctx.Done()
+	f.mu.Lock()
+	f.running[name]--
+	f.mu.Unlock()
+}
+
+func (f *fakeResults) count(name string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.running[name]
+}
+
+// wantResults has b ask for the results of engine.
+func (b *browser) wantResults(t *testing.T, engine string) {
+	t.Helper()
+	select {
+	case <-b.open:
+	case <-time.After(10 * time.Second):
+		t.Fatal("data channel did not open")
+	}
+	msg, _ := json.Marshal(ControlMessage{Type: "results", Engine: engine})
+	if err := b.dc.SendText(string(msg)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestViewerResults ensures that a browser is sent the results of the engine
+// it asks for about the cameras it receives, and that the engine is only
+// subscribed to while a viewer wants its results.
+func TestViewerResults(t *testing.T) {
+	f := &fakeResults{running: map[string]int{}}
+	hub, err := NewHub(Options{Results: f.subscribe}, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { hub.Close() })
+	server := serveOffers(t, hub)
+
+	b1 := connect(t, server, "drone1.front")
+	b2 := connect(t, server, "drone1.front")
+	b1.wantResults(t, "10.0.0.1.yolo")
+	b2.wantResults(t, "10.0.0.1.yolo")
+	waitFor(t, func() bool {
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		r := hub.results["10.0.0.1.yolo"]
+		return r != nil && r.viewers == 2
+	})
+	waitFor(t, func() bool { return f.count("10.0.0.1.yolo") == 1 })
+
+	result := func(producer string) feed.Result {
+		return feed.Result{Engine: "10.0.0.1.yolo", Producer: producer, Vehicle: feed.VehicleOf(producer), Seq: 7,
+			Type: "DetectionResult", JSON: []byte(`{"detections":[]}`)}
+	}
+	// Results of another camera or engine aren't sent
+	hub.PublishResult(result("drone2.front"))
+	other := result("drone1.front")
+	other.Engine = "10.0.0.1.other"
+	hub.PublishResult(other)
+	hub.PublishResult(result("drone1.front"))
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case m := <-b1.data:
+			if m.Type != "result" {
+				continue
+			}
+			if m.Producer != "drone1.front" || m.Engine != "10.0.0.1.yolo" || m.ResultType != "DetectionResult" ||
+				m.Seq != 7 || string(m.Result) != `{"detections":[]}` {
+				t.Fatalf("got result %+v, want drone1.front's from 10.0.0.1.yolo", m)
+			}
+		case <-deadline:
+			t.Fatal("no result received")
+		}
+		break
+	}
+
+	// The engine is unsubscribed from once neither viewer wants it
+	b1.wantResults(t, "")
+	b2.pc.Close()
+	waitFor(t, func() bool { return f.count("10.0.0.1.yolo") == 0 })
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if len(hub.results) != 0 {
+		t.Errorf("hub still subscribes to %v", hub.results)
 	}
 }

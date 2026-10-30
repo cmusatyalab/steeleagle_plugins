@@ -53,6 +53,9 @@ type Topology struct {
 	// YoloDaemons are the IPs of the vehicle daemons that list a mock "yolo"
 	// engine. Nothing runs it in Uriel; it's only listed.
 	YoloDaemons map[string]bool
+	// Detector is the full name of the mock detector, on the GCS's daemon;
+	// empty for none. Every flow sends it the vehicle's camera frames.
+	Detector string
 	// DenyConfig are the IPs of the daemons that refuse Configure, Restart
 	// and package changes with PermissionDenied, as a daemon does for a GCS
 	// without admin auth.
@@ -170,7 +173,7 @@ func driverConfig() ([]byte, error) {
 	return pc.ToBytes()
 }
 
-// ListServices lists the vehicles, the encoders and the GCS engine, and the
+// ListServices lists the vehicles, the encoders, the detector and the GCS engine, and the
 // remote daemons with their architectures. A daemon that is restarting, or
 // whose config names a package it doesn't have, lists no services: the
 // GCS's own fails the call, a remote is listed with the reason as its error.
@@ -223,6 +226,10 @@ func (d *Daemon) listAll(
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
+	detectorConf, err := engineConfig(detectorService, "detection", []string{rawFrameID}, detectionID)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
 	var out []*daemonpb.Service
 	for _, n := range d.top.Vehicles {
 		out = append(out, daemonpb.Service_builder{
@@ -247,6 +254,12 @@ func (d *Daemon) listAll(
 				Plugin: yoloService, Config: yoloConf, Running: true, Auth: "admin",
 			}.Build())
 		}
+	}
+	if d.top.Detector != "" {
+		out = append(out, daemonpb.Service_builder{
+			Name: d.top.Detector, Category: daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE,
+			Plugin: detectorService, Config: detectorConf, Running: true, Auth: "admin",
+		}.Build())
 	}
 	out = append(out, daemonpb.Service_builder{
 		Name: d.top.GCSIP + ".gcs", Category: daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE,
@@ -338,6 +351,9 @@ func (d *Daemon) setFlow(st *vehicleState, name string, spec []byte) error {
 		return status.Errorf(codes.InvalidArgument, "invalid dataflow: %v", err)
 	}
 	qualified := d.qualify(name, flow)
+	if d.top.Detector != "" {
+		qualified = withDetector(qualified, d.top.Detector)
+	}
 	if err := d.flows.Apply(name, qualified); err != nil {
 		return status.Error(codes.Internal, err.Error())
 	}

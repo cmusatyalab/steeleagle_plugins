@@ -6,6 +6,11 @@
 // vehicle's telemetry and the metadata of every frame as JSON (see
 // [DataMessage]).
 //
+// On its data channel a browser may also pick an engine whose results it
+// wants (see [ControlMessage]): it is then sent that engine's results about
+// the inputs of the cameras it receives. The hub subscribes to an engine's
+// results only while a viewer wants them.
+//
 // Frames are sent as they were encoded, so the encoder decides what the
 // browser can decode: H.264 without B-frames, in a profile the browser
 // supports, with SPS and PPS before every IDR frame. A browser starts
@@ -15,6 +20,7 @@
 package rtc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -62,10 +68,11 @@ var H264Codec = webrtc.RTPCodecCapability{
 
 // DataMessage is a message on a viewer's data channel.
 type DataMessage struct {
-	// Type is "telemetry" or "frame".
+	// Type is "telemetry", "frame" or "result".
 	Type string `json:"type"`
 	// Producer is the producer of the frame or telemetry, e.g.
-	// "drone1.front" or "drone1.telemetry".
+	// "drone1.front" or "drone1.telemetry"; for a result, the producer of
+	// the input it is about.
 	Producer string `json:"producer"`
 	Vehicle  string `json:"vehicle"`
 	Seq      uint64 `json:"seq"`
@@ -73,7 +80,24 @@ type DataMessage struct {
 	Telemetry json.RawMessage `json:"telemetry,omitempty"`
 	// Frame is the frame without its encoded data, as protobuf JSON.
 	Frame json.RawMessage `json:"frame,omitempty"`
+	// Engine is the engine that produced the result, ResultType its message
+	// name (e.g. "DetectionResult"), and Result the result as protobuf JSON.
+	Engine     string          `json:"engine,omitempty"`
+	ResultType string          `json:"result_type,omitempty"`
+	Result     json.RawMessage `json:"result,omitempty"`
 }
+
+// ControlMessage is a message a browser sends on its data channel.
+type ControlMessage struct {
+	// Type is "results": the browser wants the results of Engine, or none
+	// if Engine is empty.
+	Type   string `json:"type"`
+	Engine string `json:"engine"`
+}
+
+// ResultsFunc reads the results of the engine name, handing each to handle,
+// until ctx is done.
+type ResultsFunc func(ctx context.Context, name string, handle func(feed.Result))
 
 // StreamInfo describes a producer the GCS has received from.
 type StreamInfo struct {
@@ -91,11 +115,25 @@ type Hub struct {
 	iceServers []webrtc.ICEServer
 	log        zerolog.Logger
 
+	// subscribe reads an engine's results; nil if they can't be read
+	subscribe ResultsFunc
+	// ctx is done once the hub is closed
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	mu        sync.Mutex
 	closed    bool
 	videos    map[string]*video     // by producer
 	telemetry map[string]*telemetry // by producer
 	viewers   map[*viewer]struct{}
+	results   map[string]*results // by engine
+}
+
+// results is a subscription to an engine's results, shared by the viewers
+// that want them.
+type results struct {
+	cancel  context.CancelFunc
+	viewers int
 }
 
 // video is a camera's H.264 stream.
@@ -137,6 +175,9 @@ type Options struct {
 	// PortMin and PortMax bound the UDP ports WebRTC is sent from; zero for
 	// any port.
 	PortMin, PortMax uint16
+	// Results reads an engine's results for the viewers that want them; nil
+	// if engines' results can't be read.
+	Results ResultsFunc
 }
 
 // NewHub returns a hub with options.
@@ -151,13 +192,18 @@ func NewHub(options Options, log zerolog.Logger) (*Hub, error) {
 	if len(options.ICEServers) > 0 {
 		iceServers = []webrtc.ICEServer{{URLs: options.ICEServers}}
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Hub{
 		api:        webrtc.NewAPI(webrtc.WithSettingEngine(settings)),
 		iceServers: iceServers,
 		log:        log,
+		subscribe:  options.Results,
+		ctx:        ctx,
+		cancel:     cancel,
 		videos:     map[string]*video{},
 		telemetry:  map[string]*telemetry{},
 		viewers:    map[*viewer]struct{}{},
+		results:    map[string]*results{},
 	}, nil
 }
 
@@ -231,6 +277,59 @@ func (h *Hub) publishFrame(msg feed.Message) {
 	if message != nil {
 		send(channels, message)
 	}
+}
+
+// PublishResult sends r to the viewers that want the results of its engine
+// and receive the video of its producer. It never blocks on a viewer.
+func (h *Hub) PublishResult(r feed.Result) {
+	message, err := json.Marshal(DataMessage{
+		Type: "result", Producer: r.Producer, Vehicle: r.Vehicle, Seq: r.Seq,
+		Engine: r.Engine, ResultType: r.Type, Result: r.JSON,
+	})
+	if err != nil {
+		h.log.Warn().Err(err).Str("engine", r.Engine).Msg("could not encode result")
+		return
+	}
+	h.mu.Lock()
+	var channels []*webrtc.DataChannel
+	for v := range h.viewers {
+		if v.data == nil || v.engine != r.Engine {
+			continue
+		}
+		if _, ok := v.producers[r.Producer]; ok {
+			channels = append(channels, v.data)
+		}
+	}
+	h.mu.Unlock()
+	send(channels, message)
+}
+
+// wantResults makes v want the results of engine, or none if engine is
+// empty, subscribing to the engine's results if no other viewer wants them
+// and unsubscribing from the ones v wanted before if none still does. The
+// caller must hold mu.
+func (h *Hub) wantResults(v *viewer, engine string) {
+	if v.engine == engine {
+		return
+	}
+	if old, ok := h.results[v.engine]; ok {
+		old.viewers--
+		if old.viewers == 0 {
+			old.cancel()
+			delete(h.results, v.engine)
+		}
+	}
+	v.engine = engine
+	if engine == "" || h.subscribe == nil {
+		return
+	}
+	if r, ok := h.results[engine]; ok {
+		r.viewers++
+		return
+	}
+	ctx, cancel := context.WithCancel(h.ctx)
+	h.results[engine] = &results{cancel: cancel, viewers: 1}
+	go h.subscribe(ctx, engine, h.PublishResult)
 }
 
 // video returns the video of producer, adding it if it is new. The caller
@@ -364,6 +463,7 @@ func (h *Hub) Streams() []StreamInfo {
 
 // Close disconnects every viewer, and stops accepting new ones.
 func (h *Hub) Close() error {
+	h.cancel()
 	h.mu.Lock()
 	h.closed = true
 	viewers := make([]*viewer, 0, len(h.viewers))

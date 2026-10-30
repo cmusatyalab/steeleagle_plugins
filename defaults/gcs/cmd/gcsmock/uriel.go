@@ -75,14 +75,15 @@ func serverName(prefix string) string { return prefix + "-lcs" }
 // Forward or Replace. It runs on the engine's goroutine.
 type EngineFunc func(eng *uriel.Engine, in uriel.Input) error
 
-// StartEngine creates the engine name on its own goroutine, serves it, and
-// hands it every input until Close. It returns once the server serves it.
-func (u *Uriel) StartEngine(name string, maxOutput int, handle EngineFunc) error {
+// StartEngine creates the engine name, whose results are of resultType (empty
+// for none), on its own goroutine, serves it, and hands it every input until
+// Close. It returns once the server serves it.
+func (u *Uriel) StartEngine(name, resultType string, maxOutput int, handle EngineFunc) error {
 	ready := make(chan error, 1)
 	u.engines.Add(1)
 	go func() {
 		defer u.engines.Done()
-		eng, err := uriel.NewEngine(name, "", maxOutput)
+		eng, err := uriel.NewEngine(name, resultType, maxOutput)
 		if err != nil {
 			ready <- fmt.Errorf("could not create engine %q: %w", name, err)
 			return

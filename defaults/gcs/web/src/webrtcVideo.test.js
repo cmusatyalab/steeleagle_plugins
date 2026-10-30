@@ -1,5 +1,18 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { pickVideoProducer, connectVideo, createVideoSession, startStreamMonitor } from './webrtcVideo.js';
+import { pickVideoProducer, connectVideo, createVideoSession, startStreamMonitor, parseResultMessage } from './webrtcVideo.js';
+
+class FakeDC {
+    constructor() {
+        this.readyState = 'connecting';
+        this.sent = [];
+    }
+    send(data) { this.sent.push(JSON.parse(data)); }
+    open() {
+        this.readyState = 'open';
+        if (this.onopen) this.onopen();
+    }
+    receive(data) { if (this.onmessage) this.onmessage({ data }); }
+}
 
 class FakePC {
     static instances = [];
@@ -15,7 +28,11 @@ class FakePC {
         FakePC.instances.push(this);
     }
     addTransceiver(kind, init) { this.transceivers.push({ kind, init }); }
-    createDataChannel(label) { this.channels.push(label); }
+    createDataChannel(label) {
+        this.channels.push(label);
+        this.dc = new FakeDC();
+        return this.dc;
+    }
     async createOffer() { return { type: 'offer', sdp: 'fake offer sdp' }; }
     async setLocalDescription(d) {
         this.localDescription = d;
@@ -238,5 +255,49 @@ describe('createVideoSession staleness and closing', () => {
         await new Promise(r => setTimeout(r, 5));
         FakePC.instances[0].close();
         await assertion;
+    });
+});
+
+describe('parseResultMessage', () => {
+    it('parses results and ignores everything else', () => {
+        const m = { type: 'result', engine: 'e', producer: 'p', result_type: 'DetectionResult', result: { detections: [] } };
+        expect(parseResultMessage(JSON.stringify(m))).toEqual(m);
+        expect(parseResultMessage('{"type":"telemetry","producer":"p"}')).toBeNull();
+        expect(parseResultMessage('{"type":"result"')).toBeNull();
+        expect(parseResultMessage(new ArrayBuffer(2))).toBeNull();
+    });
+});
+
+describe('createVideoSession results', () => {
+    const result = (engine) => JSON.stringify({ type: 'result', engine, producer: 'A', result: {} });
+
+    it('asks for the engine once the channel opens, and again on reconnect', async () => {
+        const results = [];
+        const session = createVideoSession({ fetchImpl: okFetch(), PeerConnection: FakePC, onChange: () => {}, onResult: (m) => results.push(m) });
+        session.setResultsEngine('yolo');
+        session.switchTo('A');
+        await new Promise(r => setTimeout(r, 5));
+        const pcA = FakePC.instances[0];
+        expect(pcA.dc.sent).toEqual([]);
+        pcA.dc.open();
+        expect(pcA.dc.sent).toEqual([{ type: 'results', engine: 'yolo' }]);
+        pcA.dc.receive('{"type":"telemetry"}');
+        pcA.dc.receive(result('yolo'));
+        expect(results.map((m) => m.engine)).toEqual(['yolo']);
+
+        session.setResultsEngine(null);
+        expect(pcA.dc.sent.at(-1)).toEqual({ type: 'results', engine: '' });
+        session.setResultsEngine('slam');
+
+        // A new connection is told the engine; the old one's messages are ignored
+        session.switchTo('B');
+        await new Promise(r => setTimeout(r, 5));
+        const pcB = FakePC.instances[1];
+        pcB.dc.readyState = 'open';
+        pcB.dc.open();
+        expect(pcB.dc.sent).toEqual([{ type: 'results', engine: 'slam' }]);
+        pcA.dc.receive(result('yolo'));
+        expect(results).toHaveLength(1);
+        session.close();
     });
 });
