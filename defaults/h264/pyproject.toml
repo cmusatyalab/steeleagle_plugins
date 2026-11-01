@@ -21,14 +21,25 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [tool.pixi.dependencies]
 python = "3.14.*"
-# GStreamer and its Python bindings, with the elements the pipelines use:
-# h264parse (bad), x264enc (ugly) and avdec_h264 (libav)
+
+# conda-forge GStreamer and its Python bindings, with the elements the
+# pipelines use: h264parse (bad), x264enc (ugly) and avdec_h264 (libav)
+[tool.pixi.feature.conda-gstreamer.dependencies]
 pygobject = "*"
 gstreamer = "*"
 gst-plugins-base = "*"
 gst-plugins-bad = "*"
 gst-plugins-ugly = "*"
 gst-libav = "*"
+
+# qticvenc requires system GStreamer through PyGObject. Requires a C compiler,
+# pkg-config, libgirepository-2.0-dev, libcairo2-dev, gir1.2-gstreamer-1.0, and
+# git1.2-gst-plugins-base-1.0.
+[tool.pixi.feature.qticvenc]
+platforms = ["linux-aarch64"]
+
+[tool.pixi.feature.qticvenc.pypi-dependencies]
+pygobject = "*"
 
 [tool.pixi.pypi-dependencies]
 h264 = { path = ".", editable = true }
@@ -37,13 +48,13 @@ h264 = { path = ".", editable = true }
 buf = "*"
 
 [tool.pixi.environments]
-default = { solve-group = "default" }
+default = { features = ["conda-gstreamer"], solve-group = "default" }
+qticvenc = { features = ["qticvenc"] }
 generate = { features = ["generate"], no-default-feature = true }
 
 [tool.pixi.tasks]
-# Runs the plugin named by STEELEAGLE_PLUGIN (see src/h264/main.py)
 start = "python -m h264.main"
 
 [tool.pixi.feature.generate.tasks]
-# Regenerates src/h264/h264_pb2.py, which is committed
+# Regenerates src/h264/h264_pb2.py
 generate = "buf generate"

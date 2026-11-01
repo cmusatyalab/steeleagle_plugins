@@ -1,0 +1,25 @@
+syntax = "proto3";
+package storage.v1;
+
+// A request, published by the remote engine as a derived result, for the
+// stored frame that best matches it. If sequence_number is set, it picks that
+// exact frame and the other fields are ignored. Otherwise the frame with the
+// lowest mean squared error over the fields that are set is picked; a frame
+// that lacks one of those fields is not a candidate. At least one field must
+// be set.
+message ReachbackRequest {
+  // Uriel sequence number of the frame
+  optional uint64 sequence_number = 1;
+  // Global position of the vehicle when the frame was captured
+  optional double latitude = 2;
+  optional double longitude = 3;
+  optional double altitude = 4;
+  // Global heading, in degrees
+  optional double heading = 5;
+  // Position relative to the start, in meters (north, east, up)
+  optional double x = 6;
+  optional double y = 7;
+  optional double z = 8;
+  // Relative heading, in degrees
+  optional double relative_heading = 9;
+}

@@ -1,0 +1,39 @@
+[plugin]
+name = "Priority Reintegration"
+type = "engine"
+description = "Stores frames while the remote engine is unreachable, and once it is back sends it the stored frames the local classifier found the target class in, highest score first"
+
+[[args]]
+name = "remote"
+type = "string"
+description = "Service name of the engine on the remote daemon to reintegrate frames to; its events tell when it is unreachable and when each frame was sent"
+default = ""
+
+[[args]]
+name = "classifier"
+type = "string"
+description = "Service name of the local classifier engine whose ClassificationResults pick the frames to reintegrate"
+default = ""
+
+[[args]]
+name = "class"
+type = "string"
+description = "Class (ignoring case) the classifier must report for a frame to be reintegrated; its score is the frame's priority"
+default = ""
+
+[[args]]
+name = "database"
+type = "string"
+description = "SQLite file to store frames in, kept across restarts; empty for a temporary one, removed when the engine stops"
+default = ""
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest frame stored and sent, in bytes"
+default = 6237184
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]
+# No result: frames are dropped, or replaced with a stored EncodedFrame

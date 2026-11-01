@@ -1,0 +1,31 @@
+[plugin]
+name = "Detection Fusion"
+type = "engine"
+description = "Fuses the detections of a local and a remote engine on each frame: the remote result if it arrives within the grace period after the local one, the local result otherwise"
+
+[[args]]
+name = "local"
+type = "string"
+description = "Service name of the detection engine on this daemon"
+default = ""
+
+[[args]]
+name = "remote"
+type = "string"
+description = "Service name of the detection engine on the remote daemon"
+default = ""
+
+[[args]]
+name = "grace"
+type = "number"
+description = "How long to wait for the remote result after the local result arrives, in milliseconds"
+default = 200
+
+[engine]
+type = "detection"
+inputs = [
+    "steeleagle_protocol/v1/messages/frame/RawFrame",
+    "steeleagle_protocol/v1/messages/frame/EncodedFrame",
+]
+# Every frame is dropped; the fused detections are its result
+result = "steeleagle_protocol/v1/messages/result/DetectionResult"

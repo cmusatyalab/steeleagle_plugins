@@ -1,0 +1,33 @@
+[plugin]
+name = "JPEG Encoder"
+type = "engine"
+description = "Encodes camera frames as JPEG, to send across the network to the JPEG decoder on the remote daemon"
+
+[[args]]
+name = "encoder"
+type = "string"
+description = "JPEG encoder, in gst-launch syntax"
+default = "jpegenc quality=85"
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest encoded frame sent, in bytes"
+default = 6237184
+
+[[args]]
+name = "timeout_ms"
+type = "number"
+description = "Milliseconds a frame may take to encode before it is discarded"
+default = 1000
+
+[[args]]
+name = "log_frames"
+type = "boolean"
+description = "Log every frame encoded"
+default = false
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# No result: each frame is replaced with an EncodedFrame (CODEC_JPEG)

@@ -1,0 +1,33 @@
+[plugin]
+name = "JPEG Decoder"
+type = "engine"
+description = "Decodes the JPEG frames the JPEG encoder on a vehicle sends, back into camera frames"
+
+[[args]]
+name = "decoder"
+type = "string"
+description = "JPEG decoder, in gst-launch syntax"
+default = "jpegdec"
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest decoded frame sent, in bytes"
+default = 6237184
+
+[[args]]
+name = "timeout_ms"
+type = "number"
+description = "Milliseconds a frame may take to decode before it is discarded"
+default = 1000
+
+[[args]]
+name = "log_frames"
+type = "boolean"
+description = "Log every frame decoded"
+default = false
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]
+# No result: each frame is replaced with the RGB RawFrame it decodes to
