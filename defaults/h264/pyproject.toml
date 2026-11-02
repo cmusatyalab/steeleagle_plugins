@@ -41,7 +41,7 @@ gst-libav = "*"
 platforms = ["linux-aarch64"]
 
 [tool.pixi.feature.qtic.activation.env]
-GST_PLUGIN_PATH = "/usr/lib/gstreamer-1.0"
+GST_PLUGIN_PATH = "/usr/lib/aarch64-linux-gnu/gstreamer-1.0"
 
 [tool.pixi.pypi-dependencies]
 h264 = { path = ".", editable = true }
