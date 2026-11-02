@@ -4,16 +4,16 @@ type = "engine"
 description = "Scores embeddings from the PatchCore embed engine against a FAISS memory bank; forwards anomalous frames as RawFrames, drops normal ones"
 
 [[args]]
-name = "bank_ckpt"
+name = "threshold_meta"
 type = "string"
-description = "Path to the PatchCore checkpoint (incl. memory bank and image threshold)"
-default = ""
+description = "Path to the slim threshold/config file (threshold, backbone, layers, num_neighbors)"
+default = "models/gravel_meta.pt"
 
 [[args]]
 name = "faiss_index"
 type = "string"
 description = "Path to the FAISS index file matching bank_ckpt"
-default = ""
+default = "models/gravel.faiss"
 
 [[args]]
 name = "threshold"
