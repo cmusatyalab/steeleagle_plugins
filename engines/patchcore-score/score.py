@@ -2,7 +2,14 @@
 the PatchCore memory bank via FAISS, forwards the frame as a RawFrame if
 anomalous, drops it otherwise. Forwards no result. Scoring logic ported
 verbatim from patchcore_csv_faiss.py.
+
+The memory bank is reconstructed directly from the FAISS index rather than
+loaded from a checkpoint -- the two used to carry the same vectors twice
+(once in the ckpt's state_dict, once in the FAISS file). Only the threshold
+and the small architecture config (backbone/layers/num_neighbors) come from
+a slim metadata file now, not a full checkpoint.
 """
+
 import logging
 import time
 
@@ -25,24 +32,42 @@ EXPECTED_RGB_SIZE = FRAME_W * FRAME_H * RGB_CHANNELS
 
 RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
 
+DEFAULT_BACKBONE = "resnet18"
+DEFAULT_LAYERS = ["layer2", "layer3"]
+DEFAULT_NUM_NEIGHBORS = 9
 
-def load_model_and_threshold(ckpt_path):
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    backbone = ckpt.get("backbone", "resnet18")
-    layers = ckpt.get("layers", ["layer2", "layer3"])
-    model = Patchcore(backbone=backbone, layers=layers, pre_trained=False)
-    model.load_state_dict(ckpt["state_dict"])
+
+def load_threshold_meta(meta_path):
+    """Loads the slim metadata file (threshold + architecture config) that
+    replaces the full checkpoint. Produced by the ckpt-to-faiss conversion
+    script alongside the FAISS index."""
+    meta = torch.load(meta_path, map_location="cpu", weights_only=False)
+    if "threshold" not in meta:
+        raise RuntimeError(f"no threshold found in {meta_path}")
+    return {
+        "threshold": float(meta["threshold"]),
+        "backbone": meta.get("backbone", DEFAULT_BACKBONE),
+        "layers": meta.get("layers", DEFAULT_LAYERS),
+        "num_neighbors": meta.get("num_neighbors", DEFAULT_NUM_NEIGHBORS),
+    }
+
+
+def load_model(faiss_index, backbone, layers, num_neighbors):
+    """Builds a Patchcore model with its memory bank reconstructed straight
+    from the FAISS index. The backbone is never run here -- embeddings arrive
+    precomputed from the C++ embed engine -- so its weights don't matter and
+    are left at their random pre_trained=False init. Only model.model.memory_bank
+    (used by compute_anomaly_score's reweighting step) needs to be real."""
+    model = Patchcore(
+        backbone=backbone,
+        layers=layers,
+        pre_trained=False,
+        num_neighbors=num_neighbors,
+    )
+    memory_bank = faiss_index.reconstruct_n(0, faiss_index.ntotal)
+    model.model.memory_bank = torch.from_numpy(memory_bank)
     model.eval()
-
-    threshold = None
-    for k, v in ckpt["state_dict"].items():
-        if k.endswith("post_processor._image_threshold"):
-            threshold = float(v)
-            break
-    if threshold is None:
-        raise RuntimeError(f"no post_processor._image_threshold found in {ckpt_path}")
-
-    return model, threshold
+    return model
 
 
 def score(model, faiss_index, embedding_msg):
@@ -72,14 +97,22 @@ def score(model, faiss_index, embedding_msg):
 def run_engine(name, args):
     """Runs patchcore-score as the engine `name`. `args` has every arg of
     score.plugin.toml."""
-    logger.info("loading PatchcoreModel (incl. memory bank) from %s", args["bank_ckpt"])
-    model, trained_threshold = load_model_and_threshold(args["bank_ckpt"])
-    threshold = args["threshold"] or trained_threshold
-    logger.info("using threshold=%.4f (trained=%.4f)", threshold, trained_threshold)
-
     logger.info("loading FAISS index from %s", args["faiss_index"])
     faiss_index = faiss.read_index(args["faiss_index"])
     logger.info("FAISS index loaded: %d vectors", faiss_index.ntotal)
+
+    logger.info("loading threshold/config from %s", args["threshold_meta"])
+    meta = load_threshold_meta(args["threshold_meta"])
+    trained_threshold = meta["threshold"]
+    threshold = args["threshold"] or trained_threshold
+    logger.info("using threshold=%.4f (trained=%.4f)", threshold, trained_threshold)
+
+    model = load_model(
+        faiss_index,
+        backbone=meta["backbone"],
+        layers=meta["layers"],
+        num_neighbors=meta["num_neighbors"],
+    )
 
     with torch.no_grad(), uriel.Engine(name, max_output_size=args["max_output_size"]) as engine:
         logger.info("engine %s ready", name)
