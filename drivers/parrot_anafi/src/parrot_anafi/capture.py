@@ -4,10 +4,11 @@ The stream is H.264 over RTSP; the decoder is GStreamer elements, in
 gst-launch syntax, so that a hardware decoder can replace the default software
 one. A hardware decoder whose frames are in hardware memory must copy them
 into system memory itself, e.g.
-`qtivdec ! qtivtransform ! video/x-raw,format=RGB`, since videoconvert can't
-read GBM memory. The qtic environment adds the device's own GStreamer
+`qtic2vdec ! qtivtransform ! video/x-raw,format=RGB`, since videoconvert can't
+read GBM memory. The native environment adds the device's own GStreamer
 plugins, which hold such decoders.
 """
+import functools
 import logging
 
 import gi
@@ -25,6 +26,17 @@ logger = logging.getLogger('parrot-anafi/capture')
 RGB_CHANNELS = 3
 # Default H.264 decoder, matching anafi4k.plugin.toml.
 DEFAULT_DECODER = 'avdec_h264 max-threads=1'
+# What the drone's live stream is, from its SPS: 1280x720 at 29.97 fps, 8-bit
+# 4:2:0. h264parse leaves these out of its caps on this stream, and Qualcomm's
+# qtic2vdec refuses caps without them, so they are set after it. Software
+# decoders ignore them. The stream is byte-stream with one frame per buffer,
+# the only form qtic2vdec takes.
+STREAM_CAPS = (
+    'video/x-h264,stream-format=byte-stream,alignment=au '
+    '! capssetter caps="video/x-h264,width=(int)1280,height=(int)720,'
+    'framerate=(fraction)30000/1001,chroma-format=(string)4:2:0,'
+    'bit-depth-luma=(uint)8,bit-depth-chroma=(uint)8"'
+)
 # Seconds the pipeline may take to start.
 OPEN_TIMEOUT = 10.0
 # Seconds a read waits for a frame before it fails.
@@ -32,9 +44,25 @@ READ_TIMEOUT = 1.0
 
 
 def rtsp_source(ip):
-    """The drone's H.264 stream, as GStreamer elements ending in H.264."""
+    """The drone's H.264 stream, as GStreamer elements ending in H.264.
+
+    The drone's DESCRIBE answers with Content-Base rtsp://{ip}/live, with no
+    trailing slash, and a=control:front. rtspsrc 1.28 resolves that as a URL,
+    to rtsp://{ip}/front, which the drone answers with 500 and rtspsrc does
+    not retry; the stream is at rtsp://{ip}/live/front.
+    force-non-compliant-url makes rtspsrc append the control to the base
+    instead, as older versions always did; those versions, such as the
+    device's own 1.16 in the native environment, lack the property."""
+    compat = 'force-non-compliant-url=true ' if _rtspsrc_has_non_compliant_url() else ''
     return (f'rtspsrc location=rtsp://{ip}/live protocols=udp latency=0 '
-            f'! rtph264depay')
+            f'{compat}! rtph264depay')
+
+
+@functools.cache
+def _rtspsrc_has_non_compliant_url():
+    """Whether the rtspsrc GStreamer loads has force-non-compliant-url."""
+    src = Gst.ElementFactory.make('rtspsrc')
+    return src is not None and src.find_property('force-non-compliant-url') is not None
 
 
 def _rgb_stride(width):
@@ -52,7 +80,7 @@ class GstCapture:
 
     def __init__(self, source, decoder):
         description = (
-            f'{source} ! h264parse ! {decoder} '
+            f'{source} ! h264parse ! {STREAM_CAPS} ! {decoder} '
             f'! videoconvert '
             f'! video/x-raw,format=RGB '
             f'! appsink name=sink max-buffers=1 drop=true sync=false'

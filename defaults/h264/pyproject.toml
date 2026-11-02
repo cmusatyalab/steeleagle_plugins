@@ -32,15 +32,15 @@ gst-plugins-bad = "*"
 gst-plugins-ugly = "*"
 gst-libav = "*"
 
-# qtic is the default environment with the device's own GStreamer plugins
+# native is the default environment with the device's own GStreamer plugins
 # added, so that a Qualcomm hardware encoder or decoder (e.g. qtic2venc) loads
 # into conda's GStreamer. Set GST_PLUGIN_PATH to the directory holding the
 # device's plugins; their libraries are found in the system library
 # directories.
-[tool.pixi.feature.qtic]
+[tool.pixi.feature.native]
 platforms = ["linux-aarch64"]
 
-[tool.pixi.feature.qtic.activation.env]
+[tool.pixi.feature.native.activation.env]
 GST_PLUGIN_PATH = "/usr/lib/aarch64-linux-gnu/gstreamer-1.0"
 
 [tool.pixi.pypi-dependencies]
@@ -51,7 +51,7 @@ buf = "*"
 
 [tool.pixi.environments]
 default = { features = ["conda-gstreamer"], solve-group = "default" }
-qtic = { features = ["qtic", "conda-gstreamer"], solve-group = "default" }
+native = { features = ["native", "conda-gstreamer"], solve-group = "default" }
 generate = { features = ["generate"], no-default-feature = true }
 
 [tool.pixi.tasks]
