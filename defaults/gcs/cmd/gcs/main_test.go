@@ -53,7 +53,7 @@ func TestParseArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.HTTPAddr != ":8002" || a.MaxInputSize != 4<<20 || a.ICEServers != nil || a.WebRTCPorts != "" {
+	if a.HTTPAddr != ":8002" || a.MaxInputSize != 4<<20 || a.ICEServers != nil || a.WebRTCPorts != "" || a.DumpDir != "" {
 		t.Errorf("parseArgs(\"\") = %+v, want the defaults of gcs.plugin.toml", a)
 	}
 	// The daemon passes only the args the config sets
@@ -66,6 +66,9 @@ func TestParseArgs(t *testing.T) {
 	}
 	if a, err = parseArgs(`{"mapbox": "pk.test"}`); err != nil || a.Mapbox != "pk.test" {
 		t.Errorf("parseArgs() = %+v, %v, want the mapbox token", a, err)
+	}
+	if a, err = parseArgs(`{"dump_dir": "/tmp/frames"}`); err != nil || a.DumpDir != "/tmp/frames" {
+		t.Errorf("parseArgs() = %+v, %v, want the dump directory", a, err)
 	}
 	for _, invalid := range []string{`{`, `{"max_input_size": 0}`, `{"max_input_size": "big"}`} {
 		if _, err := parseArgs(invalid); err == nil {

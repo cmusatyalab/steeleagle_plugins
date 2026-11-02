@@ -24,7 +24,16 @@ http_addr = ":8002"
 The daemon passes the plugin args in `STEELEAGLE_PLUGIN_ARGS`, the service's
 Uriel engine name in `STEELEAGLE_ENGINE_ENDPOINT`, and its socket in `STEELEAGLE_CLIENT_SOCKET`. See
 `config/examples/config.toml` and `gcs.plugin.toml` (args: `http_addr`,
-`ice_servers`, `webrtc_ports`, `max_input_size`, `compiler`).
+`ice_servers`, `webrtc_ports`, `max_input_size`, `compiler`, `mapbox`,
+`dump_dir`).
+
+To debug the video stream, set `dump_dir` to record every H.264 frame the GCS
+receives, before WebRTC, as `<producer>-<time>.h264` (play it with `ffplay`)
+and `<producer>-<time>.csv` (one row per frame: arrival and capture times,
+Uriel sequence number, frame id, keyframe, size, and frames missed before it).
+Each gap in frame ids is also logged. Gaps mean frames were lost before the GCS,
+for example skipped by Uriel; a clean recording with blocky video in the
+browser points at WebRTC or the browser.
 
 ### Encoder service
 
