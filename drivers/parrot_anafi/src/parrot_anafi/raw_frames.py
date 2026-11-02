@@ -40,12 +40,11 @@ class RawFramePublisher:
         self._max_input_size = 0
         self._next_id = 0
 
-    def publish(self, bgr_frame):
-        """Publishes `bgr_frame`, an image as OpenCV decodes it (BGR). A frame
+    def publish(self, rgb):
+        """Publishes `rgb`, an RGB image as GstCapture decodes it. A frame
         that finds no free input buffer is dropped: newer frames follow."""
-        if self.dimensions is not None and bgr_frame.shape[1::-1] != self.dimensions:
-            bgr_frame = cv2.resize(bgr_frame, self.dimensions, interpolation=cv2.INTER_AREA)
-        rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+        if self.dimensions is not None and rgb.shape[1::-1] != self.dimensions:
+            rgb = cv2.resize(rgb, self.dimensions, interpolation=cv2.INTER_AREA)
         timestamp = Timestamp()
         timestamp.GetCurrentTime()
         position_info, gimbal_info = self._pose()

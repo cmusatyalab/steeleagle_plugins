@@ -16,6 +16,12 @@ description = "IP the driver connects to (192.168.42.1 directly over Wi-Fi, 192.
 # Default value (optional)
 default = "192.168.42.1"
 
+[[args]]
+name = "decoder"
+type = "string"
+description = "H.264 decoder of the video stream, in gst-launch syntax; its output must be in system memory, and is converted to RGB after it (e.g. \"qtivdec ! qtivtransform ! video/x-raw,format=RGB\" with the qticvenc environment)"
+default = "avdec_h264 max-threads=1"
+
 [driver]
 # Driver type: (copter, legged, wheeled, boat)
 type = "copter"

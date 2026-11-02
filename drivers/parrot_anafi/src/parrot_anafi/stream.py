@@ -1,10 +1,8 @@
 import grpc
-import os
 import threading
 import time
 import logging
 from math import sin, cos, radians, degrees
-import cv2
 # Protocol imports
 import steeleagle_protocol.v1.common.common_pb2 as common_proto
 import steeleagle_protocol.v1.services.driver.stream_pb2 as stream_proto
@@ -28,6 +26,7 @@ from olympe.messages.ardrone3.GPSState import NumberOfSatelliteChanged
 from olympe.messages.common.CommonState import BatteryStateChanged, LinkSignalQuality
 from olympe.messages.gimbal import attitude
 # Driver imports
+from parrot_anafi.capture import DEFAULT_DECODER, GstCapture, rtsp_source
 from parrot_anafi.raw_frames import RawFramePublisher
 from parrot_anafi.publisher import Publisher
 
@@ -41,7 +40,8 @@ DEFAULT_GIMBAL_ID = 0
 # to open or stopped giving frames.
 CAPTURE_RETRY_DELAY = 1.0
 # Failed reads in a row after which the video stream is reopened. A read fails
-# at once on a broken stream, or after OpenCV's read timeout on a silent one.
+# at once on a broken stream, or after GstCapture's read timeout on a silent
+# one.
 MAX_FAILED_READS = 10
 # Name of the drone's camera, matching anafi4k.plugin.toml
 CAMERA_NAME = 'rgb'
@@ -62,9 +62,11 @@ RESOLUTION_DIMENSIONS = {
 
 class Stream(StreamServiceServicer):
     """Stream Service implementation."""
-    def __init__(self, drone, ip):
+    def __init__(self, drone, ip, decoder=DEFAULT_DECODER):
         self.drone = drone
         self.ip = ip
+        # H.264 decoder of the video stream, in gst-launch syntax
+        self.decoder = decoder
         self._capture_lock = threading.Lock()
         self._grabber_thread = None
         # The camera stream the vehicle asked for, as (uri, dimensions), or
@@ -87,14 +89,8 @@ class Stream(StreamServiceServicer):
             self._grabber_thread.start()
 
     def _open_capture(self):
-        """Opens the drone's video stream, waiting for it as long as OpenCV
-        does."""
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp"
-        return cv2.VideoCapture(
-                f"rtsp://{self.ip}/live",
-                cv2.CAP_FFMPEG,
-                (cv2.CAP_PROP_N_THREADS, 1),
-            )
+        """Opens the drone's video stream, decoding it with the decoder."""
+        return GstCapture(rtsp_source(self.ip), self.decoder)
 
     def _grab_frames(self):
         """Reads the drone's video stream for good, reopening it whenever it

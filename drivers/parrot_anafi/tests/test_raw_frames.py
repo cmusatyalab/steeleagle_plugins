@@ -20,8 +20,8 @@ from parrot_anafi.stream import Stream
 
 URI = 'harpy.rgb'
 HEIGHT, WIDTH = 4, 6
-# A pixel's blue, green and red, as OpenCV decodes it.
-BGR_PIXEL = (1, 2, 3)
+# A pixel's red, green and blue, as GstCapture decodes it.
+RGB_PIXEL = (1, 2, 3)
 POSITION = telemetry_proto.PositionInfo(
     global_position=common_proto.GlobalPosition(latitude=40.4, longitude=-79.9))
 GIMBAL = telemetry_proto.GimbalInfo(pose_body=common_proto.Pose(pitch=-30.0))
@@ -61,7 +61,7 @@ def producer(monkeypatch):
 
 
 def frame(height=HEIGHT, width=WIDTH):
-    return np.full((height, width, raw_frames.RGB_CHANNELS), BGR_PIXEL, dtype=np.uint8)
+    return np.full((height, width, raw_frames.RGB_CHANNELS), RGB_PIXEL, dtype=np.uint8)
 
 
 def publisher(dimensions=None):
@@ -84,7 +84,7 @@ def test_publishes_rgb_frames_with_their_pose(producer):
     assert p.input_type == 'steeleagle_protocol/v1/messages/frame/RawFrame'
     first, second = p.sent
     assert (first.h_res, first.v_res, first.channels) == (WIDTH, HEIGHT, raw_frames.RGB_CHANNELS)
-    assert first.data == bytes(reversed(BGR_PIXEL)) * (HEIGHT * WIDTH)
+    assert first.data == bytes(RGB_PIXEL) * (HEIGHT * WIDTH)
     assert (first.id, second.id) == (0, 1)
     assert first.position_info == POSITION
     assert first.gimbal_info == GIMBAL

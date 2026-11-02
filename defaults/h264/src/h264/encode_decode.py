@@ -150,7 +150,13 @@ def _encode_frame(engine, streams, input, args):
     if dropped_late:
         policy.needed = True
 
+    # The frame went into the encoder, which may use it as a reference whether
+    # or not it is sent, so it takes a number either way: a discarded frame
+    # leaves a gap in the numbers, which the decoder sees and waits out for a
+    # keyframe, instead of decoding later frames against a reference it never
+    # got.
     number = stream.next_number
+    stream.next_number += 1
     if sample is None:
         logger.warning("frame %d of %s took over %d ms to encode; discarding it", number, producer, args["timeout_ms"])
         policy.needed = True
@@ -183,7 +189,6 @@ def _encode_frame(engine, streams, input, args):
     out_buf = engine.loan()
     out_buf[: len(payload)] = payload
     engine.replace(len(payload), output_type=ENCODED_FRAME_TYPE)
-    stream.next_number += 1
     policy.emitted(input.id, keyframe)
     if args["log_frames"]:
         logger.info(

@@ -59,12 +59,35 @@ steeleagle-protocol = { path = "./steeleagle_protocol", editable = true }
 [tool.pixi.target.linux-aarch64.pypi-dependencies]
 parrot-olympe = { path = "./parrot_olympe-0.0.0-py3-none-manylinux_2_31_aarch64.whl" }
 
+# conda-forge GStreamer and its Python bindings, with the elements the video
+# pipeline uses: rtspsrc and rtph264depay (good), h264parse (bad) and
+# avdec_h264 (libav)
+[tool.pixi.feature.conda-gstreamer.dependencies]
+pygobject = "*"
+gstreamer = "*"
+gst-plugins-base = "*"
+gst-plugins-good = "*"
+gst-plugins-bad = "*"
+gst-libav = "*"
+
+# qticvenc uses the system GStreamer, and its hardware decoder (set with the
+# decoder arg, e.g. "qtivdec ! qtivtransform ! video/x-raw,format=RGB", which
+# copies its frames out of GBM memory), through PyGObject. Requires a C compiler,
+# pkg-config, libgirepository-2.0-dev, libcairo2-dev, gir1.2-gstreamer-1.0, and
+# gir1.2-gst-plugins-base-1.0.
+[tool.pixi.feature.qticvenc]
+platforms = ["linux-aarch64-glibc-2-31"]
+
+[tool.pixi.feature.qticvenc.pypi-dependencies]
+pygobject = "*"
+
 [tool.pixi.feature.generate.dependencies]
 buf = "*"
 
 [tool.pixi.environments]
-default = { solve-group = "default" }
-dev = { features = ["dev"], solve-group = "default" }
+default = { features = ["conda-gstreamer"], solve-group = "default" }
+dev = { features = ["dev", "conda-gstreamer"], solve-group = "default" }
+qticvenc = { features = ["qticvenc"] }
 generate = { features = ["generate"], no-default-feature = true }
 
 [tool.pixi.feature.generate.tasks]
