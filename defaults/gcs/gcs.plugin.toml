@@ -45,6 +45,12 @@ description = "How missions are compiled, with keys: modules (extra Go modules: 
 default = {}
 
 [[args]]
+name = "dump_dir"
+type = "string"
+description = "Directory to record every H.264 frame received to, as Uriel delivered it (a .h264 and a .csv per camera, and a log line per gap in frame ids), for debugging the stream; empty records nothing"
+default = ""
+
+[[args]]
 name = "mapbox"
 type = "string"
 description = "Mapbox access token for the web UI's maps; empty shows no basemap"

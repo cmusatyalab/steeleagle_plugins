@@ -29,6 +29,7 @@ import (
 	"github.com/cmusatyalab/steeleagle/config"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/control"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/daemons"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/dump"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/feed"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
@@ -73,6 +74,9 @@ type args struct {
 	Compiler mission.CompilerConfig `json:"compiler"`
 	// Mapbox is the access token the web UI's maps use; empty for none.
 	Mapbox string `json:"mapbox"`
+	// DumpDir is where the H.264 frames that arrive are recorded, as they
+	// came from Uriel; empty to record none. See package dump.
+	DumpDir string `json:"dump_dir"`
 }
 
 // parseArgs reads the plugin's args from JSON, defaulting the ones it leaves
@@ -246,6 +250,21 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 					fleetFlows.ReceivedFrame(msg.Vehicle)
 				}
 				hub.Publish(msg)
+			}
+		}
+		if a.DumpDir != "" {
+			recorder, err := dump.New(a.DumpDir, log)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer recorder.Close()
+			next := publish
+			publish = func(msg feed.Message) {
+				if msg.Frame != nil {
+					recorder.Write(msg.Producer, msg.Seq, msg.Frame, time.Now())
+				}
+				next(msg)
 			}
 		}
 		if err := feed.Run(ctx, engine, a.MaxInputSize, log, publish); err != nil {
