@@ -981,7 +981,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/buf-1.66.0-ha8f183a_0.conda
       linux-aarch64-glibc-2-31:
       - conda: https://conda.anaconda.org/conda-forge/linux-aarch64/buf-1.66.0-h652cbe9_0.conda
-  qticvenc:
+  qtic:
     channels:
     - url: https://conda.anaconda.org/conda-forge/
     indexes:

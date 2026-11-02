@@ -32,13 +32,13 @@ gst-plugins-bad = "*"
 gst-plugins-ugly = "*"
 gst-libav = "*"
 
-# qticvenc requires system GStreamer through PyGObject. Requires a C compiler,
+# qtic requires system GStreamer through PyGObject. Requires a C compiler,
 # pkg-config, libgirepository-2.0-dev, libcairo2-dev, gir1.2-gstreamer-1.0, and
 # git1.2-gst-plugins-base-1.0.
-[tool.pixi.feature.qticvenc]
+[tool.pixi.feature.qtic]
 platforms = ["linux-aarch64"]
 
-[tool.pixi.feature.qticvenc.pypi-dependencies]
+[tool.pixi.feature.qtic.pypi-dependencies]
 pygobject = "*"
 
 [tool.pixi.pypi-dependencies]
@@ -49,7 +49,7 @@ buf = "*"
 
 [tool.pixi.environments]
 default = { features = ["conda-gstreamer"], solve-group = "default" }
-qticvenc = { features = ["qticvenc"] }
+qtic = { features = ["qtic"] }
 generate = { features = ["generate"], no-default-feature = true }
 
 [tool.pixi.tasks]
