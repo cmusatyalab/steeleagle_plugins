@@ -122,7 +122,5 @@ def run_engine(name, args):
                 logger.info("person detected: %d (%.1fms) -> shown", len(detections), elapsed_ms)
                 engine.drop(result=b'{"person_detected": true}')
             else:
-                # TODO: once the retrainer engine exists, forward here as a
-                # potential false positive instead of dropping.
-                logger.info("no person (%.1fms) -> dropped", elapsed_ms)
-                engine.drop(result=b'{"person_detected": false}')
+                logger.info("no person (%.1fms) -> forward to retrain", elapsed_ms)
+                engine.forward(result=b'{"person_detected": false}')
