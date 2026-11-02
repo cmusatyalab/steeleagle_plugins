@@ -32,14 +32,16 @@ gst-plugins-bad = "*"
 gst-plugins-ugly = "*"
 gst-libav = "*"
 
-# qtic requires system GStreamer through PyGObject. Requires a C compiler,
-# pkg-config, libgirepository-2.0-dev, libcairo2-dev, gir1.2-gstreamer-1.0, and
-# git1.2-gst-plugins-base-1.0.
+# qtic is the default environment with the device's own GStreamer plugins
+# added, so that a Qualcomm hardware encoder or decoder (e.g. qtic2venc) loads
+# into conda's GStreamer. Set GST_PLUGIN_PATH to the directory holding the
+# device's plugins; their libraries are found in the system library
+# directories.
 [tool.pixi.feature.qtic]
 platforms = ["linux-aarch64"]
 
-[tool.pixi.feature.qtic.pypi-dependencies]
-pygobject = "*"
+[tool.pixi.feature.qtic.activation.env]
+GST_PLUGIN_PATH = "/usr/lib/gstreamer-1.0"
 
 [tool.pixi.pypi-dependencies]
 h264 = { path = ".", editable = true }
@@ -49,7 +51,7 @@ buf = "*"
 
 [tool.pixi.environments]
 default = { features = ["conda-gstreamer"], solve-group = "default" }
-qtic = { features = ["qtic"] }
+qtic = { features = ["qtic", "conda-gstreamer"], solve-group = "default" }
 generate = { features = ["generate"], no-default-feature = true }
 
 [tool.pixi.tasks]

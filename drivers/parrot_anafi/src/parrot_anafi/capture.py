@@ -3,9 +3,10 @@
 The stream is H.264 over RTSP; the decoder is GStreamer elements, in
 gst-launch syntax, so that a hardware decoder can replace the default software
 one. A hardware decoder whose frames are in hardware memory must copy them
-into system memory itself, e.g. in the qtic environment
+into system memory itself, e.g.
 `qtivdec ! qtivtransform ! video/x-raw,format=RGB`, since videoconvert can't
-read GBM memory.
+read GBM memory. The qtic environment adds the device's own GStreamer
+plugins, which hold such decoders.
 """
 import logging
 
