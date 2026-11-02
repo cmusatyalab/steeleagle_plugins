@@ -19,7 +19,7 @@ default = "192.168.42.1"
 [[args]]
 name = "decoder"
 type = "string"
-description = "H.264 decoder of the video stream, in gst-launch syntax; its output must be in system memory, and is converted to RGB after it (e.g. \"qtivdec ! qtivtransform ! video/x-raw,format=RGB\" with the qtic environment)"
+description = "H.264 decoder of the video stream, in gst-launch syntax; its output must be in system memory, and is converted to RGB after it (e.g. \"qtic2vdec ! qtivtransform ! video/x-raw,format=RGB\" with the native environment)"
 default = "avdec_h264 max-threads=1"
 
 [driver]

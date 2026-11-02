@@ -4,8 +4,8 @@ The stream is H.264 over RTSP; the decoder is GStreamer elements, in
 gst-launch syntax, so that a hardware decoder can replace the default software
 one. A hardware decoder whose frames are in hardware memory must copy them
 into system memory itself, e.g.
-`qtivdec ! qtivtransform ! video/x-raw,format=RGB`, since videoconvert can't
-read GBM memory. The qtic environment adds the device's own GStreamer
+`qtic2vdec ! qtivtransform ! video/x-raw,format=RGB`, since videoconvert can't
+read GBM memory. The native environment adds the device's own GStreamer
 plugins, which hold such decoders.
 """
 import logging
@@ -25,6 +25,17 @@ logger = logging.getLogger('parrot-anafi/capture')
 RGB_CHANNELS = 3
 # Default H.264 decoder, matching anafi4k.plugin.toml.
 DEFAULT_DECODER = 'avdec_h264 max-threads=1'
+# What the drone's live stream is, from its SPS: 1280x720 at 29.97 fps, 8-bit
+# 4:2:0. h264parse leaves these out of its caps on this stream, and Qualcomm's
+# qtic2vdec refuses caps without them, so they are set after it. Software
+# decoders ignore them. The stream is byte-stream with one frame per buffer,
+# the only form qtic2vdec takes.
+STREAM_CAPS = (
+    'video/x-h264,stream-format=byte-stream,alignment=au '
+    '! capssetter caps="video/x-h264,width=(int)1280,height=(int)720,'
+    'framerate=(fraction)30000/1001,chroma-format=(string)4:2:0,'
+    'bit-depth-luma=(uint)8,bit-depth-chroma=(uint)8"'
+)
 # Seconds the pipeline may take to start.
 OPEN_TIMEOUT = 10.0
 # Seconds a read waits for a frame before it fails.
@@ -52,7 +63,7 @@ class GstCapture:
 
     def __init__(self, source, decoder):
         description = (
-            f'{source} ! h264parse ! {decoder} '
+            f'{source} ! h264parse ! {STREAM_CAPS} ! {decoder} '
             f'! videoconvert '
             f'! video/x-raw,format=RGB '
             f'! appsink name=sink max-buffers=1 drop=true sync=false'
