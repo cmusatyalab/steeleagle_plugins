@@ -8,6 +8,7 @@ into system memory itself, e.g.
 read GBM memory. The native environment adds the device's own GStreamer
 plugins, which hold such decoders.
 """
+import functools
 import logging
 
 import gi
@@ -43,9 +44,25 @@ READ_TIMEOUT = 1.0
 
 
 def rtsp_source(ip):
-    """The drone's H.264 stream, as GStreamer elements ending in H.264."""
+    """The drone's H.264 stream, as GStreamer elements ending in H.264.
+
+    The drone's DESCRIBE answers with Content-Base rtsp://{ip}/live, with no
+    trailing slash, and a=control:front. rtspsrc 1.28 resolves that as a URL,
+    to rtsp://{ip}/front, which the drone answers with 500 and rtspsrc does
+    not retry; the stream is at rtsp://{ip}/live/front.
+    force-non-compliant-url makes rtspsrc append the control to the base
+    instead, as older versions always did; those versions, such as the
+    device's own 1.16 in the native environment, lack the property."""
+    compat = 'force-non-compliant-url=true ' if _rtspsrc_has_non_compliant_url() else ''
     return (f'rtspsrc location=rtsp://{ip}/live protocols=udp latency=0 '
-            f'! rtph264depay')
+            f'{compat}! rtph264depay')
+
+
+@functools.cache
+def _rtspsrc_has_non_compliant_url():
+    """Whether the rtspsrc GStreamer loads has force-non-compliant-url."""
+    src = Gst.ElementFactory.make('rtspsrc')
+    return src is not None and src.find_property('force-non-compliant-url') is not None
 
 
 def _rgb_stride(width):
