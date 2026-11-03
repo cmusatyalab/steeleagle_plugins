@@ -49,6 +49,7 @@ from anomalib.models import Patchcore
 
 from frame_with_embedding_pb2 import FrameWithEmbedding
 from steeleagle_protocol.v1.messages.frame import frame_pb2
+from google.protobuf.timestamp_pb2 import Timestamp
 
 logger = logging.getLogger("patchcore-score")
 
@@ -275,9 +276,10 @@ def run_engine(name, args, remote_qualifier=None):
                 )
                 engine.drop()
                 continue
-
+            ts = Timestamp()
+            ts.GetCurrentTime() 
             payload = frame_pb2.RawFrame(
-                data=frame_bytes, h_res=FRAME_W, v_res=FRAME_H, channels=RGB_CHANNELS,
+                timestamp=ts, data=frame_bytes, h_res=FRAME_W, v_res=FRAME_H, channels=RGB_CHANNELS,
             ).SerializeToString()
             if len(payload) > args["max_output_size"]:
                 logger.error(
