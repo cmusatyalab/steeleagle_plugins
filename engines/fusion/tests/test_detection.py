@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 import uriel
 from conftest import LOCAL, PRODUCER, REMOTE, SESSION, Clock, input_id, make_event
@@ -214,3 +216,79 @@ def test_tracking_is_bounded_and_keeps_the_current_input(fusion, monkeypatch):
     assert fusion.tracked == 4
     fusion.on_event(make_event(K.TIMED_OUT, REMOTE, 0))
     assert decided(fusion, 0) == b"local"
+
+
+def logged(caplog):
+    return [record.getMessage() for record in caplog.records]
+
+
+def test_logs_a_remote_result_in_time(fusion, clock, caplog):
+    caplog.set_level(logging.INFO, "fusion.detection")
+    fusion.begin(input_id(1))
+    result(fusion, LOCAL, 1, b"local")
+    clock.advance_ms(50)
+    result(fusion, REMOTE, 1, b"remote")
+    fusion.decide(input_id(1))
+    assert logged(caplog) == [
+        "input 1: local accepted first, waiting",
+        "input 1: remote accepted, 50.0 ms after local",
+        "input 1: returning remote result (in time)",
+    ]
+
+
+def test_logs_the_local_result_when_the_grace_period_ends_and_a_late_remote(
+    fusion, clock, caplog
+):
+    caplog.set_level(logging.INFO, "fusion.detection")
+    fusion.begin(input_id(1))
+    result(fusion, LOCAL, 1, b"local")
+    clock.advance_ms(GRACE_MS)
+    fusion.decide(input_id(1))
+    fusion.end(input_id(1))
+    clock.advance_ms(30)
+    result(fusion, REMOTE, 1, b"remote")
+    assert logged(caplog) == [
+        "input 1: local accepted first, waiting",
+        "input 1: returning local result (grace period ended)",
+        "input 1: remote accepted too late, 30.0 ms after returning local",
+    ]
+    assert fusion.tracked == 0
+
+
+def test_logs_results_from_before_the_input_arrived_in_order(fusion, clock, caplog):
+    caplog.set_level(logging.INFO, "fusion.detection")
+    result(fusion, REMOTE, 1, b"remote")
+    clock.advance_ms(5)
+    result(fusion, LOCAL, 1, b"local")
+    assert logged(caplog) == []
+    fusion.begin(input_id(1))
+    assert logged(caplog) == [
+        "input 1: remote accepted first, waiting",
+        "input 1: local accepted, 5.0 ms after remote",
+    ]
+
+
+def test_logs_no_result_if_neither_engine_accepts(fusion, caplog):
+    caplog.set_level(logging.INFO, "fusion.detection")
+    fusion.begin(input_id(1))
+    fusion.on_event(make_event(K.TIMED_OUT, LOCAL, 1))
+    fusion.on_event(make_event(K.SKIPPED, REMOTE, 1))
+    fusion.decide(input_id(1))
+    assert logged(caplog) == ["input 1: neither engine accepted, returning no result"]
+
+
+def test_logs_nothing_for_inputs_that_never_arrive(fusion, caplog):
+    caplog.set_level(logging.INFO, "fusion.detection")
+    fusion.begin(input_id(7))
+    result(fusion, LOCAL, 3, b"local")
+    assert logged(caplog) == []
+
+
+def test_remembered_decisions_are_bounded(fusion, monkeypatch):
+    monkeypatch.setattr(detection, "MAX_DECIDED", 2)
+    for seq in range(5):
+        fusion.begin(input_id(seq))
+        result(fusion, REMOTE, seq, b"remote")
+        fusion.decide(input_id(seq))
+        fusion.end(input_id(seq))
+    assert len(fusion._decided) == 2

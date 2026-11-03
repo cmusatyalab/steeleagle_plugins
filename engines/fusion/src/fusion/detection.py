@@ -36,6 +36,8 @@ logger = logging.getLogger("fusion.detection")
 # gets (another flow, or an input skipped on the way to it) are forgotten
 # after this many.
 MAX_TRACKED = 1024
+# The most decided inputs remembered, to log the results that come too late.
+MAX_DECIDED = 256
 
 _FAILED = frozenset({uriel.EventKind.SKIPPED, uriel.EventKind.TIMED_OUT})
 
@@ -56,6 +58,8 @@ class Outcomes:
 
     results: dict = field(default_factory=dict)
     failed: set = field(default_factory=set)
+    # The engines whose results were logged
+    logged: set = field(default_factory=set)
 
     def fail(self, engine):
         if engine not in self.results:
@@ -79,6 +83,15 @@ class Report:
     source: str | None = None
 
 
+@dataclass(frozen=True)
+class Decided:
+    """What was reported for an input: the result of the engine `name`
+    ("local" or "remote", or None for no result), at the time `at_ns`."""
+
+    name: str | None
+    at_ns: int
+
+
 class DetectionFusion:
     def __init__(self, *, local, remote, grace_ns, clock):
         if local == remote:
@@ -91,6 +104,7 @@ class DetectionFusion:
         self._disconnected = set()
         # The input being decided, which is never forgotten for MAX_TRACKED
         self._current = None
+        self._decided = OrderedDict()
 
     # Events
 
@@ -111,8 +125,21 @@ class DetectionFusion:
         if engine in self._disconnected:
             logger.info("%s is reachable again", engine)
             self._disconnected.discard(engine)
+        failed = event.outcome == uriel.Outcome.DROP and not event.result
+        decided = self._decided.get(event.id)
+        if decided is not None:
+            # It can no longer change what was reported
+            if kind == uriel.EventKind.RESULT and not failed:
+                logger.info(
+                    "input %d: %s accepted too late, %.1f ms after returning %s",
+                    event.id.seq,
+                    self._name(engine),
+                    (self.clock() - decided.at_ns) / 1e6,
+                    decided.name or "no result",
+                )
+            return
         if kind == uriel.EventKind.RESULT:
-            if event.outcome == uriel.Outcome.DROP and not event.result:
+            if failed:
                 self._outcomes(event.id).fail(engine)
             else:
                 outcomes = self._outcomes(event.id)
@@ -120,6 +147,7 @@ class DetectionFusion:
                 outcomes.results[engine] = Result(
                     event.result, event.payload_type, self.clock()
                 )
+                self._log_accepted(event.id, outcomes)
         elif kind in _FAILED:
             self._outcomes(event.id).fail(engine)
 
@@ -139,6 +167,33 @@ class DetectionFusion:
         for outcomes in self._inputs.values():
             outcomes.fail(engine)
 
+    def _name(self, engine):
+        return "local" if engine == self.local else "remote"
+
+    def _log_accepted(self, id, outcomes):
+        """Logs the results of the input being decided that are not logged
+        yet. An engine also finishes inputs that never reach this engine,
+        which are not logged."""
+        if id != self._current:
+            return
+        unlogged = [e for e in outcomes.results if e not in outcomes.logged]
+        for engine in sorted(unlogged, key=lambda e: outcomes.results[e].at_ns):
+            other = self.remote if engine == self.local else self.local
+            if other in outcomes.logged:
+                after = outcomes.results[engine].at_ns - outcomes.results[other].at_ns
+                logger.info(
+                    "input %d: %s accepted, %.1f ms after %s",
+                    id.seq,
+                    self._name(engine),
+                    after / 1e6,
+                    self._name(other),
+                )
+            else:
+                logger.info(
+                    "input %d: %s accepted first, waiting", id.seq, self._name(engine)
+                )
+            outcomes.logged.add(engine)
+
     # Inputs
 
     def begin(self, id):
@@ -148,6 +203,7 @@ class DetectionFusion:
         outcomes = self._outcomes(id)
         for engine in self._disconnected:
             outcomes.fail(engine)
+        self._log_accepted(id, outcomes)
 
     def decide(self, id):
         """What to do with the input `id` now: a Wait or a Report."""
@@ -157,17 +213,33 @@ class DetectionFusion:
         if local is not None:
             deadline = local.at_ns + self.grace_ns
             if remote is not None and remote.at_ns <= deadline:
-                return Report(remote, self.remote)
-            if remote is not None or self.remote in outcomes.failed:
-                return Report(local, self.local)
+                return self._report(id, remote, self.remote, "in time")
+            if remote is not None:
+                return self._report(id, local, self.local, "remote was late")
+            if self.remote in outcomes.failed:
+                return self._report(id, local, self.local, "remote failed")
             if self.clock() >= deadline:
-                return Report(local, self.local)
+                return self._report(id, local, self.local, "grace period ended")
             return Wait(deadline)
         if remote is not None:
-            return Report(remote, self.remote)
+            reason = "local failed" if self.local in outcomes.failed else "local pending"
+            return self._report(id, remote, self.remote, reason)
         if self.local in outcomes.failed and self.remote in outcomes.failed:
-            return Report()
+            logger.info("input %d: neither engine accepted, returning no result", id.seq)
+            return self._report(id)
         return Wait()
+
+    def _report(self, id, result=None, source=None, reason=None):
+        """The Report of the input `id`, which is logged and remembered."""
+        name = None
+        if source is not None:
+            name = self._name(source)
+            logger.info("input %d: returning %s result (%s)", id.seq, name, reason)
+        self._decided[id] = Decided(name, self.clock())
+        self._decided.move_to_end(id)
+        while len(self._decided) > MAX_DECIDED:
+            self._decided.popitem(last=False)
+        return Report(result, source)
 
     def end(self, id):
         """Forgets the input `id`, and every earlier input of its producer's

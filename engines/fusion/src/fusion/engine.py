@@ -76,7 +76,6 @@ def _report(engine, id, decision, result_type, max_output_size):
     """Drops the input `id`, with the decided result."""
     result = decision.result
     if result is None:
-        logger.debug("input %d: no result from either engine; dropping it", id.seq)
         engine.drop()
         return
     if result.payload_type and result.payload_type != result_type:
@@ -97,5 +96,4 @@ def _report(engine, id, decision, result_type, max_output_size):
         )
         engine.drop()
         return
-    logger.debug("input %d: result of %s", id.seq, decision.source)
     engine.drop(result=result.data)

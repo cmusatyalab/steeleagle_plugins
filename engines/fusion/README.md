@@ -27,6 +27,8 @@ The grace period starts when the fusion engine receives the local result, which 
 
 The local and remote engines must get the same inputs as the fusion engine (e.g. all three on edges from the same producer); the fusion engine waits on an input until it hears from them, and Uriel reports every offer it makes (a result, `SKIPPED`, `TIMED_OUT` or `DISCONNECTED`), but an input that is never offered to one of them is waited on forever.
 
+Each decided input is logged at `INFO`: which engine accepted first (returned a result), when the other accepted, and which result was returned and why, or that neither accepted. A result that arrives after its input was decided is logged as too late. Inputs that never reach the fusion engine are not logged.
+
 ## Development
 
 ```
