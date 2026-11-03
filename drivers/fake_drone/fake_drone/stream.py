@@ -118,3 +118,8 @@ class Stream(StreamServiceServicer):
         self._publisher = FramePublisher(camera.uri, self.frames_dir, self.h_res, self.v_res, self.fps)
         self._publisher.start()
         return stream_proto.StreamCamerasResponse()
+    
+    def StreamTelemetry(self, request, context):
+    	# No real vehicle, so there's no telemetry to publish; acknowledge
+    	# successfully without starting anything.
+    	return stream_proto.StreamTelemetryResponse()
