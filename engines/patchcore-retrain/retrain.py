@@ -51,6 +51,12 @@ directly -- only the thread that owns a Uriel object may use it -- so it
 hands the finished swap info to the main thread through a plain
 thread-safe queue instead.
 
+bootstrap_bundled_models() is score's half of the same bootstrap
+retrain.py does on lambda: both sides get seeded with the same files under
+the same names (this plugin's own bundled models/ directory, checked into
+source control), so a swap announcement naming one of those bundled banks
+never needs an actual transfer -- fermi already has it independently.
+
 ASSUMPTIONS / OPEN QUESTIONS STILL FLAGGED:
 - collect_embeddings() assumes Folder's dataloader iterates files in a
   deterministic (sorted-by-filename) order, and that train_batch_size=1
@@ -62,7 +68,13 @@ ASSUMPTIONS / OPEN QUESTIONS STILL FLAGGED:
 - extract_threshold() is reconstructed from memory of this session's
   build_faiss_meta.py (which did work, producing gravel_meta.pt's correct
   13.9981 threshold) -- worth a side-by-side diff against that script if
-  anything here looks off.
+  anything here looks off. Also: train_patchcore()'s AnomalibEngine is
+  currently run with limit_val_batches=0 (added to fix a zero-length-subset
+  crash with tiny windows), which disables the validation step that
+  calibrates the adaptive threshold -- extract_threshold() will fail on any
+  freshly-trained bank until this is addressed with a real val split sized
+  for however many frames retrain-collection actually gathers. Flagged, not
+  fixed, as of this patch.
 - The no-retransmit invariant (announce_existing_bank() never re-sends)
   assumes fermi's persistent directory is never cleaned up or reset
   independently of lambda's -- if fermi's steeleagle/models/ ever gets
@@ -94,6 +106,7 @@ from anomalib.engine import Engine as AnomalibEngine
 from anomalib.models import Patchcore
 from torchvision.transforms.v2 import Resize
 
+from steeleagle_protocol.v1.messages.frame import frame_pb2
 from steeleagle_protocol.v1.services.daemon import transfer_pb2, transfer_pb2_grpc
 
 logger = logging.getLogger("retrain")
@@ -110,6 +123,7 @@ MODEL_INPUT_SIZE = 256  # matches patchcore_train.py's --image_size default
 DEFAULT_NUM_NEIGHBORS = 9
 
 TRANSFER_CHUNK_SIZE = 1 * 1024 * 1024  # 1MB; our files (faiss index + meta) are a few MB at most
+
 
 # Bundled defaults that ship with this plugin's own repo directory -- NOT
 # the persistent MODEL_DIR below. bootstrap_bundled_models() copies/pushes
@@ -191,6 +205,9 @@ def collect_embeddings(frames_dir, backbone=BACKBONE, layers=LAYERS, image_size=
         normal_dir=str(Path(frames_dir).resolve()),
         augmentations=Resize((image_size, image_size)),
         train_batch_size=1,
+        test_split_mode="none",
+        val_split_mode="none",
+        normal_split_ratio=0.0,
     )
 
     model = Patchcore(backbone=backbone, layers=layers)
@@ -205,7 +222,7 @@ def collect_embeddings(frames_dir, backbone=BACKBONE, layers=LAYERS, image_size=
 
     model.model.subsample_embedding = capture_instead_of_subsample
 
-    engine = AnomalibEngine(max_epochs=1)
+    engine = AnomalibEngine(max_epochs=1, limit_val_batches=0)
     try:
         engine.fit(model=model, datamodule=datamodule)
     except _StopAfterCollection:
@@ -222,6 +239,11 @@ def train_patchcore(image_dir, bank_size, backbone=BACKBONE, layers=LAYERS, imag
     """Inlined port of patchcore_train.py's training logic: trains a fresh
     Patchcore model on image_dir and returns it with model.model.memory_bank
     populated at (approximately) bank_size vectors. In-process, no subprocess.
+
+    NOTE: limit_val_batches=0 below disables validation, which is also where
+    anomalib calibrates the adaptive threshold -- extract_threshold() will
+    raise on the result until this has a real val split. Flagged in this
+    file's module docstring; not fixed here.
     """
     work_dir = Path(tempfile.mkdtemp(prefix="retrain_work_"))
     datamodule = Folder(
@@ -229,6 +251,9 @@ def train_patchcore(image_dir, bank_size, backbone=BACKBONE, layers=LAYERS, imag
         root=work_dir,
         normal_dir=str(Path(image_dir).resolve()),
         augmentations=Resize((image_size, image_size)),
+        test_split_mode="none",
+        val_split_mode="none",
+        normal_split_ratio=0.0,
     )
     model = Patchcore(backbone=backbone, layers=layers)
 
@@ -248,7 +273,7 @@ def train_patchcore(image_dir, bank_size, backbone=BACKBONE, layers=LAYERS, imag
 
     model.model.subsample_embedding = subsample_to_bank_size
 
-    engine = AnomalibEngine(max_epochs=1)
+    engine = AnomalibEngine(max_epochs=1, limit_val_batches=0)
     engine.fit(model=model, datamodule=datamodule)
 
     actual = model.model.memory_bank.shape[0]
@@ -567,6 +592,11 @@ def run_engine(name, args):
         for input in engine:
             frame_bytes = bytes(input.data)
             if len(frame_bytes) != EXPECTED_RGB_SIZE:
+                raw_frame = frame_pb2.RawFrame()
+                raw_frame.ParseFromString(frame_bytes)
+                frame_bytes = raw_frame.data
+            if len(frame_bytes) != EXPECTED_RGB_SIZE:
+                logger.warning("dropping: got %d bytes, expected %d", len(frame_bytes), EXPECTED_RGB_SIZE)
                 engine.drop()
                 continue
 
