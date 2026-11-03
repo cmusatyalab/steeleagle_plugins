@@ -1,0 +1,35 @@
+[project]
+name = "patchcore-retrain"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "uriel>=0.2.0",
+    "faiss-cpu",
+    "numpy",
+    "torch",
+    "torchvision",
+    "anomalib",
+    "opencv-python",
+    "grpcio",
+    "protobuf",
+    "steeleagle-protocol>=0.3.5",
+]
+
+[tool.setuptools]
+py-modules = ["main", "retrain"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.dependencies]
+cython = "*"
+pkg-config = "*"
+c-compiler = "*"
+cxx-compiler = "*"
+
+[tool.pixi.pypi-dependencies]
+patchcore-retrain = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+start = "uv run main.py"

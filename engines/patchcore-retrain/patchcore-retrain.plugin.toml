@@ -1,0 +1,67 @@
+[plugin]
+name = "PatchCore Retrain"
+type = "engine"
+description = "Watches false positives verifier forwards; swaps patchcore-score to a better existing memory bank, or collects frames and retrains a new one, when FPs stay high"
+
+[[args]]
+name = "daemon_addr"
+type = "string"
+description = "host:port of fermi's eagled gRPC TransferService, used to push a new/candidate bank's faiss+meta files there"
+default = "fermi.local:50051"
+
+[[args]]
+name = "n_max"
+type = "number"
+description = "Sliding FP window cap; oldest entry evicted beyond this"
+default = 20
+
+[[args]]
+name = "m_min"
+type = "number"
+description = "Minimum window size before the FP rate is evaluated at all"
+default = 8
+
+[[args]]
+name = "fp_rate_trigger"
+type = "number"
+description = "Fraction of the window that must be FPs to trigger a swap/retrain evaluation"
+default = 0.8
+
+[[args]]
+name = "window_stale_seconds"
+type = "number"
+description = "Evict the window's oldest entry if it's older than this, even if the window is under n_max"
+default = 60.0
+
+[[args]]
+name = "tolerance_fraction"
+type = "number"
+description = "Fraction of a triggered window a candidate bank may still flag as FP and still count as passing"
+default = 0.05
+
+[[args]]
+name = "retrain_collect_seconds"
+type = "number"
+description = "How long to keep collecting FP frames before training a new bank, once no existing bank passes"
+default = 30.0
+
+[[args]]
+name = "default_bank_size"
+type = "number"
+description = "Target memory-bank vector count for a freshly trained bank"
+default = 1000
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest message this engine will emit (the swap notification is tiny JSON, not a frame)"
+default = 4096
+
+[engine]
+type = "filter"
+# No inputs: h264-decode -> verifier hands this engine raw RGB24 bytes with
+# output_type="" (forwarded false positives), not a proto message.
+# No result: the swap notification is plain JSON ({"faiss_filename":...,
+# "meta_filename":...}), not a proto -- patchcore-score picks it up by
+# subscribing to this engine and reading that result off the RESULT event,
+# the same way h264_encoder already watches h264_decoder's events.
