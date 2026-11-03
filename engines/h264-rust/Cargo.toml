@@ -1,6 +1,6 @@
 [package]
 name = "h264-rust"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "SteelEagle engines that encode raw frames with H.264, and decode them, keyframe on gap"
