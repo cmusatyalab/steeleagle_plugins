@@ -100,6 +100,7 @@ class EncodeStream:
         self.policy = KeyframePolicy()
         self.next_number = 0
         self.start = time.monotonic()
+        self.last_pts_ns = None
 
 
 def _decoder_event(streams, event):
@@ -143,6 +144,16 @@ def _encode_frame(engine, streams, input, args):
     pipeline, policy = stream.pipeline, stream.policy
 
     pts_ns = int((time.monotonic() - stream.start) * 1e9)
+    # After a long gap between frames, the decoder may have given up on the
+    # stream, so start it afresh with a keyframe
+    keyframe_timeout_ns = args["keyframe_timeout"] * 1_000_000
+    if (
+        keyframe_timeout_ns > 0
+        and stream.last_pts_ns is not None
+        and pts_ns - stream.last_pts_ns > keyframe_timeout_ns
+    ):
+        policy.needed = True
+    stream.last_pts_ns = pts_ns
     if policy.needed:
         pipeline.force_keyframe()
     pipeline.push(pad_rows(frame.data, width, height), pts_ns)

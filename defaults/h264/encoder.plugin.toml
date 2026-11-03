@@ -34,6 +34,12 @@ description = "Milliseconds a frame may take to encode before it is discarded"
 default = 1000
 
 [[args]]
+name = "keyframe_timeout"
+type = "number"
+description = "Milliseconds between frames after which the next frame is forced to be a keyframe; 0 disables"
+default = 150
+
+[[args]]
 name = "log_frames"
 type = "boolean"
 description = "Log every frame encoded"
