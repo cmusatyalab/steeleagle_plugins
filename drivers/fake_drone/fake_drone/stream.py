@@ -28,7 +28,9 @@ RAW_FRAME_TYPE = 'steeleagle_protocol/v1/messages/frame/RawFrame'
 
 class FramePublisher:
     """Publishes RawFrames read from a directory of .rgb files, looping
-    forever at a fixed fps, as the Uriel producer `uri`."""
+    forever at a fixed fps, as the Uriel producer `uri`. The producer is
+    created on the thread that uses it -- Uriel objects must stay on the
+    thread that created them (same rule as run_producer.py's Subscription)."""
 
     def __init__(self, uri, frames_dir, h_res, v_res, fps):
         self.uri = uri
@@ -41,12 +43,7 @@ class FramePublisher:
         self._next_id = 0
         self._stop = threading.Event()
         self._thread = None
-
-        frame_size = h_res * v_res * RGB_CHANNELS
-        self._producer = uriel.Producer(
-            uri, input_type=RAW_FRAME_TYPE, max_input_size=frame_size + RAW_FRAME_HEADROOM,
-        )
-        logger.info('publishing raw frames as %s, looping %d frames from %s',
+        logger.info('will publish raw frames as %s, looping %d frames from %s',
                     uri, len(self._frames), frames_dir)
 
     def start(self):
@@ -54,38 +51,43 @@ class FramePublisher:
         self._thread.start()
 
     def _run(self):
-        i = 0
-        while not self._stop.is_set():
-            started = time.monotonic()
-            path = self._frames[i % len(self._frames)]
-            data = path.read_bytes()
-            timestamp = Timestamp()
-            timestamp.GetCurrentTime()
-            frame = frame_proto.RawFrame(
-                timestamp=timestamp,
-                data=data,
-                h_res=self._h_res,
-                v_res=self._v_res,
-                channels=RGB_CHANNELS,
-                id=self._next_id,
-            )
-            self._next_id += 1
-            i += 1
-            payload = frame.SerializeToString()
-            try:
-                self._producer.send(payload)
-            except uriel.AgainError:
-                logger.debug('no free input buffer; dropping frame %d', frame.id)
-            sleep_left = self._period - (time.monotonic() - started)
-            if sleep_left > 0:
-                time.sleep(sleep_left)
+        frame_size = self._h_res * self._v_res * RGB_CHANNELS
+        producer = uriel.Producer(
+            self.uri, input_type=RAW_FRAME_TYPE, max_input_size=frame_size + RAW_FRAME_HEADROOM,
+        )
+        try:
+            i = 0
+            while not self._stop.is_set():
+                started = time.monotonic()
+                path = self._frames[i % len(self._frames)]
+                data = path.read_bytes()
+                timestamp = Timestamp()
+                timestamp.GetCurrentTime()
+                frame = frame_proto.RawFrame(
+                    timestamp=timestamp,
+                    data=data,
+                    h_res=self._h_res,
+                    v_res=self._v_res,
+                    channels=RGB_CHANNELS,
+                    id=self._next_id,
+                )
+                self._next_id += 1
+                i += 1
+                payload = frame.SerializeToString()
+                try:
+                    producer.send(payload)
+                except uriel.AgainError:
+                    logger.debug('no free input buffer; dropping frame %d', frame.id)
+                sleep_left = self._period - (time.monotonic() - started)
+                if sleep_left > 0:
+                    time.sleep(sleep_left)
+        finally:
+            producer.close()
 
     def close(self):
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
-        self._producer.close()
-
 
 class Stream(StreamServiceServicer):
     """StreamService implementation for the fake drone."""
