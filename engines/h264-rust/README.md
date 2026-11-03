@@ -21,7 +21,7 @@ Encoder:
 | --- | --- | --- |
 | `decoder_name` | `h264_decoder` | Service name of the decoder on the remote daemon, whose results tell the encoder when to send a keyframe. Not watched when there is no remote daemon. |
 | `encoder` | `x264enc tune=zerolatency speed-preset=ultrafast bitrate=3000 key-int-max=300` | H.264 encoder, in gst-launch syntax. |
-| `input_format` | `I420` | 4:2:0 pixel format the encoder is given: `I420` for software encoders, `NV12` for hardware ones such as `qtic2venc`. |
+| `input_format` | `{I420,NV12}` | 4:2:0 pixel format the encoder is given: one format, or a list in GStreamer caps syntax, of which the encoder takes one. The default suits software encoders (I420) and hardware ones such as `qtic2venc` (NV12). |
 | `fps` | `30` | Frame rate the encoder is told the frames come at. |
 | `max_output_size` | `2097152` | Largest encoded frame sent, in bytes. |
 | `timeout_ms` | `1000` | Milliseconds a frame may take to encode before it is discarded. |
@@ -51,7 +51,7 @@ The encoded frame is SteelEagle's `EncodedFrame`. The encoder copies the raw fra
 
 What an `EncodedFrame` has no room for does not survive: any other field of the `RawFrame`, such as `d_res`, is lost. The `id` of the encoded frame counts the frames encoded for a camera, so the decoded `RawFrame` gets that number as its `id`, not the one the camera gave it.
 
-The pixels go to the encoder as 4:2:0 (`input_format`, I420 by default), the only kind browsers and hardware decoders take. Without a format, x264 would pick 4:4:4. Hardware encoders take NV12, which is 4:2:0 too.
+The pixels go to the encoder as 4:2:0 (`input_format`, `{I420,NV12}` by default), the only kind browsers and hardware decoders take. Without a format, x264 would pick 4:4:4. Software encoders take I420 and hardware encoders take NV12, which is 4:2:0 too, so the encoder gets whichever of the two it takes.
 
 ## Building and running
 
@@ -88,11 +88,10 @@ The releases are built against Ubuntu 20.04's GStreamer 1.16 and glibc 2.31 (`Do
 In the daemon's config:
 
 - **Leave the plugin's `isolation` unset.** A sandbox gets a minimal `/dev` and a container gets no devices, so neither reaches the encoder's device nodes.
-- **Use the hardware encoder and its pixel format.** `qtic2venc` and `v4l2h264enc` take NV12 only:
+- **Use the hardware encoder.** `qtic2venc` and `v4l2h264enc` take NV12 only, which the default `input_format` gives them:
 
   ```toml
   encoder = "qtic2venc control-rate=2 target-bitrate=3000000 b-frames=0"
-  input_format = "NV12"
   ```
 
 - **Give the daemon's user access to the devices.** On a Tachyon, `/dev/video*` is group `video` and `/dev/dri/renderD128` is group `render`.

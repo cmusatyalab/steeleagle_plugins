@@ -36,10 +36,11 @@ pub const DEFAULT_ENCODER: &str =
     "x264enc tune=zerolatency speed-preset=ultrafast bitrate=3000 key-int-max=300";
 /// The frame rate the encoder's rate control assumes, unless told otherwise.
 pub const DEFAULT_FPS: u32 = 30;
-/// The pixel format the encoder is given, unless told otherwise. Without one, x264enc would be
-/// given 4:4:4, which browsers and hardware decoders cannot decode; they take 4:2:0 only. I420 is
-/// the 4:2:0 format every software encoder takes; hardware encoders, e.g. qtic2venc, take NV12.
-pub const DEFAULT_INPUT_FORMAT: &str = "I420";
+/// The pixel formats the encoder may be given, unless told otherwise, as a GStreamer caps list.
+/// Without a format, x264enc would be given 4:4:4, which browsers and hardware decoders cannot
+/// decode; they take 4:2:0 only. Both of these are 4:2:0, and videoconvert gives the encoder the
+/// one it takes: I420 for software encoders, NV12 for hardware ones, e.g. qtic2venc.
+pub const DEFAULT_INPUT_FORMAT: &str = "{I420,NV12}";
 /// Large enough for a 1080p keyframe at a high bitrate.
 pub const DEFAULT_MAX_OUTPUT_SIZE: usize = 2 * 1024 * 1024;
 /// The longest one frame may take to encode, unless told otherwise.
@@ -58,7 +59,8 @@ pub struct Config {
     /// The H.264 encoder, in gst-launch syntax.
     #[arg(long, default_value = DEFAULT_ENCODER)]
     pub encoder: String,
-    /// The 4:2:0 pixel format the encoder takes, e.g. I420 or NV12.
+    /// The 4:2:0 pixel format the encoder is given: one format, e.g. I420 or NV12, or a list in
+    /// GStreamer caps syntax, e.g. {I420,NV12}, of which the encoder picks.
     #[arg(long, default_value = DEFAULT_INPUT_FORMAT)]
     pub input_format: String,
     /// The frame rate the encoder's rate control assumes.

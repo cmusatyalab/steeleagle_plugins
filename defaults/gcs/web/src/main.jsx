@@ -8,7 +8,7 @@ import { getApiUrl } from './urls.js'
 
 // The maps' Mapbox token is the GCS's mapbox plugin arg. It is set before the
 // first render, since the maps are created as they mount; without it they
-// still render, just with no basemap.
+// draw a placeholder instead (see mapboxToken.js).
 async function loadMapboxToken() {
   try {
     const resp = await fetch(getApiUrl('/api/config'))

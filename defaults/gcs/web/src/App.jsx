@@ -27,9 +27,13 @@ import PresenceBar, { PRESENCE_BAR_HEIGHT } from './PresenceBar.jsx';
 import { getApiUrl } from './urls.js';
 import { assignControlGroup, recallControlGroup } from './squadUtils.js';
 import { postToApi } from './apiUtils.js';
+import { hasMapboxToken, MISSING_TOKEN_DETAIL } from './mapboxToken.js';
 import { MOVEMENT_KEYS, createJoystickSender, createSerialPoster, velocityFrom } from './joystick.js';
 
 const ZERO_VELOCITY = { xvel: 0, yvel: 0, zvel: 0, angularvel: 0 };
+
+// Module-level so StrictMode's double-run of mount effects toasts only once
+let mapboxTokenWarned = false;
 
 
 function App() {
@@ -55,12 +59,19 @@ function App() {
     document.getElementById('theme-link').href = `/themes/lara-${theme}-amber/theme.css`;
     localStorage.setItem('se-theme', theme);
   }, [theme]);
+
+  // The maps draw a placeholder without a token (see mapboxToken.js);
+  // this also says so up front, from the Orchestrate page where it's set.
+  useEffect(() => {
+    if (hasMapboxToken() || mapboxTokenWarned) return;
+    mapboxTokenWarned = true;
+    toast.current?.show({ severity: 'warn', summary: 'Mapbox token missing', detail: MISSING_TOKEN_DETAIL, life: 15000 });
+  }, []);
   const [manualControl, setManualControl] = useState(false);
   const [basePlanarVelocity, setBasePlanarVelocity] = useState(3);
   const [baseAngularVelocity, setBaseAngularVelocity] = useState(120);
   const [takeOffAltitude, setTakeOffAltitude] = useState(3);
   const [gimbalVelocity, setGimbalVelocity] = useState(15);
-  const [showDetections, setShowDetections] = useState(true);
   const [gamepadDeadzone, setGamepadDeadzone] = useState(10);
   const [squadList, setSquadList] = useState(null);
   const [controlGroups, setControlGroups] = useState({});
@@ -395,35 +406,6 @@ function App() {
     </div>
   ), [appName]);
 
-  const onToggleDetections = useCallback(async (value) => {
-    setShowDetections(value);
-
-    const requestOptions = {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        show_detections: value
-      })
-    };
-
-    const response = await fetch(getApiUrl('/api/imagery/show_detections'), requestOptions);
-
-    if (!response.ok) {
-      const result = await response.json();
-      toast.current.show({
-        severity: 'error',
-        summary: 'Config Error',
-        detail: `HTTP error! status: ${result.detail}`
-      });
-    } else {
-      toast.current.show({
-        severity: 'success',
-        summary: 'Config Updated',
-        detail: `Show detections set to ${value}`
-      });
-    }
-  }, []);
-
   const overlayContent = useMemo(() => (
     <>
       <div className="flex flex-row gap-2">
@@ -500,7 +482,7 @@ function App() {
         </div>
         {selectedMenu == "Control" && <ControlPage vehicles={vehicles} selectedVehicle={selectedVehicle} setSelectedVehicle={setSelectedVehicle}
           resultsEngine={resultsEngine} setResultsEngine={setResultsEngine}
-          tracking={tracking} setTracking={setTracking} showDetections={showDetections} onToggleDetections={onToggleDetections}
+          tracking={tracking} setTracking={setTracking}
           toast={toast} onCommand={onCommand}
           setManualControl={setManualControl} squadList={squadList} setSquadList={setSquadList}
           takeOffAltitude={takeOffAltitude}
