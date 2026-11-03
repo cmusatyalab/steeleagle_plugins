@@ -2,6 +2,8 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import 'mapbox-gl/dist/mapbox-gl.css';
+import MapUnavailable from './MapUnavailable.jsx';
+import { hasMapboxToken } from './mapboxToken.js';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import { Button } from 'primereact/button';
 import { Dropdown } from 'primereact/dropdown';
@@ -73,7 +75,7 @@ const DRAW_STYLES = [
     },
 ];
 
-function MapDraw({ features, setFeatures, toast }) {
+function MapDrawMap({ features, setFeatures, toast }) {
     const mapRef = useRef();
     const mapContainerRef = useRef();
     const draw = useRef();
@@ -290,6 +292,10 @@ function MapDraw({ features, setFeatures, toast }) {
             </div>
         </div>
     );
+}
+
+function MapDraw(props) {
+    return hasMapboxToken() ? <MapDrawMap {...props} /> : <MapUnavailable height="100%" />;
 }
 
 export default MapDraw;

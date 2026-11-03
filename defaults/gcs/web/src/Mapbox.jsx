@@ -5,6 +5,8 @@ import { vehicleColor, isVehicleDisconnected, isVehicleSelectable, vehicleStatus
 import { vehicleControlGroupDigits } from './squadUtils.js'
 import { STYLE_URLS, applyBasemapConfig, applySatelliteLayerVisibility } from './mapStyles.js'
 import { displayName } from './vehicleNames.js'
+import MapUnavailable from './MapUnavailable.jsx'
+import { hasMapboxToken } from './mapboxToken.js'
 
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -46,7 +48,7 @@ function createVehicleMarkerElement(color, opacity = 1) {
   return el;
 }
 
-function Mapbox({ selectedVehicle, vehicles, mapPanelSize, tracking, detectedObjects, mapHeight, squadList, onToggleVehicle, controlGroups, mapStyle }) {
+function MapboxMap({ selectedVehicle, vehicles, mapPanelSize, tracking, detectedObjects, mapHeight, squadList, onToggleVehicle, controlGroups, mapStyle }) {
   const mapRef = useRef()
   const mapContainerRef = useRef()
   const markerRefs = useRef([]); // To store references to all markers
@@ -217,6 +219,10 @@ function Mapbox({ selectedVehicle, vehicles, mapPanelSize, tracking, detectedObj
   return (
     <div id='map-container' ref={mapContainerRef} style={{ width: '100%', height: mapHeight || '20rem' }} />
   )
+}
+
+function Mapbox(props) {
+  return hasMapboxToken() ? <MapboxMap {...props} /> : <MapUnavailable height={props.mapHeight} />
 }
 
 export default Mapbox

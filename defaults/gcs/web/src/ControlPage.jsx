@@ -30,7 +30,7 @@ const uploadOptions = { icon: 'pi pi-fw pi-cloud-upload', iconOnly: true, classN
 const videoPanelHeight = '26rem';
 
 function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, resultsEngine, setResultsEngine, tracking, setTracking,
-  showDetections, onToggleDetections, toast, onCommand,
+  toast, onCommand,
   setManualControl, squadList, setSquadList, takeOffAltitude, controlGroups,
   uploadState, setUploadState }) {
   const mapPanelSize = 0;
@@ -161,17 +161,6 @@ function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, resultsEng
               tooltipOptions={{ position: 'bottom' }}
               onClick={() => setTracking(!tracking)}
               aria-label="Toggle tracking"
-            />
-            <Button
-              size="small"
-              outlined={!showDetections}
-              severity={showDetections ? undefined : 'secondary'}
-              icon={showDetections ? 'pi pi-eye' : 'pi pi-eye-slash'}
-              label="Show Detections"
-              tooltip={`Detections ${showDetections ? 'Shown' : 'Hidden'}: toggles bounding boxes on the video stream`}
-              tooltipOptions={{ position: 'bottom' }}
-              onClick={() => onToggleDetections(!showDetections)}
-              aria-label="Toggle show detections"
             />
           </div>
           <div className="flex-1 flex justify-content-end">
