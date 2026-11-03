@@ -10,6 +10,12 @@ description = "Compiled QNN YOLO model (a .so file name) in the daemon's models 
 default = "libs640_v26_quant.so"
 
 [[args]]
+name = "labels"
+type = "string"
+description = "Class names file (one name per line, in model class order) in the daemon's models directory. Defaults to <model name>.labels next to the model if it exists, otherwise the 80 COCO classes"
+default = ""
+
+[[args]]
 name = "backend"
 type = "string"
 description = "Path to the QNN HTP backend .so, relative to the plugin folder"

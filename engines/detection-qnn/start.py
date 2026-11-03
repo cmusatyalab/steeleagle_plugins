@@ -6,6 +6,7 @@ import sys
 
 DEFAULTS = {
     "model": "libs640_v26_quant.so",
+    "labels": "",
     "backend": "libs/libQnnHtp.so",
     "confidence": 0.5,
     "nms_score_threshold": 0.5,
@@ -27,6 +28,7 @@ plugin_dir = os.path.dirname(os.path.abspath(__file__))
 MODELS_ENV = "STEELEAGLE_MODELS"
 SANDBOX_MODELS_DIR = "/steeleagle/models"
 MODEL_SUFFIX = ".so"
+LABELS_SUFFIX = ".labels"
 
 
 def resolve(path):
@@ -48,6 +50,21 @@ model = os.path.join(models_dir, model_name)
 if not os.path.isfile(model):
     sys.exit(f"Compiled model not found: {model}")
 
+# Class names come from an explicit labels file, else from a file named after
+# the model (libfoo.so -> libfoo.labels) transferred alongside it. With neither,
+# the server falls back to the COCO classes.
+labels_name = args["labels"]
+if labels_name:
+    if os.path.basename(labels_name) != labels_name:
+        sys.exit(f"labels must be a file name without directories: {labels_name!r}")
+    labels = os.path.join(models_dir, labels_name)
+    if not os.path.isfile(labels):
+        sys.exit(f"Labels file not found: {labels}")
+else:
+    labels = os.path.join(models_dir, os.path.splitext(model_name)[0] + LABELS_SUFFIX)
+    if not os.path.isfile(labels):
+        labels = None
+
 # Prepend rather than replace: ADSP_LIBRARY_PATH overrides the DSP's default
 # search path, so the system skel dirs must stay on it (separator is ';').
 os.environ["ADSP_LIBRARY_PATH"] = ";".join(
@@ -55,18 +72,19 @@ os.environ["ADSP_LIBRARY_PATH"] = ";".join(
      "/usr/lib/rfsa/adsp", "/usr/lib/dsp/cdsp", "/dsp"]
 )
 
-os.execvp(
-    os.path.join(plugin_dir, "inference-server-uriel"),
-    [
-        "inference-server-uriel",
-        "--model", model,
-        "--backend", resolve(args["backend"]),
-        "--uriel_engine", name,
-        "--uriel_task", "detect",
-        "--confidence_threshold", str(args["confidence"]),
-        "--nms_score_threshold", str(args["nms_score_threshold"]),
-        "--nms_iou_threshold", str(args["nms_iou_threshold"]),
-        "--log_level", str(args["log_level"]),
-        "--uriel_max_result_size", str(args["max_output_size"]),
-    ],
-)
+server_args = [
+    "inference-server-uriel",
+    "--model", model,
+    "--backend", resolve(args["backend"]),
+    "--uriel_engine", name,
+    "--uriel_task", "detect",
+    "--confidence_threshold", str(args["confidence"]),
+    "--nms_score_threshold", str(args["nms_score_threshold"]),
+    "--nms_iou_threshold", str(args["nms_iou_threshold"]),
+    "--log_level", str(args["log_level"]),
+    "--uriel_max_result_size", str(args["max_output_size"]),
+]
+if labels:
+    server_args += ["--labels", labels]
+
+os.execvp(os.path.join(plugin_dir, "inference-server-uriel"), server_args)
