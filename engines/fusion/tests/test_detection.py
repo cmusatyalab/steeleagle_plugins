@@ -2,13 +2,24 @@ import logging
 
 import pytest
 import uriel
-from conftest import LOCAL, PRODUCER, REMOTE, SESSION, Clock, input_id, make_event
+from conftest import (
+    DETECTION_RESULT_TYPE,
+    LOCAL,
+    PRODUCER,
+    REMOTE,
+    SESSION,
+    Clock,
+    input_id,
+    make_event,
+)
 
 from fusion import detection
-from fusion.detection import DetectionFusion, Report, Wait
+from fusion.detection import DetectionFusion, Report, Result, Wait
+from fusion.engine import _report
 
 K = uriel.EventKind
 GRACE_MS = 100
+TIMEOUT_MS = 1000
 
 
 @pytest.fixture
@@ -19,7 +30,11 @@ def clock():
 @pytest.fixture
 def fusion(clock):
     return DetectionFusion(
-        local=LOCAL, remote=REMOTE, grace_ns=GRACE_MS * 1_000_000, clock=clock
+        local=LOCAL,
+        remote=REMOTE,
+        grace_ns=GRACE_MS * 1_000_000,
+        timeout_ns=TIMEOUT_MS * 1_000_000,
+        clock=clock,
     )
 
 
@@ -38,12 +53,12 @@ def decided(fusion, seq):
 
 def test_engines_must_differ():
     with pytest.raises(ValueError):
-        DetectionFusion(local="a", remote="a", grace_ns=0, clock=Clock())
+        DetectionFusion(local="a", remote="a", grace_ns=0, timeout_ns=0, clock=Clock())
 
 
-def test_waits_until_an_engine_reports(fusion):
+def test_waits_until_an_engine_reports(fusion, clock):
     fusion.begin(input_id(1))
-    assert fusion.decide(input_id(1)) == Wait(None)
+    assert fusion.decide(input_id(1)) == Wait(clock.ns + TIMEOUT_MS * 1_000_000)
     fusion.on_event(make_event(K.ACCEPTED, LOCAL, 1))
     fusion.on_event(make_event(K.SENT, REMOTE, 1))
     assert decided(fusion, 1) is None
@@ -120,8 +135,8 @@ def test_an_empty_forwarded_result_is_a_result(fusion):
 def test_waits_for_remote_if_local_fails(fusion, clock):
     fusion.begin(input_id(1))
     fusion.on_event(make_event(K.TIMED_OUT, LOCAL, 1))
-    clock.advance_ms(10 * GRACE_MS)
-    assert fusion.decide(input_id(1)) == Wait(None)
+    clock.advance_ms(TIMEOUT_MS - 1)
+    assert decided(fusion, 1) is None
     result(fusion, REMOTE, 1, b"remote")
     assert decided(fusion, 1) == b"remote"
 
@@ -292,3 +307,93 @@ def test_remembered_decisions_are_bounded(fusion, monkeypatch):
         fusion.decide(input_id(seq))
         fusion.end(input_id(seq))
     assert len(fusion._decided) == 2
+
+
+class RecordingEngine:
+    def __init__(self):
+        self.dropped = []
+
+    def drop(self, *, result=b""):
+        self.dropped.append(result)
+
+
+@pytest.mark.parametrize(
+    "payload_type, warned",
+    [
+        (DETECTION_RESULT_TYPE, False),
+        (DETECTION_RESULT_TYPE.replace("/", "."), False),
+        ("some/other/Type", True),
+    ],
+    ids=["slashes", "dots", "other"],
+)
+def test_warns_only_of_another_result_type(caplog, payload_type, warned):
+    engine = RecordingEngine()
+    decision = Report(Result(b"boxes", payload_type, 0), LOCAL)
+    _report(engine, input_id(1), decision, DETECTION_RESULT_TYPE, 1024)
+    assert engine.dropped == [b"boxes"]
+    assert bool(caplog.records) == warned
+
+
+def test_no_result_when_nothing_is_heard_by_the_timeout(fusion, clock, caplog):
+    caplog.set_level(logging.INFO, "fusion.detection")
+    fusion.begin(input_id(1))
+    clock.advance_ms(TIMEOUT_MS - 1)
+    assert decided(fusion, 1) is None
+    clock.advance_ms(1)
+    assert decided(fusion, 1) == b"<drop>"
+    assert logged(caplog) == [
+        "input 1: timed out after 1000 ms, returning no result (local pending, remote pending)"
+    ]
+
+
+def test_a_skipped_local_and_a_silent_remote_do_not_hold_up_the_next_input(
+    fusion, clock, caplog
+):
+    caplog.set_level(logging.INFO, "fusion.detection")
+    fusion.begin(input_id(1))
+    fusion.on_event(make_event(K.SKIPPED, LOCAL, 1))
+    clock.advance_ms(TIMEOUT_MS)
+    assert decided(fusion, 1) == b"<drop>"
+    assert "(local failed, remote pending)" in logged(caplog)[0]
+    fusion.end(input_id(1))
+
+    fusion.begin(input_id(2))
+    result(fusion, REMOTE, 2, b"remote")
+    assert decided(fusion, 2) == b"remote"
+
+
+def test_timeout_is_counted_from_when_the_input_arrives(fusion, clock):
+    fusion.on_event(make_event(K.SKIPPED, LOCAL, 1))
+    clock.advance_ms(10 * TIMEOUT_MS)
+    fusion.begin(input_id(1))
+    assert decided(fusion, 1) is None
+
+
+def test_timeout_shortens_the_grace_period(clock, caplog):
+    caplog.set_level(logging.INFO, "fusion.detection")
+    fusion = DetectionFusion(
+        local=LOCAL,
+        remote=REMOTE,
+        grace_ns=500 * 1_000_000,
+        timeout_ns=200 * 1_000_000,
+        clock=clock,
+    )
+    fusion.begin(input_id(1))
+    result(fusion, LOCAL, 1, b"local")
+    assert fusion.decide(input_id(1)) == Wait(clock.ns + 200 * 1_000_000)
+    clock.advance_ms(200)
+    assert decided(fusion, 1) == b"local"
+    assert logged(caplog)[-1] == "input 1: returning local result (timed out)"
+
+
+def test_a_result_after_the_timeout_is_logged_too_late(fusion, clock, caplog):
+    caplog.set_level(logging.INFO, "fusion.detection")
+    fusion.begin(input_id(1))
+    clock.advance_ms(TIMEOUT_MS)
+    fusion.decide(input_id(1))
+    fusion.end(input_id(1))
+    clock.advance_ms(10)
+    result(fusion, REMOTE, 1, b"remote")
+    assert logged(caplog)[-1] == (
+        "input 1: remote accepted too late, 10.0 ms after returning no result"
+    )

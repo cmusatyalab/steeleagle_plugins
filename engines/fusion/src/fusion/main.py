@@ -27,7 +27,7 @@ MAX_RESULT_SIZE = 1 << 20
 # passes only the args set in its config, so any arg left unset is defaulted
 # here.
 DEFAULTS = {
-    FUSION_DETECTION_PLUGIN: {"local": "", "remote": "", "grace": 200},
+    FUSION_DETECTION_PLUGIN: {"local": "", "remote": "", "grace": 200, "timeout": 1000},
 }
 REQUIRED = {
     FUSION_DETECTION_PLUGIN: ("local", "remote"),
@@ -36,6 +36,14 @@ REQUIRED = {
 
 class ConfigError(Exception):
     pass
+
+
+def milliseconds(args, name):
+    """The arg `name` as a whole number of milliseconds."""
+    value = args[name]
+    if isinstance(value, bool) or not float(value).is_integer():
+        raise ConfigError(f"{name} must be a whole number of milliseconds, not {value!r}")
+    return int(value)
 
 
 def parse_args(plugin, content):
@@ -51,12 +59,12 @@ def parse_args(plugin, content):
         args[name] = str(args[name]).strip()
         if not args[name]:
             raise ConfigError(f"the {name!r} arg must be set")
-    grace = args["grace"]
-    if isinstance(grace, bool) or not float(grace).is_integer():
-        raise ConfigError(f"grace must be a whole number of milliseconds, not {grace!r}")
-    args["grace"] = int(grace)
+    args["grace"] = milliseconds(args, "grace")
     if args["grace"] < 0:
         raise ConfigError("grace must not be negative")
+    args["timeout"] = milliseconds(args, "timeout")
+    if args["timeout"] <= 0:
+        raise ConfigError("timeout must be positive")
     return args
 
 
@@ -86,12 +94,17 @@ def main():
             local=local,
             remote=remote,
             grace_ns=args["grace"] * 1_000_000,
+            timeout_ns=args["timeout"] * 1_000_000,
             clock=time.monotonic_ns,
         )
     except ValueError as err:
         sys.exit(f"Bad args for {plugin}: {err}")
     logging.getLogger("fusion").info(
-        "preferring %s's result for %d ms after %s's", remote, args["grace"], local
+        "preferring %s's result for %d ms after %s's; giving up on a frame after %d ms",
+        remote,
+        args["grace"],
+        local,
+        args["timeout"],
     )
     run(
         name,

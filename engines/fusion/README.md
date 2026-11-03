@@ -19,13 +19,16 @@ For each input, each engine has either:
 
 The grace period starts when the fusion engine receives the local result, which may be before the input reaches it.
 
+An input still waiting when `timeout` ends, counted from when it reaches the fusion engine, is decided with what there is: the local result, or no result. This covers the cells that wait above, and an input that is never offered to an engine.
+
 | Arg | Default | Description |
 | --- | --- | --- |
 | `local` | | Engine on this daemon, qualified with `STEELEAGLE_LOCAL_QUALIFIER` |
 | `remote` | | Engine on the remote daemon, qualified with `STEELEAGLE_REMOTE_QUALIFIER` |
 | `grace` | `200` | How long to wait for the remote result after the local one, in milliseconds |
+| `timeout` | `1000` | The longest to wait on an input, in milliseconds; must be positive |
 
-The local and remote engines must get the same inputs as the fusion engine (e.g. all three on edges from the same producer); the fusion engine waits on an input until it hears from them, and Uriel reports every offer it makes (a result, `SKIPPED`, `TIMED_OUT` or `DISCONNECTED`), but an input that is never offered to one of them is waited on forever.
+The local and remote engines must get the same inputs as the fusion engine (e.g. all three on edges from the same producer); the fusion engine waits on an input until it hears from them or it times out, and Uriel reports every offer it makes (a result, `SKIPPED`, `TIMED_OUT` or `DISCONNECTED`), but an input that is never offered to one of them holds up the engine until `timeout` ends.
 
 Each decided input is logged at `INFO`: which engine accepted first (returned a result), when the other accepted, and which result was returned and why, or that neither accepted. A result that arrives after its input was decided is logged as too late. Inputs that never reach the fusion engine are not logged.
 

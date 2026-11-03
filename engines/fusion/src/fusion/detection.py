@@ -22,6 +22,9 @@ An input is then decided by:
 | pending         | wait until the grace period ends, then local | wait | wait |
 
 The grace period starts when the engine receives the local result.
+
+An input still waiting when its timeout ends, counted from when it reaches the
+engine, is decided with what there is: the local result, or no result.
 """
 
 import logging
@@ -69,9 +72,9 @@ class Outcomes:
 @dataclass(frozen=True)
 class Wait:
     """The input is not decided yet; `deadline_ns` is when it will be, if
-    nothing else happens first, or None if only an event can decide it."""
+    nothing else happens first."""
 
-    deadline_ns: int | None = None
+    deadline_ns: int
 
 
 @dataclass(frozen=True)
@@ -93,17 +96,20 @@ class Decided:
 
 
 class DetectionFusion:
-    def __init__(self, *, local, remote, grace_ns, clock):
+    def __init__(self, *, local, remote, grace_ns, timeout_ns, clock):
         if local == remote:
             raise ValueError(f"the local and remote engines are both {local!r}")
         self.local = local
         self.remote = remote
         self.grace_ns = grace_ns
+        self.timeout_ns = timeout_ns
         self.clock = clock
         self._inputs = OrderedDict()
         self._disconnected = set()
         # The input being decided, which is never forgotten for MAX_TRACKED
         self._current = None
+        # When the input being decided times out
+        self._timeout_at_ns = None
         self._decided = OrderedDict()
 
     # Events
@@ -200,6 +206,7 @@ class DetectionFusion:
         """Starts deciding the input `id`. An engine that is disconnected
         will not report on it."""
         self._current = id
+        self._timeout_at_ns = self.clock() + self.timeout_ns
         outcomes = self._outcomes(id)
         for engine in self._disconnected:
             outcomes.fail(engine)
@@ -210,6 +217,8 @@ class DetectionFusion:
         outcomes = self._outcomes(id)
         local = outcomes.results.get(self.local)
         remote = outcomes.results.get(self.remote)
+        now = self.clock()
+        timed_out = now >= self._timeout_at_ns
         if local is not None:
             deadline = local.at_ns + self.grace_ns
             if remote is not None and remote.at_ns <= deadline:
@@ -218,16 +227,29 @@ class DetectionFusion:
                 return self._report(id, local, self.local, "remote was late")
             if self.remote in outcomes.failed:
                 return self._report(id, local, self.local, "remote failed")
-            if self.clock() >= deadline:
+            if now >= deadline:
                 return self._report(id, local, self.local, "grace period ended")
-            return Wait(deadline)
+            if timed_out:
+                return self._report(id, local, self.local, "timed out")
+            return Wait(min(deadline, self._timeout_at_ns))
         if remote is not None:
             reason = "local failed" if self.local in outcomes.failed else "local pending"
             return self._report(id, remote, self.remote, reason)
         if self.local in outcomes.failed and self.remote in outcomes.failed:
             logger.info("input %d: neither engine accepted, returning no result", id.seq)
             return self._report(id)
-        return Wait()
+        if timed_out:
+            logger.info(
+                "input %d: timed out after %d ms, returning no result (%s)",
+                id.seq,
+                self.timeout_ns // 1_000_000,
+                ", ".join(
+                    f"{self._name(e)} {'failed' if e in outcomes.failed else 'pending'}"
+                    for e in (self.local, self.remote)
+                ),
+            )
+            return self._report(id)
+        return Wait(self._timeout_at_ns)
 
     def _report(self, id, result=None, source=None, reason=None):
         """The Report of the input `id`, which is logged and remembered."""

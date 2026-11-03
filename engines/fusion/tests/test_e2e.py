@@ -15,6 +15,7 @@ from fusion.engine import run
 MAX_BYTES = 1 << 16
 TIMEOUT_S = 10.0
 GRACE_MS = 150
+TIMEOUT_MS = 1000
 RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
 FLOW_SPEC = """
 [[producers]]
@@ -74,6 +75,7 @@ def serve_fusion(name, local, remote, stop, ready):
         local=local,
         remote=remote,
         grace_ns=GRACE_MS * 1_000_000,
+        timeout_ns=TIMEOUT_MS * 1_000_000,
         clock=time.monotonic_ns,
     )
     run(
@@ -158,7 +160,7 @@ def test_fusion_prefers_a_timely_remote_result():
             assert got == b"local:f3"
             assert took < GRACE_MS / 1000
 
-            # The local engine drops it: the remote result, however late
+            # The local engine drops it: the remote result, however long after
             got, _ = send({"local": None, "remote": 0.3}, b"f4")
             assert got == b"remote:f4"
 

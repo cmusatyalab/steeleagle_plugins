@@ -21,6 +21,12 @@ type = "number"
 description = "How long to wait for the remote result after the local result arrives, in milliseconds"
 default = 200
 
+[[args]]
+name = "timeout"
+type = "number"
+description = "The longest to wait on a frame before reporting what there is, the local result or no result, in milliseconds"
+default = 1000
+
 [engine]
 type = "detection"
 inputs = [

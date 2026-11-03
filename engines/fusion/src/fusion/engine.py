@@ -57,9 +57,8 @@ def run(
                     handler.end(current)
                     current = None
                     continue
-                if decision.deadline_ns is not None:
-                    left = (decision.deadline_ns - time.monotonic_ns()) / 1e9
-                    timeout = min(timeout, max(left, 0.0))
+                left = (decision.deadline_ns - time.monotonic_ns()) / 1e9
+                timeout = min(timeout, max(left, 0.0))
             if timeout > 0:
                 engine.wait(timeout)
             while (event := engine.poll_event()) is not None:
@@ -78,7 +77,8 @@ def _report(engine, id, decision, result_type, max_output_size):
     if result is None:
         engine.drop()
         return
-    if result.payload_type and result.payload_type != result_type:
+    # Engines write a type's name with slashes or, as detection-qnn does, dots
+    if result.payload_type and result.payload_type.replace(".", "/") != result_type:
         logger.warning(
             "input %d: %s sent a %r, not a %r",
             id.seq,
