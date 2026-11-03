@@ -9,9 +9,11 @@ loaded from a checkpoint -- the two used to carry the same vectors twice
 and the small architecture config (backbone/layers/num_neighbors) come from
 a slim metadata file now, not a full checkpoint.
 
-Also subscribes to patchcore-retrain's engine (qualified name passed in via
-STEELEAGLE_REMOTE_QUALIFIER, same contract h264_encoder uses to watch
-h264_decoder) so it can hot-swap to a newly deployed bank without a restart.
+Also subscribes to patchcore-retrain's engine so it can hot-swap to a newly
+deployed bank without a restart. The subscribe target is built the same way
+h264_encoder builds the decoder it watches: STEELEAGLE_REMOTE_QUALIFIER
+joined with the remote engine's own local name (here, args['retrain_name'],
+mirroring encoder's args['decoder_name']) -- "{remote_qualifier}.{name}".
 A swap announcement is just a filename pair -- {"faiss_filename":...,
 "meta_filename":...} -- resolved against this machine's own persistent
 steeleagle/models/ directory. That only works because that directory
@@ -19,6 +21,12 @@ already has the named file: either retrain pushed it there the one time it
 actually trained something new (TransferService.TransferModel), or it's
 one of the bundled default banks bootstrap_bundled_models() below seeded
 in independently, at startup, with zero network involved.
+
+The main loop follows h264_encoder's confirmed-working pattern for a
+subscribing engine -- engine.wait() + draining poll_event() + a single
+non-blocking engine.poll() -- rather than `for input in engine:`, which is
+only confirmed to work for engines that don't subscribe to anything (e.g.
+h264_decoder).
 
 bootstrap_bundled_models() is score's half of the same bootstrap
 retrain.py does on lambda: both sides get seeded with the same files under
@@ -200,9 +208,11 @@ def score(model, faiss_index, embedding_msg):
 
 def run_engine(name, args, remote_qualifier=None):
     """Runs patchcore-score as the engine `name`. `args` has every arg of
-    score.plugin.toml. `remote_qualifier`, if set, is patchcore-retrain's
-    qualified name (from STEELEAGLE_REMOTE_QUALIFIER) -- this engine
-    subscribes to it and hot-swaps its bank whenever retrain announces one."""
+    score.plugin.toml. `remote_qualifier`, if set, is this daemon's
+    qualifier for patchcore-retrain's engine (joined with
+    args['retrain_name'] the same way h264_encoder joins remote_qualifier
+    with decoder_name) -- this engine subscribes to it and hot-swaps its
+    bank whenever retrain announces one."""
     bootstrap_bundled_models()
 
     faiss_index, model, threshold, trained_threshold = load_bank(
@@ -211,15 +221,19 @@ def run_engine(name, args, remote_qualifier=None):
 
     with torch.no_grad(), uriel.Engine(name, max_output_size=args["max_output_size"]) as engine:
         if remote_qualifier:
-            engine.subscribe(remote_qualifier)
-            logger.info("subscribed to %s for bank-swap notifications", remote_qualifier)
+            retrain_engine = f"{remote_qualifier}.{args['retrain_name']}"
+            engine.subscribe(retrain_engine)
+            logger.info("engine %s ready; watching %s for bank-swap notifications", name, retrain_engine)
+        else:
+            logger.info("engine %s ready; there is no remote daemon, so no retrain engine to watch", name)
 
-        logger.info("engine %s ready", name)
-        for input in engine:
-            event = engine.poll_event()
-            if event is not None and event.type == uriel.EventType.RESULT:
+        while True:
+            engine.wait(0.1)
+            while (event := engine.poll_event()) is not None:
+                if event.kind != uriel.EventKind.RESULT:
+                    continue
                 try:
-                    swap_info = json.loads(bytes(event.data))
+                    swap_info = json.loads(bytes(event.result))
                     models_dir = steeleagle_models_dir()
                     new_faiss_path = os.path.join(models_dir, swap_info["faiss_filename"])
                     new_meta_path = os.path.join(models_dir, swap_info["meta_filename"])
@@ -229,6 +243,10 @@ def run_engine(name, args, remote_qualifier=None):
                     logger.info("swapped to new bank: %s", swap_info)
                 except Exception as e:
                     logger.error("bank swap failed, keeping current bank: %s", e)
+
+            input = engine.poll()
+            if input is None:
+                continue
 
             t0 = time.perf_counter()
             combined = FrameWithEmbedding()

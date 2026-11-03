@@ -27,6 +27,7 @@ DEFAULTS = {
         "faiss_index": "",
         "threshold": 0,
         "max_output_size": 3_145_728,
+        "retrain_name": "patchcore_retrain",
     },
 }
 

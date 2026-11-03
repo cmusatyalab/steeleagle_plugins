@@ -27,6 +27,12 @@ type = "number"
 description = "Largest RawFrame this engine will forward, in bytes (a 1280x720 RGB frame is 2764800)"
 default = 3145728
 
+[[args]]
+name = "retrain_name"
+type = "string"
+description = "Local name patchcore-retrain registers its engine as (joined with STEELEAGLE_REMOTE_QUALIFIER to subscribe to it)"
+default = "patchcore_retrain"
+
 [engine]
 type = "filter"
 inputs = ["steeleagle_protocol/v1/messages/result/FrameWithEmbedding"]
