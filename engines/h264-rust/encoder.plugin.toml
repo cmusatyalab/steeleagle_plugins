@@ -18,8 +18,8 @@ default = "x264enc tune=zerolatency speed-preset=ultrafast bitrate=3000 key-int-
 [[args]]
 name = "input_format"
 type = "string"
-description = "4:2:0 pixel format the encoder is given: I420 for software encoders, NV12 for hardware ones such as qtic2venc"
-default = "I420"
+description = "4:2:0 pixel format the encoder is given: one format, or a list in GStreamer caps syntax, of which the encoder takes one. The default suits software encoders (I420) and hardware ones such as qtic2venc (NV12)"
+default = "{I420,NV12}"
 
 [[args]]
 name = "fps"

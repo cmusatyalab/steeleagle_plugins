@@ -7,7 +7,7 @@
 //!
 //! ```sh
 //! H264_TEST_ENCODER="qtic2venc control-rate=2 target-bitrate=3000000 b-frames=0" \
-//!     H264_TEST_INPUT_FORMAT=NV12 cargo test --test roundtrip
+//!     cargo test --test roundtrip
 //! ```
 //!
 //! `H264_TEST_BIN_DIR` says where the engines are, for a test built elsewhere.
