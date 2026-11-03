@@ -67,6 +67,8 @@ class KeyframePolicy:
         try:
             r = h264_pb2.DecodeResult.FromString(result_bytes)
             ok = r.decoded and not r.keyframe_needed
+            if r.keyframe_needed:
+                logger.info("input %d of %s: decoder requested a keyframe", id.seq, id.producer)
         except DecodeError:
             pass
         if not ok:
