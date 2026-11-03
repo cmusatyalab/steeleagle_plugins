@@ -1,0 +1,31 @@
+[project]
+name = "fake-drone"
+version = "0.1.0"
+# uriel needs 3.11+; nothing here pins an upper bound (no Olympe/GStreamer
+# constraints like parrot_anafi has)
+requires-python = ">=3.11"
+dependencies = [
+    "grpcio>=1.51.1",
+    "protobuf>=7.35.1",
+    "steeleagle-protocol>=0.3.4",
+    "uriel>=0.2.0",
+]
+
+[project.scripts]
+start = "fake_drone:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+
+[tool.pixi.dependencies]
+python = "3.11.*"
+
+[tool.pixi.pypi-dependencies]
+fake-drone = { path = ".", editable = true }
+
+[tool.pixi.tasks] # start is defined under project.scripts
