@@ -7,6 +7,7 @@ import { Tag } from 'primereact/tag';
 import { confirmDialog } from 'primereact/confirmdialog';
 import InstallPackageDialog from './InstallPackageDialog.jsx';
 import { fetchPackages, installPackage, removePackage } from './daemonsApi.js';
+import { parsePackageUri, repoHref } from './packageUri.js';
 
 const formatTime = (iso) => {
     const t = new Date(iso);
@@ -85,6 +86,8 @@ function PackagesTab({ daemon, toast, pending, onPending, onRestartNow, disabled
     });
 
     const pendingCount = Object.keys(pending).length;
+    // Each package with its URI split into name, tag and repo for the columns
+    const rows = (packages ?? []).map((p) => ({ ...p, ...parsePackageUri(p.uri) }));
 
     return (
         <div className="flex flex-column gap-2">
@@ -112,15 +115,27 @@ function PackagesTab({ daemon, toast, pending, onPending, onRestartNow, disabled
             {error && <Message severity="error" text={error} className="w-full" />}
             {/* cellMemo off: the table otherwise redraws a cell only when its
                 row changes, so the busy spinners and pending tags never show */}
-            <DataTable value={packages ?? []} size="small" dataKey="uri" sortField="uri" sortOrder={1} cellMemo={false}
+            <DataTable value={rows} size="small" dataKey="uri" sortField="name" sortOrder={1} cellMemo={false}
                 emptyMessage={packages === null ? (error ? 'No packages listed.' : 'Loading packages...') : 'No packages installed.'}>
-                <Column field="uri" header="Package" sortable body={(p) => (
-                    <span className="flex align-items-center gap-2">
-                        <span style={{ fontFamily: 'monospace' }} className="text-sm">{p.uri}</span>
+                <Column field="name" header="Package" sortable body={(p) => (
+                    <span className="flex align-items-center gap-2" title={p.uri}>
+                        <span className="font-semibold">{p.name}</span>
                         {pending[p.uri] === 'install' && <Tag value="pending install" severity="info" />}
                         {pending[p.uri] === 'remove' && <Tag value="pending removal" severity="warning" />}
                     </span>
                 )} />
+                <Column field="tag" header="Tag" sortable body={(p) => (p.tag
+                    ? <span style={{ fontFamily: 'monospace' }} className="text-sm">{p.tag}</span>
+                    : <span className="text-color-secondary">—</span>)} />
+                <Column field="repo" header="Repository" sortable body={(p) => {
+                    const href = repoHref(p.repo);
+                    const text = <span style={{ fontFamily: 'monospace' }} className="text-sm">{p.repo}</span>;
+                    return (
+                        <span title={p.subdir ? `${p.repo} (in ${p.subdir})` : p.repo}>
+                            {href ? <a href={href} target="_blank" rel="noreferrer">{text}</a> : text}
+                        </span>
+                    );
+                }} />
                 <Column header="Plugins" body={(p) => p.plugins.map((pl) => pl.name).join(', ') || '—'} />
                 <Column field="modified" header="Modified" sortable body={(p) => formatTime(p.modified)} />
                 <Column header="" style={{ width: '14rem' }} body={(p) => (
