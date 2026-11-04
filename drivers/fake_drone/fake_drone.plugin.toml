@@ -13,7 +13,7 @@ default = "/home/particle/uriel/patchcore-pipeline/test.mp4"
 name = "decoder"
 type = "string"
 description = "H.264 decoder of the video stream, in gst-launch syntax; its output must be in system memory, and is converted to RGB after it"
-default = "qtic2vdec ! qticvcrop crop-type=FastCV crop=<0,0,1280,720>"
+default = "qtic2vdec ! qtivcrop crop-type=FastCV crop=<0,0,1280,720>"
 
 [driver]
 type = "copter"
