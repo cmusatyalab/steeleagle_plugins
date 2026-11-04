@@ -16,7 +16,7 @@ import steeleagle_protocol.v1.messages.telemetry.telemetry_pb2 as telemetry_prot
 import steeleagle_protocol.v1.services.driver.stream_pb2 as stream_proto
 from steeleagle_protocol.v1.services.driver.stream_pb2_grpc import StreamServiceServicer
 
-from fake_drone.capture import DEFAULT_DECODER, GstCapture, file_source
+from fake_drone.capture import GstCapture, file_source
 from fake_drone.raw_frames import RawFramePublisher
 
 logger = logging.getLogger('fake-drone/stream')
@@ -31,12 +31,12 @@ def _no_pose():
 
 
 class FilePublisher:
-    """Decodes `video_path` with GstCapture, paced to the file's own
-    framerate, and publishes every frame with a RawFramePublisher -- exactly
-    as parrot_anafi does for its live feed."""
+    """Decodes `video_path` with GstCapture, using `decoder` and paced to the
+    file's own framerate, and publishes every frame with a
+    RawFramePublisher -- exactly as parrot_anafi does for its live feed."""
 
-    def __init__(self, uri, video_path):
-        self._capture = GstCapture(file_source(video_path), DEFAULT_DECODER)
+    def __init__(self, uri, video_path, decoder):
+        self._capture = GstCapture(file_source(video_path), decoder)
         self._publisher = RawFramePublisher(uri, dimensions=None, pose=_no_pose)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -62,8 +62,9 @@ class FilePublisher:
 class Stream(StreamServiceServicer):
     """StreamService implementation for the fake drone."""
 
-    def __init__(self, video_path):
+    def __init__(self, video_path, decoder):
         self.video_path = video_path
+        self.decoder = decoder
         self._active = None
 
     def StreamCameras(self, request, context):
@@ -84,7 +85,7 @@ class Stream(StreamServiceServicer):
         if not requests:
             return stream_proto.StreamCamerasResponse()
         camera = requests[0]
-        self._active = FilePublisher(camera.uri, self.video_path)
+        self._active = FilePublisher(camera.uri, self.video_path, self.decoder)
         return stream_proto.StreamCamerasResponse()
 
     def StreamTelemetry(self, request, context):

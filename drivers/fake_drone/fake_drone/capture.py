@@ -21,7 +21,7 @@ Gst.init(None)
 logger = logging.getLogger('fake-drone/capture')
 
 RGB_CHANNELS = 3
-DEFAULT_DECODER = 'avdec_h264 max-threads=1'
+DEFAULT_DECODER = 'qtic2vdec ! qticvcrop crop-type=FastCV crop=<0,0,1280,720>'
 OPEN_TIMEOUT = 10.0
 READ_TIMEOUT = 1.0
 

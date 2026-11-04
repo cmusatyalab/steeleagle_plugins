@@ -41,7 +41,12 @@ gst-plugins-good = "*"
 gst-plugins-bad = "*"
 gst-libav = "*"
 
+[tool.pixi.feature.native]
+platforms = ["linux-aarch64"]
+
+[tool.pixi.feature.native.activation.env]
+GST_PLUGIN_PATH = "/usr/lib/aarch64-linux-gnu/gstreamer-1.0"
+
 [tool.pixi.environments]
 default = { features = ["conda-gstreamer"], solve-group = "default" }
-
-[tool.pixi.tasks] # start is defined under project.scripts
+native = { features = ["native", "conda-gstreamer"], solve-group = "default" }

@@ -9,6 +9,12 @@ type = "string"
 description = "H.264 .mp4 file to stream, decoded and looped forever, paced to its own encoded framerate"
 default = "/home/particle/uriel/patchcore-pipeline/test.mp4"
 
+[[args]]
+name = "decoder"
+type = "string"
+description = "H.264 decoder of the video stream, in gst-launch syntax; its output must be in system memory, and is converted to RGB after it"
+default = "qtic2vdec ! qticvcrop crop-type=FastCV crop=<0,0,1280,720>"
+
 [driver]
 type = "copter"
 
