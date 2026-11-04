@@ -1,8 +1,23 @@
-"""Uriel engine: watches the false positives verifier forwards it. Once FPs
-are sustained at a high rate, it first tries swapping to a better existing
-memory bank; if none of the existing banks fix it, it collects a larger
-window of FPs and retrains a new one, then pushes it to fermi and tells
-patchcore-score to switch to it.
+"""Uriel engine: watches every frame patchcore-rfdetr-verifier forwards (both
+true positives -- a real person confirmed -- and false positives -- score
+flagged it anomalous but no person was actually there). Once FPs are
+sustained at a high rate, it first tries swapping patchcore-score to a
+better existing memory bank; if none of the existing banks fix it, it
+collects a larger window of FP frames and retrains a new one, then pushes
+it to fermi and tells patchcore-score to switch to it. True positives are
+forwarded on unchanged to the encoder for display; false positives are not
+(there's no real person in them -- nothing to show).
+
+Verifier forwards every frame on its own primary edge (unchanged RawFrame
+bytes) and separately tags each one with a result JSON --
+{"person_detected": bool, "frame_id": int} -- delivered through this
+engine's subscription to verifier (poll_event()/EventKind.RESULT), the same
+mechanism patchcore-score already uses to watch this engine's own bank-swap
+notifications. The frame_id lets this engine match a verifier result to the
+exact frame it describes, rather than assuming the two independent streams
+(verifier's primary edge, and verifier's result subscription) stay in lockstep
+order -- they're delivered through genuinely separate channels, so pairing by
+id is the only solid guarantee.
 
 Candidate banks and newly-trained banks both live in steeleagle/models/
 under XDG data home -- the same directory eagled's TransferService.
@@ -40,16 +55,16 @@ How patchcore-score finds out a swap happened: patchcore-score subscribes
 directly to this engine (same subscribe()/poll_event() pattern h264_encoder
 already uses to watch h264_decoder). There's no separate side-channel
 producer -- the swap info rides out as the `result` on this engine's own
-next engine.drop() call after a deploy succeeds. That's safe precisely
-because the old (still-misbehaving) bank keeps producing FPs, and therefore
-keeps producing inputs for this loop to attach a result to, right up until
-the moment the swap actually lands on fermi -- the input flow doesn't dry
-up until after the notification that causes it to dry up has already gone
-out. The retrain worker runs on its own thread (so the main loop never
-stalls acking new FPs while training runs) and can't touch `engine`
-directly -- only the thread that owns a Uriel object may use it -- so it
-hands the finished swap info to the main thread through a plain
-thread-safe queue instead.
+next ack (drop() or forward(), whichever this iteration's frame gets) after
+a deploy succeeds. That's safe precisely because the old (still-misbehaving)
+bank keeps producing FPs, and therefore keeps producing inputs for this loop
+to attach a result to, right up until the moment the swap actually lands on
+fermi -- the input flow doesn't dry up until after the notification that
+causes it to dry up has already gone out. The retrain worker runs on its own
+thread (so the main loop never stalls acking new frames while training runs)
+and can't touch `engine` directly -- only the thread that owns a Uriel
+object may use it -- so it hands the finished swap info to the main thread
+through a plain thread-safe queue instead.
 
 bootstrap_bundled_models() is score's half of the same bootstrap
 retrain.py does on lambda: both sides get seeded with the same files under
@@ -81,6 +96,17 @@ ASSUMPTIONS / OPEN QUESTIONS STILL FLAGGED:
   wiped without lambda's also being wiped, a candidate this engine thinks
   fermi already has would actually be missing there. Nothing here detects
   that case; it just trusts the invariant.
+- frame_id correlation (new in this patch): verifier's primary forwarded-
+  frame edge and its result subscription are two genuinely separate uriel
+  channels. In the overwhelmingly common case both arrive within the same
+  poll tick (they're emitted together from the same engine.forward(result=)
+  call on verifier's side), but if a result hasn't shown up yet by the time
+  its matching frame is polled here, this engine falls back to treating that
+  one frame as a false positive (conservative: it won't get shown, and it
+  nudges the window rather than risk mis-displaying an unconfirmed frame) and
+  logs a warning. _pending_verifier_results is also capped so an unmatched
+  result left behind by a frame that got dropped upstream (bad size, etc.)
+  can't grow the dict unboundedly.
 """
 import json
 import logging
@@ -124,6 +150,10 @@ DEFAULT_NUM_NEIGHBORS = 9
 
 TRANSFER_CHUNK_SIZE = 1 * 1024 * 1024  # 1MB; our files (faiss index + meta) are a few MB at most
 
+# How many unmatched verifier results to hold onto at most, so a frame that
+# never shows up here (e.g. dropped upstream for a bad size) can't let this
+# dict grow forever.
+MAX_PENDING_RESULTS = 200
 
 # Bundled defaults that ship with this plugin's own repo directory -- NOT
 # the persistent MODEL_DIR below. bootstrap_bundled_models() copies/pushes
@@ -362,23 +392,32 @@ def save_window_frames(window, out_dir):
 
 
 def evaluate_candidates(window, tolerance_fraction):
-    """Tests the triggered window against every existing bank in
-    steeleagle/models/. Embeddings are computed once for the whole window
-    and reused across every candidate -- only the lightweight FAISS search +
-    compute_anomaly_score reruns per candidate, not the backbone.
+    """Tests the triggered window's FALSE-POSITIVE entries against every
+    existing bank in steeleagle/models/. True positives are deliberately
+    excluded here: a good candidate bank is *supposed* to keep flagging a
+    real person as anomalous, so counting those against a candidate would
+    make every bank look like it's failing. Embeddings are computed once for
+    the FP subset and reused across every candidate -- only the lightweight
+    FAISS search + compute_anomaly_score reruns per candidate, not the
+    backbone.
 
     Returns the (stem, faiss_path, meta_path) of the first bank that passes,
-    or None if none do.
+    or None if none do (including if the window had no FP entries at all).
     """
-    chunk_size = len(window)
+    fp_entries = [e for e in window if e.is_fp]
+    chunk_size = len(fp_entries)
+    if chunk_size == 0:
+        logger.info("triggered window has no FP entries; nothing to evaluate")
+        return None
+
     tolerance = max(1, math.ceil(tolerance_fraction * chunk_size))
 
     with tempfile.TemporaryDirectory(prefix="eval_window_") as frames_dir:
-        save_window_frames(window, frames_dir)
+        save_window_frames(fp_entries, frames_dir)
         embeddings = collect_embeddings(frames_dir)
 
     if len(embeddings) != chunk_size:
-        logger.error("collected %d embeddings for a window of %d frames; aborting evaluation",
+        logger.error("collected %d embeddings for %d FP frames; aborting evaluation",
                      len(embeddings), chunk_size)
         return None
 
@@ -458,11 +497,12 @@ def bootstrap_bundled_models():
 
 class RetrainWorker:
     """Runs evaluation/retrain off the main polling thread, so the engine's
-    main loop never stalls acking new FPs from verifier while this works.
-    Hands the result of a successful deploy back to the main thread through
+    main loop never stalls acking new frames while this works. Hands the
+    result of a successful deploy back to the main thread through
     `swap_results`, a plain thread-safe queue -- the worker thread must never
     touch the main thread's `engine` object directly (only the thread that
-    owns a Uriel object may use it), so it can't call engine.drop() itself.
+    owns a Uriel object may use it), so it can't call engine.drop()/forward()
+    itself.
     """
 
     def __init__(self, daemon_addr, tolerance_fraction, retrain_collect_seconds, default_bank_size):
@@ -488,10 +528,12 @@ class RetrainWorker:
         threading.Thread(target=self._run, args=(window,), daemon=True).start()
 
     def feed_collecting(self, entry: WindowEntry):
-        """Called from the main loop for every FP while in retrain-collection
-        mode, so we don't lose frames arriving after the trigger fired but
-        before the worker thread finishes evaluation."""
-        if not self._collecting:
+        """Called from the main loop for every frame while in retrain-
+        collection mode, so we don't lose frames arriving after the trigger
+        fired but before the worker thread finishes evaluation. Only FP
+        frames are actually saved -- a true positive is a real person, and
+        training that into the "normal" bank would be exactly backwards."""
+        if not self._collecting or not entry.is_fp:
             return
         path = os.path.join(self._collect_dir, f"fp_{self._collect_count:05d}.png")
         cv2.imwrite(path, cv2.cvtColor(entry.frame_rgb, cv2.COLOR_RGB2BGR))
@@ -523,7 +565,7 @@ class RetrainWorker:
                 time.sleep(0.5)
             self._collecting = False
 
-            logger.info("collected %d frames over %.0fs; training",
+            logger.info("collected %d FP frames over %.0fs; training",
                         self._collect_count, self.retrain_collect_seconds)
 
             model, _ = train_patchcore(image_dir, bank_size=self.default_bank_size)
@@ -561,8 +603,8 @@ class RetrainWorker:
 
     def _announce(self, faiss_path, meta_path):
         """Queues the swap info for the main thread to attach to its next
-        engine.drop() -- that's what patchcore-score's subscription actually
-        sees."""
+        ack (drop() or forward(), whichever this iteration's frame gets) --
+        that's what patchcore-score's subscription actually sees."""
         swap_info = {
             "faiss_filename": os.path.basename(faiss_path),
             "meta_filename": os.path.basename(meta_path),
@@ -571,9 +613,12 @@ class RetrainWorker:
         logger.info("queued swap notification: %s", swap_info)
 
 
-def run_engine(name, args):
+def run_engine(name, args, remote_qualifier=None):
     """Runs the retrain engine as `name`. `args` has every arg of
-    patchcore-retrain.plugin.toml."""
+    patchcore-retrain.plugin.toml. Subscribes to verifier (same machine, so
+    no remote-qualifier joining needed for that target) to read its per-frame
+    TP/FP result, correlated by frame_id against the frame this engine
+    separately receives on its own main edge."""
     trigger = SlidingTrigger(
         n_max=args["n_max"], m_min=args["m_min"],
         rate=args["fp_rate_trigger"], stale_s=args["window_stale_seconds"],
@@ -587,21 +632,49 @@ def run_engine(name, args):
 
     bootstrap_bundled_models()
 
+    pending_results = {}  # frame_id -> is_fp, from verifier's result subscription
+
     with uriel.Engine(name, max_output_size=args["max_output_size"]) as engine:
-        logger.info("engine %s ready", name)
-        for input in engine:
-            frame_bytes = bytes(input.data)
-            if len(frame_bytes) != EXPECTED_RGB_SIZE:
-                raw_frame = frame_pb2.RawFrame()
-                raw_frame.ParseFromString(frame_bytes)
-                frame_bytes = raw_frame.data
-            if len(frame_bytes) != EXPECTED_RGB_SIZE:
-                logger.warning("dropping: got %d bytes, expected %d", len(frame_bytes), EXPECTED_RGB_SIZE)
+        engine.subscribe(args["verifier_name"])
+        logger.info("engine %s ready; watching %s for per-frame TP/FP results", name, args["verifier_name"])
+
+        while True:
+            engine.wait(0.1)
+            while (event := engine.poll_event()) is not None:
+                if event.kind != uriel.EventKind.RESULT:
+                    continue
+                try:
+                    result = json.loads(bytes(event.result))
+                    pending_results[result["frame_id"]] = not result["person_detected"]
+                    if len(pending_results) > MAX_PENDING_RESULTS:
+                        pending_results.pop(next(iter(pending_results)))
+                except Exception as e:
+                    logger.error("bad verifier result, ignoring: %s", e)
+
+            input = engine.poll()
+            if input is None:
+                continue
+
+            raw_frame = frame_pb2.RawFrame()
+            try:
+                raw_frame.ParseFromString(bytes(input.data))
+            except Exception as e:
+                logger.warning("input %d: not a RawFrame (%s); dropping", input.id.seq, e)
                 engine.drop()
                 continue
 
-            frame_rgb = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((FRAME_H, FRAME_W, 3))
-            entry = WindowEntry(is_fp=True, frame_rgb=frame_rgb)
+            if len(raw_frame.data) != EXPECTED_RGB_SIZE:
+                logger.warning("dropping: got %d bytes, expected %d", len(raw_frame.data), EXPECTED_RGB_SIZE)
+                engine.drop()
+                continue
+
+            is_fp = pending_results.pop(raw_frame.id, None)
+            if is_fp is None:
+                logger.warning("no verifier result yet for frame_id=%d; treating as FP conservatively", raw_frame.id)
+                is_fp = True
+
+            frame_rgb = np.frombuffer(raw_frame.data, dtype=np.uint8).reshape((FRAME_H, FRAME_W, 3))
+            entry = WindowEntry(is_fp=is_fp, frame_rgb=frame_rgb)
 
             trigger.push(entry)
             worker.feed_collecting(entry)
@@ -622,9 +695,13 @@ def run_engine(name, args):
                 swap_info = worker.swap_results.get_nowait()
             except queue.Empty:
                 pass
-
+            swap_result = json.dumps(swap_info).encode() if swap_info is not None else None
             if swap_info is not None:
                 logger.info("delivering swap notification: %s", swap_info)
-                engine.drop(result=json.dumps(swap_info).encode())
+
+            # A true positive is a real detection -- forward it on unchanged
+            # for the encoder/GCS to display. A false positive is not shown.
+            if args["forward_all"] or not is_fp:
+                engine.forward(result=swap_result)
             else:
-                engine.drop()
+                engine.drop(result=swap_result)

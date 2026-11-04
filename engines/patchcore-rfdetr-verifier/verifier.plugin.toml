@@ -22,12 +22,6 @@ description = "Checkpoint to load instead of RF-DETR's default COCO-pretrained w
 default = ""
 
 [[args]]
-name = "show_window"
-type = "boolean"
-description = "Pop an OpenCV window showing frames with a detected person"
-default = true
-
-[[args]]
 name = "max_output_size"
 type = "number"
 description = "Largest RawFrame this engine will accept, in bytes (a 1280x720 RGB frame is 2764800)"

@@ -1,8 +1,12 @@
-"""Uriel engine: the final step. Receives the RawFrames (RGB24) that
-patchcore-score forwarded as anomalous, runs RF-DETR looking for a person at
-confidence >= args['confidence'], and shows the frame with the box drawn on it
-if found (when args['show_window'] is set).
+"""Uriel engine: receives the RawFrames (RGB24) that patchcore-score forwarded
+as anomalous, runs RF-DETR looking for a person at confidence >= args['confidence'],
+and forwards every frame on to patchcore-retrain unchanged -- tagging each with a
+result JSON noting whether a person was actually found (true positive) or not
+(false positive), plus the frame's own id for correlation. patchcore-retrain
+subscribes to this engine to read that tag against the frame it separately
+receives on the main edge.
 """
+import json
 import logging
 import time
 
@@ -24,8 +28,6 @@ logger = logging.getLogger("verifier")
 PERSON_CLASS_ID = next(cid for cid, name in COCO_CLASSES.items() if name == "person")
 
 RGB_CHANNELS = 3
-
-WINDOW_NAME = "detected person"
 
 # nano/small/medium/large ship in plain rfdetr; xlarge/2xlarge need
 # "pip install rfdetr_plus" on top.
@@ -65,27 +67,11 @@ def detect_people(model, frame_bgr: np.ndarray, conf: float):
     return results
 
 
-def draw_detections(frame_bgr: np.ndarray, detections):
-    out = frame_bgr.copy()
-    for det in detections:
-        x1, y1, x2, y2 = (int(det["x_min"]), int(det["y_min"]), int(det["x_max"]), int(det["y_max"]))
-        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        label = f"person {det['score']:.2f}"
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        cv2.rectangle(out, (x1, y1 - th - 8), (x1 + tw + 4, y1), (0, 255, 0), -1)
-        cv2.putText(out, label, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-    return out
-
-
 def run_engine(name, args):
     """Runs the verifier as the engine `name`. `args` has every arg of
     verifier.plugin.toml."""
     model_path = args["model_path"] or None
     model = load_model(args["variant"], model_path)
-
-    if args["show_window"]:
-        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WINDOW_NAME, 1920, 1080)
 
     with uriel.Engine(name, max_output_size=args["max_output_size"]) as engine:
         logger.info("engine %s ready", name)
@@ -114,13 +100,12 @@ def run_engine(name, args):
             detections = detect_people(model, frame_bgr, args["confidence"])
             elapsed_ms = (time.perf_counter() - t0) * 1000
 
-            if detections:
-                if args["show_window"]:
-                    annotated = draw_detections(frame_bgr, detections)
-                    cv2.imshow(WINDOW_NAME, annotated)
-                    cv2.waitKey(1)
-                logger.info("person detected: %d (%.1fms) -> shown", len(detections), elapsed_ms)
-                engine.drop(result=b'{"person_detected": true}')
+            person_detected = bool(detections)
+            result = json.dumps({"person_detected": person_detected, "frame_id": raw_frame.id}).encode()
+
+            if person_detected:
+                logger.info("person detected: %d (%.1fms) -> forward (TP)", len(detections), elapsed_ms)
             else:
-                logger.info("no person (%.1fms) -> forward to retrain", elapsed_ms)
-                engine.forward(result=b'{"person_detected": false}')
+                logger.info("no person (%.1fms) -> forward (FP)", elapsed_ms)
+
+            engine.forward(result=result)
