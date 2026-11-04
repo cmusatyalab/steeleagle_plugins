@@ -33,30 +33,38 @@ def _no_pose():
 class FilePublisher:
     """Decodes `video_path` with GstCapture, using `decoder` and paced to the
     file's own framerate, and publishes every frame with a
-    RawFramePublisher -- exactly as parrot_anafi does for its live feed."""
+    RawFramePublisher -- exactly as parrot_anafi does for its live feed.
+    GstCapture and RawFramePublisher are both created, used and closed on
+    this one thread, since Uriel objects must stay on the thread that
+    created them."""
 
     def __init__(self, uri, video_path, decoder):
-        self._capture = GstCapture(file_source(video_path), decoder)
-        self._publisher = RawFramePublisher(uri, dimensions=None, pose=_no_pose)
+        self.uri = uri
+        self.video_path = video_path
+        self.decoder = decoder
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def _run(self):
-        if not self._capture.isOpened():
+        capture = GstCapture(file_source(self.video_path), self.decoder)
+        if not capture.isOpened():
             logger.error('could not open video for decoding')
             return
-        while not self._stop.is_set():
-            ok, rgb = self._capture.read()
-            if not ok:
-                break
-            self._publisher.publish(rgb)
+        publisher = RawFramePublisher(self.uri, dimensions=None, pose=_no_pose)
+        try:
+            while not self._stop.is_set():
+                ok, rgb = capture.read()
+                if not ok:
+                    break
+                publisher.publish(rgb)
+        finally:
+            capture.release()
+            publisher.close()
 
     def close(self):
         self._stop.set()
         self._thread.join(timeout=2.0)
-        self._capture.release()
-        self._publisher.close()
 
 
 class Stream(StreamServiceServicer):
