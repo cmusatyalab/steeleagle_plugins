@@ -635,8 +635,10 @@ def run_engine(name, args, remote_qualifier=None):
     pending_results = {}  # frame_id -> is_fp, from verifier's result subscription
 
     with uriel.Engine(name, max_output_size=args["max_output_size"]) as engine:
-        engine.subscribe(args["verifier_name"])
-        logger.info("engine %s ready; watching %s for per-frame TP/FP results", name, args["verifier_name"])
+        local_qualifier = name.rsplit(".",1)[0]
+        verifier_engine = f"{local_qualifier}.{args['verifier_name']}"
+        engine.subscribe(verifier_engine)
+        logger.info("engine %s ready; watching %s for per-frame TP/FP results", name, verifier_engine)
 
         while True:
             engine.wait(0.1)
