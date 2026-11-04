@@ -1,11 +1,12 @@
 [project]
 name = "fake-drone"
 version = "0.1.0"
-# uriel needs 3.11+; nothing here pins an upper bound (no Olympe/GStreamer
-# constraints like parrot_anafi has)
+# uriel needs 3.11+; nothing here pins an upper bound (no Olympe constraint
+# like parrot_anafi has)
 requires-python = ">=3.11"
 dependencies = [
     "grpcio>=1.51.1",
+    "opencv-python-headless>=5.0.0.93",
     "protobuf>=7.35.1",
     "steeleagle-protocol>=0.3.4",
     "uriel>=0.2.0",
@@ -27,5 +28,20 @@ python = "3.11.*"
 
 [tool.pixi.pypi-dependencies]
 fake-drone = { path = ".", editable = true }
+
+# conda-forge GStreamer and its Python bindings, with the elements the video
+# pipeline uses: filesrc and qtdemux (good), h264parse (bad) and avdec_h264
+# (libav) -- same decode elements parrot_anafi uses, minus rtspsrc/
+# rtph264depay, since this reads a file instead of the drone's RTSP stream.
+[tool.pixi.feature.conda-gstreamer.dependencies]
+pygobject = "*"
+gstreamer = "*"
+gst-plugins-base = "*"
+gst-plugins-good = "*"
+gst-plugins-bad = "*"
+gst-libav = "*"
+
+[tool.pixi.environments]
+default = { features = ["conda-gstreamer"], solve-group = "default" }
 
 [tool.pixi.tasks] # start is defined under project.scripts

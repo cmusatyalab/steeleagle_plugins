@@ -1,0 +1,83 @@
+"""Publishes decoded video frames to Uriel, as RawFrame inputs. Unchanged
+from parrot_anafi's RawFramePublisher.
+"""
+import logging
+
+import cv2
+import uriel
+from google.protobuf.timestamp_pb2 import Timestamp
+
+import steeleagle_protocol.v1.messages.frame.frame_pb2 as frame_proto
+
+logger = logging.getLogger('fake-drone/raw-frames')
+
+RGB_CHANNELS = 3
+RAW_FRAME_HEADROOM = 16 << 10
+RAW_FRAME_TYPE = 'steeleagle_protocol/v1/messages/frame/RawFrame'
+
+
+class RawFramePublisher:
+    """Publishes frames as the Uriel producer `uri`.
+
+    Frames are resized to `dimensions` (width, height), if given. `pose`
+    returns the vehicle's PositionInfo and GimbalInfo, which go with each
+    frame. The producer is created on the first frame, large enough for it,
+    so a publisher must be used, and closed, on one thread.
+    """
+
+    def __init__(self, uri, dimensions, pose):
+        self.uri = uri
+        self.dimensions = dimensions
+        self._pose = pose
+        self._producer = None
+        self._max_input_size = 0
+        self._next_id = 0
+
+    def publish(self, rgb):
+        """Publishes `rgb`, an RGB image as GstCapture decodes it. A frame
+        that finds no free input buffer is dropped: newer frames follow."""
+        if self.dimensions is not None and rgb.shape[1::-1] != self.dimensions:
+            rgb = cv2.resize(rgb, self.dimensions, interpolation=cv2.INTER_AREA)
+        timestamp = Timestamp()
+        timestamp.GetCurrentTime()
+        position_info, gimbal_info = self._pose()
+        frame = frame_proto.RawFrame(
+            timestamp=timestamp,
+            data=rgb.tobytes(),
+            h_res=rgb.shape[1],
+            v_res=rgb.shape[0],
+            channels=RGB_CHANNELS,
+            id=self._next_id,
+            position_info=position_info,
+            gimbal_info=gimbal_info,
+        )
+        self._next_id += 1
+        data = frame.SerializeToString()
+        if len(data) > self._max_input_size:
+            self._resize(len(data))
+        try:
+            self._producer.send(data)
+        except uriel.AgainError:
+            logger.debug('no free input buffer; dropping frame %d', frame.id)
+
+    def close(self):
+        """Closes the producer, if a frame created it."""
+        if self._producer is not None:
+            self._producer.close()
+            self._producer = None
+
+    def _resize(self, input_size):
+        """Creates the producer for inputs of `input_size` bytes, in place of
+        one for smaller inputs, e.g. after the resolution changed."""
+        if self._producer is not None:
+            logger.warning('frames grew to %d bytes; recreating producer %s',
+                           input_size, self.uri)
+            self.close()
+        self._max_input_size = input_size + RAW_FRAME_HEADROOM
+        self._producer = uriel.Producer(
+            self.uri,
+            input_type=RAW_FRAME_TYPE,
+            max_input_size=self._max_input_size,
+        )
+        logger.info('publishing raw frames as %s, up to %d bytes each',
+                    self.uri, self._max_input_size)
