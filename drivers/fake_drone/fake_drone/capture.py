@@ -1,9 +1,11 @@
 """Reads and decodes a looping .mp4 file through GStreamer, standing in for
 parrot_anafi's RTSP drone feed. The decode chain and RGB stride handling are
-unchanged from parrot_anafi's GstCapture. Two things differ, both forced by
-the source being a file instead of a live network stream, not by choice:
-sync=true paces playback to the file's own timestamps (a live RTSP source is
-already paced by the network/camera, so parrot_anafi doesn't need this); and
+unchanged from parrot_anafi's GstCapture. Differences from parrot_anafi's
+original are limited to what's forced by the source being a file instead of
+a live RTSP stream: STREAM_CAPS' width/height/framerate match this file
+(confirmed via gst-launch -v) instead of the drone's 1280x720 stream, sync=
+true paces playback to the file's own timestamps (a live RTSP source is
+already paced by the network/camera, so parrot_anafi doesn't need this), and
 end-of-file triggers a seek back to the start, in place, since a live stream
 never ends and the pipeline must keep running without a gap.
 """
@@ -21,7 +23,22 @@ Gst.init(None)
 logger = logging.getLogger('fake-drone/capture')
 
 RGB_CHANNELS = 3
-DEFAULT_DECODER = 'qtic2vdec ! qtivcrop crop-type=FastCV crop=<0,0,1280,720>'
+# Default H.264 decoder: the Qualcomm hardware decoder fermi actually runs,
+# matching parrot_anafi's real decode path.
+DEFAULT_DECODER = 'qtic2vdec ! qtivcrop crop-type=FastCV crop=<0,0,1920,1080>'
+# qtic2vdec refuses caps without chroma-format/bit-depth, which h264parse
+# doesn't carry through from this file (confirmed via gst-launch -v: its src
+# caps have width/height/framerate but no chroma-format/bit-depth-luma/
+# bit-depth-chroma) -- same requirement parrot_anafi's STREAM_CAPS satisfies
+# for the drone's RTSP stream, just with this file's own resolution/
+# framerate instead of the drone's 1280x720. Software decoders ignore these
+# extra fields.
+STREAM_CAPS = (
+    'video/x-h264,stream-format=byte-stream,alignment=au '
+    '! capssetter caps="video/x-h264,width=(int)1920,height=(int)1080,'
+    'framerate=(fraction)30000/1001,chroma-format=(string)4:2:0,'
+    'bit-depth-luma=(uint)8,bit-depth-chroma=(uint)8"'
+)
 OPEN_TIMEOUT = 10.0
 READ_TIMEOUT = 1.0
 
@@ -32,6 +49,7 @@ def file_source(path):
 
 
 def _rgb_stride(width):
+    """GStreamer pads each row of an RGB frame to a multiple of 4 bytes."""
     return (width * RGB_CHANNELS + 3) & ~3
 
 
@@ -42,8 +60,7 @@ class GstCapture:
 
     def __init__(self, source, decoder):
         description = (
-            f'{source} ! h264parse '
-            f'! {decoder} '
+            f'{source} ! h264parse ! {STREAM_CAPS} ! {decoder} '
             f'! videoconvert '
             f'! video/x-raw,format=RGB '
             f'! appsink name=sink max-buffers=1 drop=true sync=true'
