@@ -25,17 +25,11 @@ logger = logging.getLogger('fake-drone/capture')
 RGB_CHANNELS = 3
 # Default H.264 decoder: the Qualcomm hardware decoder fermi actually runs,
 # matching parrot_anafi's real decode path.
-DEFAULT_DECODER = 'qtic2vdec ! qtivcrop crop-type=FastCV crop=<0,0,1920,1080>'
-# qtic2vdec refuses caps without chroma-format/bit-depth, which h264parse
-# doesn't carry through from this file (confirmed via gst-launch -v: its src
-# caps have width/height/framerate but no chroma-format/bit-depth-luma/
-# bit-depth-chroma) -- same requirement parrot_anafi's STREAM_CAPS satisfies
-# for the drone's RTSP stream, just with this file's own resolution/
-# framerate instead of the drone's 1280x720. Software decoders ignore these
-# extra fields.
+DEFAULT_DECODER = 'qtic2vdec ! qtivcrop crop-type=FastCV crop=<0,0,1280,720>'
+
 STREAM_CAPS = (
     'video/x-h264,stream-format=byte-stream,alignment=au '
-    '! capssetter caps="video/x-h264,width=(int)1920,height=(int)1080,'
+    '! capssetter caps="video/x-h264,width=(int)1280,height=(int)720,'
     'framerate=(fraction)30000/1001,chroma-format=(string)4:2:0,'
     'bit-depth-luma=(uint)8,bit-depth-chroma=(uint)8"'
 )
