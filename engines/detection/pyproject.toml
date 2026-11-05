@@ -8,6 +8,8 @@ dependencies = [
     "protobuf>=7.35.1",
     "pyproj",
     "rfdetr>=1.8.3",
+    # RF-DETR XLarge and 2XLarge, which are licensed separately
+    "rfdetr-plus>=1.1.0",
     "shapely",
     "steeleagle-protocol>=0.3.4",
     "supervision>=0.29.1",

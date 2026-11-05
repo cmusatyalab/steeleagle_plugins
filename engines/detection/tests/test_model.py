@@ -67,3 +67,26 @@ def test_rfdetr_finds_the_bus_and_the_people_in_the_bus_photo(rfdetr):
     names = [d.class_name for d in result.detections]
     assert "bus" in names
     assert names.count("person") >= BUS_PHOTO_MIN_PEOPLE
+
+
+def test_a_trained_rfdetr_2xlarge_checkpoint_loads_as_its_own_variant(tmp_path):
+    """A .pth records the variant it was trained as. 2XLarge uses patch size
+    20, which no rfdetr_size class could load before."""
+    import rfdetr
+    import torch
+
+    trained = rfdetr.RFDETR2XLarge(pretrain_weights=None, num_classes=2, device="cpu")
+    torch.save(
+        {
+            "model": trained.model.model.state_dict(),
+            "args": {"num_classes": 2},
+            "model_name": "RFDETR2XLarge",
+            "model_config": trained.model_config.model_dump(mode="json"),
+        },
+        tmp_path / "trained.pth",
+    )
+
+    predictor = load_predictor(parse_args('{"model": "trained.pth"}'), tmp_path)
+
+    assert type(predictor.model).__name__ == "RFDETR2XLarge"
+    assert predictor.model.model_config.patch_size == 20

@@ -78,6 +78,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/49/60/7b6497946d74bcf1de852a21824d63baad12cd417db4195fc1bfe59db953/nvidia_cuda_cupti_cu12-12.6.80-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/4c/dc/f70d83c47b94df4e5ee83cd85fd30cfacf6139d0d3f1414602328c9d0b12/supervision-0.31.3-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/4d/70/d2be010436a065b3b42096da156e6fbd986fb5f5d1eaa1050147d72b01b2/rfdetr_plus-1.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/51/e9/3a7820be2bb0fe53b6bc9c3be26d3d1158004e4c3ab953aa6840b955b1e9/truststore-0.10.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/53/a1/1681dfa1c904d4e3e72e51b55a0ff012d50b766843ef832d584abe2113c6/nvidia_ml_py-13.615.71-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/56/79/12978b96bd44274fe38b5dde5cfb660b1d114f70a65ef962bcbbed99b549/nvidia_cusparselt_cu12-0.7.1-py3-none-manylinux2014_x86_64.whl
@@ -219,6 +220,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/47/87/a155f16c1c17adccaa2ed2256484fe1c6ad37b925e8e39695ed8860bc0b5/pydeprecate-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/49/ee/16bde09927e7ffacd50b117cd7d1dc764d145f03249fc41fdf6dfba3301f/nvidia_nvtx-13.2.86-py3-none-manylinux1_x86_64.manylinux_2_5_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4c/dc/f70d83c47b94df4e5ee83cd85fd30cfacf6139d0d3f1414602328c9d0b12/supervision-0.31.3-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/4d/70/d2be010436a065b3b42096da156e6fbd986fb5f5d1eaa1050147d72b01b2/rfdetr_plus-1.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/4f/4a/037dfbbafc96ad1828ef62326f27970cae2c0eb271cf5b8e6922f32a7427/nvidia_nvshmem_cu13-3.7.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/51/e9/3a7820be2bb0fe53b6bc9c3be26d3d1158004e4c3ab953aa6840b955b1e9/truststore-0.10.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/53/a1/1681dfa1c904d4e3e72e51b55a0ff012d50b766843ef832d584abe2113c6/nvidia_ml_py-13.615.71-py3-none-any.whl
@@ -358,6 +360,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/47/87/a155f16c1c17adccaa2ed2256484fe1c6ad37b925e8e39695ed8860bc0b5/pydeprecate-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/49/ee/16bde09927e7ffacd50b117cd7d1dc764d145f03249fc41fdf6dfba3301f/nvidia_nvtx-13.2.86-py3-none-manylinux1_x86_64.manylinux_2_5_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4c/dc/f70d83c47b94df4e5ee83cd85fd30cfacf6139d0d3f1414602328c9d0b12/supervision-0.31.3-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/4d/70/d2be010436a065b3b42096da156e6fbd986fb5f5d1eaa1050147d72b01b2/rfdetr_plus-1.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/4f/4a/037dfbbafc96ad1828ef62326f27970cae2c0eb271cf5b8e6922f32a7427/nvidia_nvshmem_cu13-3.7.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/51/e9/3a7820be2bb0fe53b6bc9c3be26d3d1158004e4c3ab953aa6840b955b1e9/truststore-0.10.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/53/a1/1681dfa1c904d4e3e72e51b55a0ff012d50b766843ef832d584abe2113c6/nvidia_ml_py-13.615.71-py3-none-any.whl
@@ -963,6 +966,7 @@ packages:
   - protobuf>=7.35.1
   - pyproj
   - rfdetr>=1.8.3
+  - rfdetr-plus>=1.1.0
   - shapely
   - steeleagle-protocol>=0.3.4
   - supervision>=0.29.1
@@ -1630,6 +1634,13 @@ packages:
   - tqdm>=4.62.3
   - rasterio>=1.3 ; extra == 'geotiff'
   - pandas>=2 ; extra == 'metrics'
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/4d/70/d2be010436a065b3b42096da156e6fbd986fb5f5d1eaa1050147d72b01b2/rfdetr_plus-1.1.0-py3-none-any.whl
+  name: rfdetr-plus
+  version: 1.1.0
+  sha256: bf73c8b003c0327357947f50eb678efddceeafa7350e953b764f463f68573133
+  requires_dist:
+  - rfdetr>=1.8.0,<2
   requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/4f/4a/037dfbbafc96ad1828ef62326f27970cae2c0eb271cf5b8e6922f32a7427/nvidia_nvshmem_cu13-3.7.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
   name: nvidia-nvshmem-cu13

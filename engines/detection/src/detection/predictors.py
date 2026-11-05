@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 import supervision as sv
 
-from detection.config import RFDETR_STOCK_MODEL
+from detection.config import RFDETR_SIZE_CLASSES, RFDETR_STOCK_MODEL
 from detection.paths import resolve
 
 
@@ -67,16 +67,19 @@ class RfDetrPredictor:
     def __init__(self, weights, size, confidence, labels):
         import rfdetr
 
-        model_class = {
-            "nano": rfdetr.RFDETRNano,
-            "small": rfdetr.RFDETRSmall,
-            "medium": rfdetr.RFDETRMedium,
-            "large": rfdetr.RFDETRLarge,
-        }[size]
-        # With no weights the model class downloads its own pretrained ones.
-        self.model = (
-            model_class(pretrain_weights=str(weights)) if weights else model_class()
-        )
+        if weights:
+            # The checkpoint records the variant it was trained as (including
+            # the separately packaged XLarge and 2XLarge), its resolution and
+            # its classes, so it builds its own model whatever `size` says.
+            # trust_checkpoint allows a full unpickle when a checkpoint cannot
+            # be loaded safely, as Ultralytics already does for .pt files.
+            self.model = rfdetr.RFDETR.from_checkpoint(
+                str(weights), trust_checkpoint=True
+            )
+        else:
+            # The stock model of `size` downloads its own pretrained weights.
+            model_class = getattr(rfdetr, RFDETR_SIZE_CLASSES[size])
+            self.model = model_class()
         self.confidence = confidence
         self.labels = labels
 

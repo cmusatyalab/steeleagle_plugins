@@ -12,7 +12,7 @@ default = "yolo26x.pt"
 [[args]]
 name = "rfdetr_size"
 type = "string"
-description = "RF-DETR model size, which a .pth checkpoint does not record: nano, small, medium or large. Ignored for YOLO"
+description = "Size of the stock pretrained RF-DETR (model \"rfdetr\"): nano, small, medium, large, xlarge or 2xlarge. Ignored for a .pth checkpoint, which records its own size, and for YOLO"
 default = "large"
 
 [[args]]
