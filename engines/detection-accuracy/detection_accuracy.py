@@ -6,8 +6,12 @@ of each forwarded RawFrame and checks it against the rubric's
 at all means the upstream detection engine already called it a positive.
 
 Normally a terminal sink (drops every input after accounting for it) and
-reports via periodic log lines. Set forward_frames to also pass each frame
-on unchanged (e.g. to view in GCS), tagged with the latest running snapshot.
+reports via periodic log lines, plus a single, distinctly-labeled
+"video should be done" line once rubric["duration_seconds"] +
+emit_warmup_seconds have elapsed since this engine started -- that line
+fires exactly once, since the source video is a single finite pass, not a
+loop. Set forward_frames to also pass each frame on unchanged (e.g. to view
+in GCS), tagged with the latest running snapshot.
 """
 import json
 import logging
@@ -61,17 +65,18 @@ def run_engine(name, args):
     rubric = load_rubric(args["rubric_path"])
     appearances = rubric["appearances"]
     gt_frame_count = ground_truth_frame_count(appearances)
-    time_emit_interval = rubric["duration_seconds"] + args["emit_warmup_seconds"]
+    video_done_at = rubric["duration_seconds"] + args["emit_warmup_seconds"]
 
     forwarded = 0
     true_positives = 0
     since_last_frame_emit = 0
+    video_done_logged = False
     start_time = time.monotonic()
-    next_time_emit = time_emit_interval
 
     with uriel.Engine(name, max_output_size=args["max_output_size"]) as engine:
-        logger.info("engine %s ready; rubric has %d appearances, %d ground-truth frames",
-                    name, len(appearances), gt_frame_count)
+        logger.info("engine %s ready; rubric has %d appearances, %d ground-truth frames; "
+                    "expecting video done at %.1fs", name, len(appearances), gt_frame_count,
+                    video_done_at)
         for input in engine:
             raw_frame = frame_pb2.RawFrame()
             try:
@@ -89,17 +94,15 @@ def run_engine(name, args):
                 appearance["hit"] = True
 
             stats = snapshot(forwarded, true_positives, appearances, gt_frame_count)
+            elapsed = time.monotonic() - start_time
 
-            should_log = False
             if args["emit_every_frames"] and since_last_frame_emit >= args["emit_every_frames"]:
-                should_log = True
                 since_last_frame_emit = 0
-            if time.monotonic() - start_time >= next_time_emit:
-                should_log = True
-                next_time_emit += time_emit_interval
-
-            if should_log:
                 logger.info("snapshot: %s", json.dumps(stats))
+
+            if not video_done_logged and elapsed >= video_done_at:
+                video_done_logged = True
+                logger.info("VIDEO SHOULD BE DONE (elapsed %.1fs): %s", elapsed, json.dumps(stats))
 
             if args["forward_frames"]:
                 engine.forward(result=json.dumps(stats).encode())
