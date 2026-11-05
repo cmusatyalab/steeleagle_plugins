@@ -25,11 +25,11 @@ logger = logging.getLogger('fake-drone/capture')
 RGB_CHANNELS = 3
 # Default H.264 decoder: the Qualcomm hardware decoder fermi actually runs,
 # matching parrot_anafi's real decode path.
-DEFAULT_DECODER = 'qtic2vdec ! qtivcrop crop-type=FastCV crop=<0,0,1280,720>'
+DEFAULT_DECODER = 'qtic2vdec ! qtivcrop crop-type=FastCV crop=<0,0,1920,1080>'
 
 STREAM_CAPS = (
     'video/x-h264,stream-format=byte-stream,alignment=au '
-    '! capssetter caps="video/x-h264,width=(int)1280,height=(int)720,'
+    '! capssetter caps="video/x-h264,width=(int)1920,height=(int)1080,'
     'framerate=(fraction)30000/1001,chroma-format=(string)4:2:0,'
     'bit-depth-luma=(uint)8,bit-depth-chroma=(uint)8"'
 )
@@ -56,7 +56,8 @@ class GstCapture:
         description = (
             f'{source} ! h264parse ! {STREAM_CAPS} ! {decoder} '
             f'! videoconvert '
-            f'! video/x-raw,format=RGB '
+	    f'! videoscale '
+            f'! video/x-raw,format=RGB,width=1280,height=720 '
             f'! appsink name=sink max-buffers=1 drop=true sync=true'
         )
         self._opened = False
