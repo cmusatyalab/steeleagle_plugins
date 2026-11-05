@@ -1,0 +1,37 @@
+[plugin]
+name = "MCAP Recorder"
+type = "engine"
+description = "Records telemetry, camera frames and engine results into per-vehicle MCAP files for replay in Foxglove"
+
+[[args]]
+name = "directory"
+type = "string"
+description = "Directory to write recordings to; empty for logs/mcap in the orchestrator's data directory (normally ~/.local/share/steeleagle/logs/mcap)"
+default = ""
+
+[[args]]
+name = "engines"
+type = "array"
+description = "Service names of the engines on this daemon whose results to record; detection results are also drawn on their frames"
+default = ["detection"]
+
+[[args]]
+name = "image_width"
+type = "number"
+description = "Width in pixels to store JPEG and raw frames at, keeping their aspect ratio; 0 for full size. H.264 frames are stored as they are"
+default = 320
+
+[[args]]
+name = "idle_timeout"
+type = "number"
+description = "Seconds without input from a vehicle after which its recording is closed; its next input starts a new one"
+default = 60
+
+[engine]
+type = "filter"
+inputs = [
+    "steeleagle_protocol/v1/messages/telemetry/Telemetry",
+    "steeleagle_protocol/v1/messages/frame/EncodedFrame",
+    "steeleagle_protocol/v1/messages/frame/RawFrame",
+]
+# No result: every input is dropped after it is recorded; place on its own branch
