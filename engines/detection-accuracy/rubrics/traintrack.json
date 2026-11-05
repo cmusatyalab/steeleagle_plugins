@@ -1,0 +1,9 @@
+{
+  "video": "traintrack.mp4",
+  "fps": 30,
+  "duration_seconds": 95,
+  "appearances": [
+    {"label": "mannequin", "first_frame": 660, "last_frame": 840},
+    {"label": "mannequin", "first_frame": 1860, "last_frame": 2430}
+  ]
+}

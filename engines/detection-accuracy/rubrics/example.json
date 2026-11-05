@@ -1,0 +1,10 @@
+{
+  "video": "mannequin_gravel_test.mp4",
+  "fps": 30,
+  "duration_seconds": 45,
+  "appearances": [
+    {"label": "mannequin", "first_frame": 412, "last_frame": 503},
+    {"label": "mannequin", "first_frame": 890, "last_frame": 975},
+    {"label": "mannequin", "first_frame": 1200, "last_frame": 1290}
+  ]
+}
