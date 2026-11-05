@@ -14,6 +14,7 @@ import threading
 from detection import paths
 from detection.config import parse_args
 from detection.engine import run
+from detection.frames import FrameSaver
 from detection.geofence import Geofence
 from detection.geolocate import Camera
 from detection.predictors import load_predictor
@@ -37,6 +38,9 @@ def main():
     if config.geofence:
         geofence = Geofence.from_kml(paths.resolve(paths.files_dir(), config.geofence))
     predictor = load_predictor(config, paths.models_dir())
+    saver = None
+    if config.save_frames:
+        saver = FrameSaver(paths.resolve(paths.files_dir(), config.save_frames))
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -49,6 +53,7 @@ def main():
         Camera(hfov_deg=config.hfov, vfov_deg=config.vfov),
         stop=stop,
         max_output_size=config.max_output_size,
+        saver=saver,
     )
 
 

@@ -4,6 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
     "numpy",
+    "pillow",
     "protobuf>=7.35.1",
     "pyproj",
     "rfdetr>=1.8.3",

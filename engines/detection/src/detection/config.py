@@ -34,6 +34,7 @@ class Config:
     hfov: float = DEFAULT_HFOV_DEG
     vfov: float = DEFAULT_VFOV_DEG
     max_output_size: int = DEFAULT_MAX_OUTPUT_BYTES
+    save_frames: str = ""
 
     @property
     def architecture(self):

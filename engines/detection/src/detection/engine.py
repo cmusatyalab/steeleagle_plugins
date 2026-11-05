@@ -63,15 +63,18 @@ def detect(frame, predictor, classes, geofence, camera):
     return result
 
 
-def _frame_result(input, predictor, classes, geofence, camera):
+def _frame_result(input, predictor, classes, geofence, camera, saver=None):
     """The serialized result for an input; empty if it cannot be read, so the
-    engine keeps serving the frames after it."""
+    engine keeps serving the frames after it. If there is a `saver`, the frame
+    is handed to it before inference."""
     try:
         if input.payload_type != RAW_FRAME_TYPE:
             raise FrameError(
                 f"payload is a {input.payload_type!r}, not a {RAW_FRAME_TYPE}"
             )
         frame = frame_pb2.RawFrame.FromString(bytes(input.data))
+        if saver is not None:
+            saver.submit(input.id.producer, input.id.seq, frame)
         return detect(frame, predictor, classes, geofence, camera).SerializeToString()
     except (FrameError, DecodeError) as err:
         logger.warning("input %d: %s", input.id.seq, err)
@@ -81,19 +84,36 @@ def _frame_result(input, predictor, classes, geofence, camera):
 
 
 def run(
-    name, predictor, classes, geofence, camera, *, stop, max_output_size, on_ready=None
+    name,
+    predictor,
+    classes,
+    geofence,
+    camera,
+    *,
+    stop,
+    max_output_size,
+    on_ready=None,
+    saver=None,
 ):
     """Serves the engine `name` until the threading.Event `stop` is set. Each
-    frame is forwarded on, with its detections as the result."""
-    with uriel.Engine(
-        name, result_type=DETECTION_RESULT_TYPE, max_output_size=max_output_size
-    ) as engine:
-        logger.info("engine %s ready", name)
-        if on_ready is not None:
-            on_ready()
-        while not stop.is_set():
-            input = engine.next(POLL_INTERVAL_S)
-            if input is not None:
-                engine.forward(
-                    result=_frame_result(input, predictor, classes, geofence, camera)
-                )
+    frame is forwarded on, with its detections as the result. If there is a
+    FrameSaver `saver`, each frame is also saved, and the saver is closed when
+    the engine stops."""
+    try:
+        with uriel.Engine(
+            name, result_type=DETECTION_RESULT_TYPE, max_output_size=max_output_size
+        ) as engine:
+            logger.info("engine %s ready", name)
+            if on_ready is not None:
+                on_ready()
+            while not stop.is_set():
+                input = engine.next(POLL_INTERVAL_S)
+                if input is not None:
+                    engine.forward(
+                        result=_frame_result(
+                            input, predictor, classes, geofence, camera, saver
+                        )
+                    )
+    finally:
+        if saver is not None:
+            saver.close()

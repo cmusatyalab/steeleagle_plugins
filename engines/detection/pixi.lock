@@ -959,6 +959,7 @@ packages:
   name: detection
   requires_dist:
   - numpy
+  - pillow
   - protobuf>=7.35.1
   - pyproj
   - rfdetr>=1.8.3
