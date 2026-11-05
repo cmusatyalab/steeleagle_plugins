@@ -1,0 +1,38 @@
+[plugin]
+name = "Detection Accuracy"
+type = "engine"
+description = "Tracks precision, recall, and effective recall of a detection engine's forwarded frames against a ground-truth rubric"
+
+[[args]]
+name = "rubric_path"
+type = "string"
+description = "JSON rubric file: {duration_seconds, fps, appearances: [{label, first_frame, last_frame}, ...]}"
+default = ""
+
+[[args]]
+name = "emit_every_frames"
+type = "number"
+description = "Log a cumulative snapshot after this many frames received (0 disables this cadence)"
+default = 100
+
+[[args]]
+name = "emit_warmup_seconds"
+type = "number"
+description = "Added to the rubric's duration_seconds to get the time-based snapshot interval, to allow for startup/decoder warm-up"
+default = 15
+
+[[args]]
+name = "forward_frames"
+type = "boolean"
+description = "Forward each received frame on unchanged (e.g. to view in GCS); off by default since this engine is normally a terminal sink"
+default = false
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest RawFrame this engine will forward, in bytes (a 1280x720 RGB frame is 2764800); only matters if forward_frames is on"
+default = 3145728
+
+[engine]
+type = "detection"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
