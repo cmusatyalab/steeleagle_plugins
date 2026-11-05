@@ -10,6 +10,7 @@ import uriel
 from conftest import CAMERA, FixedPredictor, make_detected, make_frame
 
 from detection.engine import RAW_FRAME_TYPE, DETECTION_RESULT_TYPE, run
+from detection.frames import FrameSaver
 from detection.geofence import Geofence
 from steeleagle_protocol.v1.messages.result import result_pb2
 
@@ -36,7 +37,7 @@ timeout = "5s"
 class Deployment:
     """A producer whose frames flow to the detection engine under test."""
 
-    def __init__(self, predictor, classes=(), geofence=None):
+    def __init__(self, predictor, classes=(), geofence=None, saver=None):
         suffix = uuid.uuid4().hex[:8]
         self.producer_name = f"camera-{suffix}"
         self.engine_name = f"detector-{suffix}"
@@ -57,6 +58,7 @@ class Deployment:
                 "stop": self.stop,
                 "on_ready": ready.set,
                 "max_output_size": MAX_OUTPUT_BYTES,
+                "saver": saver,
             },
             daemon=True,
         )
@@ -143,3 +145,18 @@ def test_a_frame_that_cannot_be_read_still_gets_an_empty_result_and_the_engine_k
     broken.channels = 4
     assert len(deployment.detect(broken).detections) == 0
     assert len(deployment.detect(make_frame()).detections) == 1
+
+
+def test_with_a_saver_each_frame_is_saved_as_a_jpeg_under_its_producer(
+    deploy, tmp_path
+):
+    deployment = deploy(
+        FixedPredictor(make_detected()), saver=FrameSaver(tmp_path / "frames")
+    )
+    result = deployment.detect(make_frame())
+    assert len(result.detections) == 1
+    # Stopping the engine closes the saver, which writes what it has queued
+    deployment.stop.set()
+    deployment.engine_thread.join(THREAD_JOIN_TIMEOUT_S)
+    (path,) = (tmp_path / "frames" / deployment.producer_name).iterdir()
+    assert path.suffix == ".jpg"

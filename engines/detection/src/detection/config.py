@@ -16,7 +16,17 @@ YOLO_SUFFIX = ".pt"
 RFDETR_SUFFIX = ".pth"
 # Stock pretrained RF-DETR of rfdetr_size, downloaded on first use.
 RFDETR_STOCK_MODEL = "rfdetr"
-RFDETR_SIZES = ("nano", "small", "medium", "large")
+# The rfdetr class of each size of stock model. A .pth checkpoint records its
+# own variant, so rfdetr_size does not apply to one.
+RFDETR_SIZE_CLASSES = {
+    "nano": "RFDETRNano",
+    "small": "RFDETRSmall",
+    "medium": "RFDETRMedium",
+    "large": "RFDETRLarge",
+    "xlarge": "RFDETRXLarge",
+    "2xlarge": "RFDETR2XLarge",
+}
+RFDETR_SIZES = tuple(RFDETR_SIZE_CLASSES)
 
 
 class ConfigError(Exception):
@@ -34,6 +44,7 @@ class Config:
     hfov: float = DEFAULT_HFOV_DEG
     vfov: float = DEFAULT_VFOV_DEG
     max_output_size: int = DEFAULT_MAX_OUTPUT_BYTES
+    save_frames: str = ""
 
     @property
     def architecture(self):
