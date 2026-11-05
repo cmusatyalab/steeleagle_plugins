@@ -8,6 +8,7 @@ DEFAULTS = {
     "model": "libs640_v26_quant.so",
     "labels": "",
     "backend": "libs/libQnnHtp.so",
+    "only_classes": [],
     "confidence": 0.5,
     "nms_score_threshold": 0.5,
     "nms_iou_threshold": 0.3,
@@ -29,6 +30,7 @@ MODELS_ENV = "STEELEAGLE_MODELS"
 SANDBOX_MODELS_DIR = "/steeleagle/models"
 MODEL_SUFFIX = ".so"
 LABELS_SUFFIX = ".labels"
+CLASS_SEPARATOR = ","  # of --only_classes
 
 
 def resolve(path):
@@ -86,5 +88,7 @@ server_args = [
 ]
 if labels:
     server_args += ["--labels", labels]
+if args["only_classes"]:
+    server_args += ["--only_classes", CLASS_SEPARATOR.join(args["only_classes"])]
 
 os.execvp(os.path.join(plugin_dir, "inference-server-uriel"), server_args)

@@ -22,6 +22,12 @@ description = "Path to the QNN HTP backend .so, relative to the plugin folder"
 default = "libs/libQnnHtp.so"
 
 [[args]]
+name = "only_classes"
+type = "array"
+description = "Class names to report, ignoring case (e.g. [\"person\", \"car\"]); empty to report every class"
+default = []
+
+[[args]]
 name = "confidence"
 type = "number"
 description = "Minimum class score for a detection to be kept (0.0-1.0]"
