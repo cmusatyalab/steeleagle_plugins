@@ -186,7 +186,7 @@ def _encode_frame(engine, streams, input, args):
 
     out = frame_proto.EncodedFrame(
         encoded_data=encoded_bytes,
-        id=number,
+        id=frame.id if args.get("pass_through") else number,
         camera_id=frame.camera_id,
         codec=frame_proto.CODEC_H264,
         keyframe=keyframe,

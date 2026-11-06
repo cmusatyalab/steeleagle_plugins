@@ -22,6 +22,12 @@ description = "Frame rate the encoder is told the frames come at"
 default = 30
 
 [[args]]
+name = "pass_through_id"
+type = "boolean"
+description = "Set EncodedFrame.id to the source RawFrame's id instead of this encoder's own GOP-tracking sequence number. Breaks decoder keyframe-recovery if a decoder is downstream; necessary for experimentation when something downstream needs to correlate encoded frames back to the original raw frame (e.g. accuracy tracking) and there is no decoder in the pipeline."
+default = false
+
+[[args]]
 name = "max_output_size"
 type = "number"
 description = "Largest encoded frame sent, in bytes"
