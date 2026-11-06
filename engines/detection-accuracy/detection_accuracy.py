@@ -93,7 +93,7 @@ def run_engine(name, args):
         for input in engine:
             encoded_frame = frame_pb2.EncodedFrame()
             try:
-                encode_frame.ParseFromString(bytes(input.data))
+                encoded_frame.ParseFromString(bytes(input.data))
             except DecodeError as e:
                 logger.warning("input %d: not a EncodedFrame (%s); dropping", input.id.seq, e)
                 engine.drop()
