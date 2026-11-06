@@ -30,9 +30,9 @@ default = false
 [[args]]
 name = "max_output_size"
 type = "number"
-description = "Largest RawFrame this engine will forward, in bytes (a 1280x720 RGB frame is 2764800); only matters if forward_frames is on"
-default = 3145728
+description = "Largest EncodedFrame this engine will forward, in bytes (matches the H.264 encoder's own max_output_size)"
+default = 6237184
 
 [engine]
 type = "detection"
-inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]

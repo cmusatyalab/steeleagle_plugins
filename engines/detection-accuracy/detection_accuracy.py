@@ -91,17 +91,17 @@ def run_engine(name, args):
                     "expecting video done at %.1fs (see %s)", name, len(appearances), gt_frame_count,
                     video_done_at, DEADLINE_LOG_PATH)
         for input in engine:
-            raw_frame = frame_pb2.RawFrame()
+            encoded_frame = frame_pb2.EncodedFrame()
             try:
-                raw_frame.ParseFromString(bytes(input.data))
+                encode_frame.ParseFromString(bytes(input.data))
             except DecodeError as e:
-                logger.warning("input %d: not a RawFrame (%s); dropping", input.id.seq, e)
+                logger.warning("input %d: not a EncodedFrame (%s); dropping", input.id.seq, e)
                 engine.drop()
                 continue
 
             forwarded += 1
             since_last_frame_emit += 1
-            appearance = find_appearance(appearances, raw_frame.id)
+            appearance = find_appearance(appearances, encoded_frame.id)
             if appearance is not None:
                 true_positives += 1
                 appearance["hit"] = True
