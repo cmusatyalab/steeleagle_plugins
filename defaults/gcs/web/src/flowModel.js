@@ -531,7 +531,8 @@ export function toFlowToml(flow, catalog) {
     const producers = template.producers.flatMap((p) => [
         '[[producers]]',
         `name = ${tomlString(p.name)}`,
-        ...(p.tokens !== DEFAULT_TOKENS ? [`tokens = ${p.tokens}`] : []),
+        // Always written: left out, Uriel computes its own count, not 1
+        `tokens = ${p.tokens}`,
     ]);
     const engines = template.engines.flatMap((e) => [
         '[[engines]]',
