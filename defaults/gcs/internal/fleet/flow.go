@@ -17,6 +17,11 @@ const (
 // edgeTimeout is how long every edge of the flow waits on its target.
 const edgeTimeout = "2s"
 
+// cameraTokens is how many of the camera's frames may be in the flow at once.
+// It is set explicitly: left unset, Uriel computes one per engine, edge and
+// spare plus the remote crossing's capacity (8 for this flow).
+const cameraTokens = 1
+
 // FlowSpec is what a flow depends on beyond the vehicle.
 type FlowSpec struct {
 	// Engine is the GCS engine's full service name.
@@ -55,7 +60,8 @@ func BuildFlow(v Vehicle, snap Snapshot, spec FlowSpec) (flow *config.FlowConfig
 	}
 
 	cam := v.Driver.Cameras[0].Name
-	flow.Producers = append(flow.Producers, config.Producer{Name: cam})
+	tokens := cameraTokens
+	flow.Producers = append(flow.Producers, config.Producer{Name: cam, Tokens: &tokens})
 	flow.Engines = []config.Engine{
 		{Name: encoder, Location: config.LocationLocal},
 		flow.Engines[0],

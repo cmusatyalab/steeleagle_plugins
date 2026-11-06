@@ -540,8 +540,10 @@ describe('validateFlow', () => {
 
 const FLOW_B_TOML = `[[producers]]
 name = "harpy.telemetry"
+tokens = 1
 [[producers]]
 name = "harpy.frames"
+tokens = 1
 
 [[engines]]
 name = "100.64.0.2.yolo"
@@ -604,10 +606,11 @@ describe('toFlowToml', () => {
         expect(toml).toContain('[[engines]]\nname = "gcs.telemetry"\nlocation = "remote"\n');
     });
 
-    it('emits tokens only when not the default', () => {
+    // Left out, Uriel computes its own count rather than taking the default of 1
+    it('always emits tokens, even the default', () => {
         const toml = toFlowToml(updateNode(flowB(), 'p2', { tokens: 3 }), catalog);
+        expect(toml).toContain('[[producers]]\nname = "harpy.telemetry"\ntokens = 1\n');
         expect(toml).toContain('[[producers]]\nname = "harpy.frames"\ntokens = 3\n');
-        expect(toml.match(/tokens/g)).toHaveLength(1);
     });
 
     it('omits callbacks with a header comment', () => {
