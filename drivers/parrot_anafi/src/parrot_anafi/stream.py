@@ -60,13 +60,35 @@ RESOLUTION_DIMENSIONS = {
     stream_proto.RESOLUTION_4K: (3840, 2160),
 }
 
+# Dimensions of the values of the scale arg, 16:9 like the live stream
+SCALE_DIMENSIONS = {
+    '480p': (854, 480),
+    '360p': (640, 360),
+    '240p': (426, 240),
+    '180p': (320, 180),
+}
+
+
+def scale_dimensions(scale):
+    """The dimensions of the value `scale` of the scale arg, or None to leave
+    frames as they are: for a blank string, or any other value, which is
+    ignored."""
+    if isinstance(scale, str) and scale in SCALE_DIMENSIONS:
+        return SCALE_DIMENSIONS[scale]
+    if scale not in ('', None):
+        logger.warning(f'ignoring the scale {scale!r}; expected one of {list(SCALE_DIMENSIONS)}')
+    return None
+
+
 class Stream(StreamServiceServicer):
     """Stream Service implementation."""
-    def __init__(self, drone, ip, decoder=DEFAULT_DECODER):
+    def __init__(self, drone, ip, decoder=DEFAULT_DECODER, scale=''):
         self.drone = drone
         self.ip = ip
         # H.264 decoder of the video stream, in gst-launch syntax
         self.decoder = decoder
+        # What frames are rescaled to, whatever the vehicle asks for, or None
+        self.scale = scale_dimensions(scale)
         self._capture_lock = threading.Lock()
         self._grabber_thread = None
         # The camera stream the vehicle asked for, as (uri, dimensions), or
@@ -347,8 +369,8 @@ class Stream(StreamServiceServicer):
             self._camera_request = None
             return stream_proto.StreamCamerasResponse()
         camera = requests[0]
-        dimensions = None
-        if camera.HasField('target_resolution'):
+        dimensions = self.scale
+        if dimensions is None and camera.HasField('target_resolution'):
             dimensions = RESOLUTION_DIMENSIONS.get(camera.target_resolution)
         self._camera_request = (camera.uri, dimensions)
         self._start_capture()

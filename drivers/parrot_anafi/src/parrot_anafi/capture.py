@@ -2,21 +2,24 @@
 
 The stream is H.264 over RTSP; the decoder is GStreamer elements, in
 gst-launch syntax, so that a hardware decoder can replace the default software
-one. A hardware decoder whose frames are in hardware memory must copy them
-into system memory itself, e.g.
-`qtic2vdec ! qtivtransform ! video/x-raw,format=RGB`, since videoconvert can't
-read GBM memory. The native environment adds the device's own GStreamer
-plugins, which hold such decoders.
+one. The native environment adds the device's own GStreamer plugins, which hold
+such decoders, e.g. `qtic2vdec`.
+
+Frames are converted to RGB on the CPU here, not in GStreamer: videoconvert
+can't negotiate GBM memory, but a mapped GBM buffer reads like any other, so a
+hardware decoder needs no hardware conversion after it.
 """
 import functools
 import logging
 
+import cv2
 import gi
 import numpy as np
 
 gi.require_version('Gst', '1.0')
 gi.require_version('GstApp', '1.0')
-from gi.repository import Gst, GstApp  # noqa: E402,F401
+gi.require_version('GstVideo', '1.0')
+from gi.repository import Gst, GstApp, GstVideo  # noqa: E402,F401
 
 Gst.init(None)
 
@@ -65,27 +68,61 @@ def _rtspsrc_has_non_compliant_url():
     return src is not None and src.find_property('force-non-compliant-url') is not None
 
 
-def _rgb_stride(width):
-    """GStreamer pads each row of an RGB frame to a multiple of 4 bytes."""
-    return (width * RGB_CHANNELS + 3) & ~3
+def _plane(data, offset, stride, height, width, channels=1):
+    """A plane of a frame in `data`, without copying it."""
+    shape, strides = (height, width), (stride, 1)
+    if channels > 1:
+        shape, strides = (height, width, channels), (stride, channels, 1)
+    return np.ndarray(shape, dtype=np.uint8, buffer=data, offset=offset, strides=strides)
+
+
+def to_rgb(data, pixel_format, width, height, offsets, strides):
+    """A new RGB array of a frame in `data`, in the GStreamer format
+    `pixel_format` (NV12, I420 or RGB), each of whose planes starts at its
+    offset in `offsets` with rows its stride in `strides` bytes apart.
+    Raises ValueError for any other format. OpenCV converts YUV as BT.601,
+    limited range."""
+    half_width, half_height = (width + 1) // 2, (height + 1) // 2
+    if pixel_format == 'NV12':
+        y = _plane(data, offsets[0], strides[0], height, width)
+        uv = _plane(data, offsets[1], strides[1], half_height, half_width, channels=2)
+        return cv2.cvtColorTwoPlane(y, uv, cv2.COLOR_YUV2RGB_NV12)
+    if pixel_format == 'I420':
+        y = _plane(data, offsets[0], strides[0], height, width)
+        u = _plane(data, offsets[1], strides[1], half_height, half_width)
+        v = _plane(data, offsets[2], strides[2], half_height, half_width)
+        planar = np.concatenate((y.ravel(), u.ravel(), v.ravel()))
+        return cv2.cvtColor(planar.reshape(height * 3 // 2, width), cv2.COLOR_YUV2RGB_I420)
+    if pixel_format == 'RGB':
+        return _plane(data, offsets[0], strides[0], height, width, RGB_CHANNELS).copy()
+    raise ValueError(f'cannot convert {pixel_format} frames to RGB')
+
+
+def _layout(sample):
+    """The offsets and strides of the planes of `sample`'s frame. A decoder
+    that pads its frames says so in the buffer's video meta, which is the only
+    place the padding is: the caps give the layout of an unpadded frame."""
+    meta = GstVideo.buffer_get_video_meta(sample.get_buffer())
+    if meta is not None:
+        return list(meta.offset), list(meta.stride)
+    info = GstVideo.VideoInfo.new_from_caps(sample.get_caps())
+    return list(info.offset), list(info.stride)
 
 
 class GstCapture:
     """Decodes frames from `source` with `decoder`, both in gst-launch syntax,
-    into RGB arrays. The decoder's output must be in system memory; it is
-    always converted to RGB after it, since SteelEagle expects RGB RawFrames,
-    which is a passthrough if the decoder already outputs RGB. It reads like
-    an OpenCV VideoCapture: isOpened, read and release. Only the latest frame
-    is kept, so a slow reader skips frames rather than falling behind."""
+    into RGB arrays, converting the decoder's output on the CPU; see to_rgb
+    for the formats it may be in. It reads like an OpenCV VideoCapture:
+    isOpened, read and release. Only the latest frame is kept, so a slow
+    reader skips frames rather than falling behind."""
 
     def __init__(self, source, decoder):
         description = (
             f'{source} ! h264parse ! {STREAM_CAPS} ! {decoder} '
-            f'! videoconvert '
-            f'! video/x-raw,format=RGB '
             f'! appsink name=sink max-buffers=1 drop=true sync=false'
         )
         self._opened = False
+        self._logged_format = None
         try:
             self._pipeline = Gst.parse_launch(description)
         except Exception as e:
@@ -120,15 +157,21 @@ class GstCapture:
         caps = sample.get_caps().get_structure(0)
         _, width = caps.get_int('width')
         _, height = caps.get_int('height')
+        pixel_format = caps.get_string('format')
+        if pixel_format != self._logged_format:
+            self._logged_format = pixel_format
+            logger.info(f'decoder outputs {width}x{height} {pixel_format}: '
+                        f'{sample.get_caps().to_string()}')
+        offsets, strides = _layout(sample)
         buf = sample.get_buffer()
         ok, mapinfo = buf.map(Gst.MapFlags.READ)
         if not ok:
             return False, None
         try:
-            stride = _rgb_stride(width)
-            rows = np.frombuffer(mapinfo.data, dtype=np.uint8, count=stride * height)
-            frame = rows.reshape(height, stride)[:, :width * RGB_CHANNELS]
-            frame = frame.reshape(height, width, RGB_CHANNELS).copy()
+            frame = to_rgb(mapinfo.data, pixel_format, width, height, offsets, strides)
+        except ValueError as e:
+            logger.warning(f'could not convert a frame: {e}')
+            return False, None
         finally:
             buf.unmap(mapinfo)
         return True, frame
