@@ -218,7 +218,8 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 
 	daemonsRoutes := noDaemonRoutes()
 	if conn != nil {
-		h := daemons.NewHandler(daemonClient, daemons.Self{IP: gcsIP, Hostname: gcsHostname, Arch: runtime.GOARCH, OS: runtime.GOOS, Engine: engine}, log)
+		h := daemons.NewHandler(daemonClient, daemons.Self{IP: gcsIP, Hostname: gcsHostname, Arch: runtime.GOARCH, OS: runtime.GOOS, Engine: engine}, log).
+			WithTransfers(daemons.NewTransfers(daemonpb.NewTransferServiceClient(conn), daemons.TransferChunkSize, log))
 		daemonsRoutes = h.Routes()
 	}
 

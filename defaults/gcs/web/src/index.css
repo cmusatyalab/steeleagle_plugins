@@ -1,0 +1,6 @@
+
+/* Byte-count upload bars update every chunk; PrimeReact's 1s ease-in-out
+   restarts on each update and leaves the fill far behind the label */
+.byte-progress .p-progressbar-value-animate {
+  transition: width 0.2s linear;
+}

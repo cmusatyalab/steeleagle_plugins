@@ -33,7 +33,7 @@ const (
 	textRunning        = "uploaded, but a mission is running; hold, then upload again to load it"
 )
 
-// Progress reports that sent of total chunks of a mission have been
+// Progress reports that sent of total bytes of a mission have been
 // acknowledged by a vehicle.
 type Progress func(sent, total int)
 
@@ -66,7 +66,7 @@ func (s *Sender) Send(ctx context.Context, vehicle, name string, binary []byte, 
 	skipped := s.has(ctx, client, name, binary)
 	if skipped {
 		if progress != nil {
-			progress(1, 1)
+			progress(len(binary), len(binary))
 		}
 		details = DetailsAlreadyLoaded
 	} else if err := s.upload(ctx, client, name, binary, progress); err != nil {
@@ -165,7 +165,7 @@ func (s *Sender) upload(ctx context.Context, client vehiclepb.LoaderServiceClien
 			return err
 		}
 		if progress != nil {
-			progress(n, total)
+			progress(end, len(binary))
 		}
 	}
 	if err := wait(stream.CloseSend); err != nil {
@@ -182,7 +182,7 @@ func (s *Sender) upload(ctx context.Context, client vehiclepb.LoaderServiceClien
 		}
 	}
 	if progress != nil {
-		progress(total, total)
+		progress(len(binary), len(binary))
 	}
 	return nil
 }

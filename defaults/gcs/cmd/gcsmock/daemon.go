@@ -94,12 +94,16 @@ type Daemon struct {
 	driverpb.UnimplementedControlServiceServer
 	missionpb.UnimplementedMissionServiceServer
 	vehiclepb.UnimplementedLoaderServiceServer
+	daemonpb.UnimplementedTransferServiceServer
 
 	top   Topology
 	flows FlowApplier
 	log   zerolog.Logger
 	state map[string]*vehicleState
 	store *daemonStore
+	// transferDelay is how long each transferred chunk takes, so the GCS's
+	// upload progress can be watched.
+	transferDelay time.Duration
 
 	remoteOnce sync.Once
 }
@@ -123,7 +127,7 @@ func NewDaemon(top Topology, vehicles map[string]*Vehicle, flows FlowApplier, lo
 		// The seed configs are built from constants, so this is a bug
 		panic(fmt.Sprintf("seed mock daemon configs: %v", err))
 	}
-	d := &Daemon{top: top, flows: flows, log: log, state: map[string]*vehicleState{}, store: store}
+	d := &Daemon{top: top, flows: flows, log: log, state: map[string]*vehicleState{}, store: store, transferDelay: defaultTransferDelay}
 	for n, v := range vehicles {
 		d.state[n] = &vehicleState{v: v, missions: map[string]uploadedMission{}}
 	}
@@ -137,6 +141,7 @@ func (d *Daemon) Register(s *grpc.Server) {
 	driverpb.RegisterControlServiceServer(s, d)
 	missionpb.RegisterMissionServiceServer(s, d)
 	vehiclepb.RegisterLoaderServiceServer(s, d)
+	daemonpb.RegisterTransferServiceServer(s, d)
 }
 
 // route returns the vehicle the call's route key names. It mirrors the

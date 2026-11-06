@@ -41,6 +41,9 @@ type daemonStore struct {
 type storedDaemon struct {
 	config   []byte
 	packages map[string]*storedPackage
+	// transfers holds the size of each file and model transferred to the
+	// daemon, by "files/name" or "models/name"; their bytes are dropped.
+	transfers map[string]int
 	// restartUntil is when the daemon is back from its last restart.
 	restartUntil time.Time
 }
@@ -109,7 +112,7 @@ func newDaemonStore(top Topology) (*daemonStore, error) {
 		if err != nil {
 			return nil, err
 		}
-		s.daemons[ip] = &storedDaemon{config: raw, packages: pkgs}
+		s.daemons[ip] = &storedDaemon{config: raw, packages: pkgs, transfers: map[string]int{}}
 	}
 	return s, nil
 }
@@ -132,13 +135,18 @@ func (s *daemonStore) lookup(ctx context.Context) (string, *storedDaemon, error)
 // writable is lookup for a call that changes the daemon, which a daemon in
 // DenyConfig refuses as one not run with admin auth would.
 func (s *daemonStore) writable(ctx context.Context, method string) (*storedDaemon, error) {
+	return s.writableIn(ctx, "DaemonService", method)
+}
+
+// writableIn is writable for a method of the daemon's service.
+func (s *daemonStore) writableIn(ctx context.Context, service, method string) (*storedDaemon, error) {
 	ip, d, err := s.lookup(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if s.deny[ip] {
 		return nil, status.Errorf(codes.PermissionDenied,
-			"command external/steeleagle_protocol.v1.services.daemon.DaemonService/%s is not allowed in state LOCKED", method)
+			"command external/steeleagle_protocol.v1.services.daemon.%s/%s is not allowed in state LOCKED", service, method)
 	}
 	return d, nil
 }

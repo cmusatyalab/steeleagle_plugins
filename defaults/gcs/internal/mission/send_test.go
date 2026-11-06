@@ -146,8 +146,8 @@ func TestSendSkipsWhenHashMatches(t *testing.T) {
 	if f.uploads != 0 || !reflect.DeepEqual(f.loads, []string{"n"}) {
 		t.Errorf("uploads %d, loads %v", f.uploads, f.loads)
 	}
-	if !reflect.DeepEqual(p, progressLog{{1, 1}}) {
-		t.Errorf("progress %v", p)
+	if !reflect.DeepEqual(p, progressLog{{19, 19}}) {
+		t.Errorf("progress %v, want bytes", p)
 	}
 	for _, r := range f.routes {
 		if r != "v1" {
@@ -177,7 +177,7 @@ func TestSendUploadsInChunks(t *testing.T) {
 	if len(f.chunks) != 3 || !bytes.Equal(got, bin) {
 		t.Errorf("got %d chunks, %q", len(f.chunks), got)
 	}
-	if !reflect.DeepEqual(p, progressLog{{1, 3}, {2, 3}, {3, 3}}) {
+	if !reflect.DeepEqual(p, progressLog{{10, 25}, {20, 25}, {25, 25}}) {
 		t.Errorf("progress %v", p)
 	}
 	if !reflect.DeepEqual(f.loads, []string{"n"}) {
@@ -221,7 +221,7 @@ func TestSendEmptyBinarySendsOneChunk(t *testing.T) {
 	if len(f.chunks) != 1 || f.chunks[0].GetTotal() != 1 || f.chunks[0].GetNumber() != 1 || len(f.chunks[0].GetChunk()) != 0 {
 		t.Errorf("chunks %v", f.chunks)
 	}
-	if !reflect.DeepEqual(p, progressLog{{1, 1}}) {
+	if !reflect.DeepEqual(p, progressLog{{0, 0}}) {
 		t.Errorf("progress %v", p)
 	}
 }

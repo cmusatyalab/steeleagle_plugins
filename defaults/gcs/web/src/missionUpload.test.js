@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
     splitNdjson, readNdjson, streamUpload, initialUploadState,
-    applyUploadEvent, isUploadFinished, progressPercent, finishUpload,
+    applyUploadEvent, isUploadFinished, progressPercent, finishUpload, vehicleStatusText,
     validMissionName, defaultMissionName,
 } from './missionUpload.js';
 
@@ -142,5 +142,18 @@ describe('defaultMissionName', () => {
         expect(validMissionName(defaultMissionName('.hidden.bin'))).toBeNull();
         expect(defaultMissionName('a'.repeat(80) + '.bin').length).toBe(64);
         expect(defaultMissionName('')).toBe('');
+    });
+});
+
+describe('vehicleStatusText', () => {
+    it('shows bytes uploaded of the total while uploading', () => {
+        expect(vehicleStatusText({ status: 'uploading', sent: 6 * 1024 * 1024, total: 13002342, details: '' }))
+            .toBe('6.0 MB / 12.4 MB · 48%');
+    });
+
+    it('shows the result once there is one', () => {
+        expect(vehicleStatusText({ status: 'success', sent: 0, total: 0, details: 'uploaded and loaded' })).toBe('✓ uploaded and loaded');
+        expect(vehicleStatusText({ status: 'failed', sent: 0, total: 0, details: '' })).toBe('✗ Failed');
+        expect(vehicleStatusText({ status: 'pending', sent: 0, total: 0, details: '' })).toBe('Waiting…');
     });
 });

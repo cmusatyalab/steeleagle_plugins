@@ -1,3 +1,5 @@
+import { bytePercent, byteProgressLabel } from './byteProgress.js';
+
 // Client side of the mission upload/deploy NDJSON streams -- see
 // docs/superpowers/specs/2026-09-28-mission-upload-streaming-design.md.
 
@@ -90,9 +92,21 @@ export function finishUpload(state) {
     return state;
 }
 
+// sent and total are bytes the vehicle has acknowledged, and the mission's size
 export function progressPercent(v) {
     if (v.status === 'success') return 100;
-    return v.total > 0 ? Math.floor((v.sent * 100) / v.total) : 0;
+    return bytePercent(v.sent, v.total);
+}
+
+// A vehicle's line in the upload dialog: its bytes uploaded while uploading,
+// else its result.
+export function vehicleStatusText(v) {
+    switch (v.status) {
+        case 'success': return `✓ ${v.details || 'Uploaded'}`;
+        case 'failed': return `✗ ${v.details || 'Failed'}`;
+        case 'uploading': return byteProgressLabel(v.sent, v.total);
+        default: return 'Waiting…';
+    }
 }
 
 export const MISSION_NAME_RULE = "mission name must be 1-64 letters, digits, '_', '-' or '.', not starting with '.'";

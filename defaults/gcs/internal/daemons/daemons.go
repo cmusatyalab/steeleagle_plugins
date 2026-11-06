@@ -1,8 +1,9 @@
 // Package daemons serves the Orchestrate page: every daemon the GCS's own
 // daemon knows of, with the services each runs; restarting a service or a
-// whole daemon; a daemon's config and packages. Everything goes through the
-// GCS's daemon: a call for a particular daemon carries that daemon's IP as
-// its route key, which the GCS's daemon routes to it (or to itself).
+// whole daemon; a daemon's config and packages; uploading files and models
+// to a daemon. Everything goes through the GCS's daemon: a call for a
+// particular daemon carries that daemon's IP as its route key, which the
+// GCS's daemon routes to it (or to itself).
 package daemons
 
 import (
@@ -67,6 +68,7 @@ var Patterns = []string{
 	"POST /api/daemons/config/convert",
 	"POST /api/daemons/config/check",
 	"PUT /api/daemons/config",
+	"GET /ws/daemons/transfer",
 }
 
 // Service is a service a daemon runs. Name is its full service name, Bare
@@ -184,15 +186,27 @@ func category(c daemonpb.ServiceCategory) string {
 
 // Handler serves the daemon routes.
 type Handler struct {
-	daemon client
-	self   Self
-	log    zerolog.Logger
+	daemon    client
+	transfers http.Handler
+	self      Self
+	log       zerolog.Logger
 }
 
 // NewHandler returns the routes for the daemon c, which is the GCS's own
 // daemon, self.
 func NewHandler(c client, self Self, log zerolog.Logger) *Handler {
-	return &Handler{daemon: c, self: self, log: log}
+	return &Handler{daemon: c, self: self, log: log, transfers: http.HandlerFunc(noTransfers)}
+}
+
+// WithTransfers serves file and model uploads with t; without it they answer
+// 503.
+func (h *Handler) WithTransfers(t *Transfers) *Handler {
+	h.transfers = t
+	return h
+}
+
+func noTransfers(w http.ResponseWriter, _ *http.Request) {
+	writeDetail(w, http.StatusServiceUnavailable, "the GCS can't transfer files to daemons")
 }
 
 // Routes returns every route the handler serves, by mux pattern (Patterns).
@@ -208,6 +222,7 @@ func (h *Handler) Routes() map[string]http.Handler {
 		"POST /api/daemons/config/convert":   http.HandlerFunc(h.serveConvert),
 		"POST /api/daemons/config/check":     http.HandlerFunc(h.serveCheck),
 		"PUT /api/daemons/config":            http.HandlerFunc(h.serveApply),
+		"GET /ws/daemons/transfer":           h.transfers,
 	}
 }
 

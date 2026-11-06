@@ -5,6 +5,8 @@ import { Button } from 'primereact/button';
 import { Message } from 'primereact/message';
 import ConfigureDialog from './ConfigureDialog.jsx';
 import PackagesTab from './PackagesTab.jsx';
+import FilesTab from './FilesTab.jsx';
+import useFileUploads from './useFileUploads.js';
 import PluginsTab from './PluginsTab.jsx';
 import { daemonName, fetchDaemons, restartDaemon } from './daemonsApi.js';
 import { applyOutcome, followStep, restartWarning } from './configForm.js';
@@ -57,8 +59,8 @@ function StatusDot({ daemon, restarting }) {
 }
 
 // The Orchestrate page: the daemons the GCS's daemon knows of (itself and its
-// remotes), each with its info, services and packages, and configuring or
-// restarting it.
+// remotes), each with its info, services and packages, uploading files and
+// models to it, and configuring or restarting it.
 function OrchestrationPage({ toast }) {
     // daemons is null until the first list arrives; a failed poll keeps the
     // last list and shows why.
@@ -75,6 +77,7 @@ function OrchestrationPage({ toast }) {
     // Package changes made since each daemon's last restart, by IP:
     // {uri: 'install' | 'remove'}
     const [pending, setPending] = useState({});
+    const fileUploads = useFileUploads();
     const latest = useRef(0);
     // The polls read the follows through a ref, so they needn't restart on
     // every change
@@ -209,7 +212,7 @@ function OrchestrationPage({ toast }) {
             <div className="flex-1 border-round p-2" style={{ backgroundColor: 'var(--surface-card)', border: '1px solid var(--surface-border)', minWidth: 0 }}>
                 {!selected ? (
                     <div className="text-color-secondary flex align-items-center justify-content-center h-full">
-                        Select a daemon on the left to view its info, services and packages.
+                        Select a daemon on the left to view its info, services, packages and files.
                     </div>
                 ) : (
                     <>
@@ -242,6 +245,16 @@ function OrchestrationPage({ toast }) {
                                     pending={pending[selected.ip] ?? {}}
                                     onPending={(uri, action) => setPending((p) => ({ ...p, [selected.ip]: { ...(p[selected.ip] ?? {}), [uri]: action } }))}
                                     onRestartNow={() => confirmRestart(selected)}
+                                    disabled={actionsDisabled}
+                                />
+                            </TabPanel>
+                            <TabPanel header="Files">
+                                <FilesTab
+                                    key={selected.ip}
+                                    daemon={selected}
+                                    uploads={fileUploads.uploads[selected.ip] ?? []}
+                                    onStart={(kind, name, file) => fileUploads.start(selected.ip, kind, name, file)}
+                                    onCancel={fileUploads.cancel}
                                     disabled={actionsDisabled}
                                 />
                             </TabPanel>
