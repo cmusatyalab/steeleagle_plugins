@@ -98,6 +98,7 @@ def run_engine(name, args):
                 logger.warning("input %d: not a EncodedFrame (%s); dropping", input.id.seq, e)
                 engine.drop()
                 continue
+            logger.info("recv id=%d", encoded_frame.id)
 
             forwarded += 1
             since_last_frame_emit += 1
