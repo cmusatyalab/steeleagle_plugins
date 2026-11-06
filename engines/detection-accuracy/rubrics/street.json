@@ -1,0 +1,11 @@
+{
+  "video": "street.mp4",
+  "fps": 30,
+  "duration_seconds": 102,
+  "appearances": [
+    {"label": "mannequin", "first_frame": 1203, "last_frame": 1538},
+    {"label": "mannequin", "first_frame": 2096, "last_frame": 2424},
+    {"label": "person", "first_frame": 2437, "last_frame": 2864"}
+  ]
+}
+
