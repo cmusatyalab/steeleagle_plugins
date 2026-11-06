@@ -26,6 +26,9 @@ func checkFlow(t *testing.T, flow *config.FlowConfig, p []config.Producer, e []c
 	}
 }
 
+// one is the camera producer's token count.
+var one = 1
+
 func driverWith(cams ...config.DriverCamera) *config.DriverCap {
 	return &config.DriverCap{Cameras: cams}
 }
@@ -38,7 +41,7 @@ func TestBuildFlowLocal(t *testing.T) {
 	if noVideo != "" {
 		t.Errorf("noVideo = %q, want empty", noVideo)
 	}
-	checkFlow(t, flow, []config.Producer{{Name: "telemetry"}, {Name: "front"}}, []config.Engine{
+	checkFlow(t, flow, []config.Producer{{Name: "telemetry"}, {Name: "front", Tokens: &one}}, []config.Engine{
 		{Name: "100.64.1.5.encoder", Location: config.LocationLocal},
 		{Name: "100.64.1.5.gcs", Location: config.LocationLocal},
 	}, []config.Edge{
@@ -56,7 +59,7 @@ func TestBuildFlowRemote(t *testing.T) {
 	if noVideo != "" {
 		t.Errorf("noVideo = %q, want empty", noVideo)
 	}
-	checkFlow(t, flow, []config.Producer{{Name: "telemetry"}, {Name: "front"}}, []config.Engine{
+	checkFlow(t, flow, []config.Producer{{Name: "telemetry"}, {Name: "front", Tokens: &one}}, []config.Engine{
 		{Name: "100.64.2.9.encoder", Location: config.LocationLocal},
 		{Name: "100.64.1.5.gcs", Location: config.LocationRemote},
 	}, []config.Edge{
