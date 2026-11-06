@@ -1,11 +1,9 @@
 import atexit
-import csv
 import json
 import logging
 import os
 import subprocess
 import sys
-import time
 from concurrent import futures
 from pathlib import Path
 import signal
@@ -22,19 +20,7 @@ DEFAULT_VIDEO_PATH = "/home/particle/uriel/patchcore-pipeline/test.mp4"
 NETSIM_PROFILES = {"off", "normal", "limited", "degraded", "intermittent", "denied"}
 NETSIM_PORT = 9001
 
-FLOW_TIMESTAMPS_PATH = "/tmp/flow_timestamps.csv"
-
 _netsim_proc = None
-
-
-def _record_flow_event(event):
-    exists = os.path.exists(FLOW_TIMESTAMPS_PATH)
-    with open(FLOW_TIMESTAMPS_PATH, "a", newline="") as f:
-        w = csv.writer(f)
-        if not exists:
-            w.writerow(["event", "epoch"])
-        w.writerow([event, f"{time.time():.6f}"])
-    logger.info(f"flow {event} at {time.time():.6f}")
 
 
 def _start_netsim(profile, interface, direction, script_path):
@@ -66,12 +52,7 @@ def _stop_netsim():
         logger.info("netsim stopped")
 
 
-def _record_stop():
-    _record_flow_event("stop")
-
-
 atexit.register(_stop_netsim)
-atexit.register(_record_stop)
 
 
 def main():
@@ -97,7 +78,6 @@ def main():
     add_StreamServiceServicer_to_server(Stream(video_path, decoder), server)
     server.add_insecure_port(f"unix://{listen_address}")
     server.start()
-    _record_flow_event("start")
     logger.info("all services started")
     server.wait_for_termination()
 
