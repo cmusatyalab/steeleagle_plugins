@@ -183,7 +183,7 @@ def _encode_frame(engine, streams, input, args):
         encoded_bytes = bytes(mapinfo.data)
     finally:
         buf.unmap(mapinfo)
-
+    out_id = frame.id if args.get("pass_through_id") else number
     out = frame_proto.EncodedFrame(
         encoded_data=encoded_bytes,
         id=frame.id if args.get("pass_through") else number,
@@ -205,10 +205,12 @@ def _encode_frame(engine, streams, input, args):
     policy.emitted(input.id, keyframe)
     if args["log_frames"]:
         logger.info(
-            "frame %d of %s input %d keyframe=%s bytes=%d ms=%.2f",
+            "frame %d of %s input %d raw_id %d out_id %d keyframe=%s bytes=%d ms=%.2f",
             number,
             producer,
             input.id.seq,
+	    frame.id,
+	    out_id,
             keyframe,
             len(payload),
             (time.perf_counter() - started) * 1e3,
