@@ -71,7 +71,7 @@ def main():
         raise ValueError("no listen socket address provided!")
     Path(listen_address).unlink(missing_ok=True)
 
-    _start_netsim(netsim_profile, netsim_interface, netsim_direction)
+    _start_netsim(netsim_profile, netsim_interface, netsim_direction, netsim_script)
 
     logger.info(f"reading from {video_path}, decoding with {decoder!r}")
     server = grpc.server(thread_pool=futures.ThreadPoolExecutor(max_workers=10))
