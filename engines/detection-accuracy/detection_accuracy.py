@@ -70,7 +70,9 @@ def run_engine(name, args):
     gt_frame_count = ground_truth_frame_count(appearances)
     video_done_at = rubric["duration_seconds"] + args["emit_warmup_seconds"]
 
-    subprocess.Popen(["sh", "-c", f"sleep {int(round(video_done_at))} && echo DONE >> /tmp/detection_accuracy_deadline.log 2>&1"])
+    subprocess.Popen(["sh", "-c",
+    f"sleep {int(round(video_done_at))} && echo 'VIDEO SHOULD BE DONE (deadline reached)' >> /tmp/detection_accuracy_deadline.log 2>&1"])
+
 
     forwarded = 0
     true_positives = 0
