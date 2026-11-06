@@ -51,10 +51,11 @@ def ground_truth_frame_count(appearances):
     return sum(a["last_frame"] - a["first_frame"] + 1 for a in appearances)
 
 
-def snapshot(forwarded, true_positives, appearances, gt_frame_count):
+def snapshot(forwarded, total_bytes, true_positives, appearances, gt_frame_count):
     hits = sum(1 for a in appearances if a["hit"])
     return {
         "forwarded": forwarded,
+        "bytes_forwarded": total_bytes,
         "true_positive_frames": true_positives,
         "false_positive_frames": forwarded - true_positives,
         "precision": true_positives / forwarded if forwarded else 0.0,
@@ -83,6 +84,7 @@ def run_engine(name, args):
         f"(echo 'VIDEO SHOULD BE DONE (deadline reached):'; cat {STATS_PATH}) >> {DEADLINE_LOG_PATH} 2>&1"])
 
     forwarded = 0
+    total_bytes = 0
     true_positives = 0
     since_last_frame_emit = 0
 
@@ -101,13 +103,14 @@ def run_engine(name, args):
             logger.info("recv id=%d", encoded_frame.id)
 
             forwarded += 1
+            total_bytes += len(input.data)
             since_last_frame_emit += 1
             appearance = find_appearance(appearances, encoded_frame.id)
             if appearance is not None:
                 true_positives += 1
                 appearance["hit"] = True
 
-            stats = snapshot(forwarded, true_positives, appearances, gt_frame_count)
+            stats = snapshot(forwarded, total_bytes, true_positives, appearances, gt_frame_count)
             write_stats_file(stats)
 
             if args["emit_every_frames"] and since_last_frame_emit >= args["emit_every_frames"]:
