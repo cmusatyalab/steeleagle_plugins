@@ -3,7 +3,7 @@
   "fps": 30,
   "duration_seconds": 87,
   "appearances": [
-    {"label": "person", "first_frame": 968, "last_frame": 100},
+    {"label": "person", "first_frame": 968, "last_frame": 1004},
     {"label": "mannequin", "first_frame": 1486, "last_frame": 1932}
   ]
 }
