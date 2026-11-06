@@ -33,6 +33,12 @@ type = "string"
 description = "ingress or egress for the netsim shaping (fermi-to-lambda is egress)"
 default = "egress"
 
+[[args]]
+name = "netsim_script"
+type = "string"
+description = "Path to netsim.py, read live from wherever the steeleagle checkout lives (kept current by git, not vendored into this plugin)"
+default = "/root/steeleagle/tools/netsim/netsim.py"
+
 [driver]
 type = "copter"
 

@@ -19,12 +19,11 @@ DEFAULT_VIDEO_PATH = "/home/particle/uriel/patchcore-pipeline/test.mp4"
 
 NETSIM_PROFILES = {"off", "normal", "limited", "degraded", "intermittent", "denied"}
 NETSIM_PORT = 9001
-NETSIM_SCRIPT = str(Path(__file__).parent / "netsim.py")
 
 _netsim_proc = None
 
 
-def _start_netsim(profile, interface, direction):
+def _start_netsim(profile, interface, direction, script_path):
     global _netsim_proc
     if profile not in NETSIM_PROFILES:
         raise ValueError(f"netsim_profile must be one of {sorted(NETSIM_PROFILES)}, got {profile!r}")
@@ -32,8 +31,10 @@ def _start_netsim(profile, interface, direction):
         return
     if not interface:
         raise ValueError("netsim_interface is required when netsim_profile is not 'off'")
+    if not Path(script_path).is_file():
+        raise ValueError(f"netsim_script {script_path!r} does not exist")
     _netsim_proc = subprocess.Popen([
-        sys.executable, NETSIM_SCRIPT,
+        sys.executable, script_path,
         "-i", interface, "-p", str(NETSIM_PORT),
         "--direction", direction, "--profile", profile,
     ])
@@ -64,6 +65,7 @@ def main():
     netsim_profile = args.get("netsim_profile") or "off"
     netsim_interface = args.get("netsim_interface") or ""
     netsim_direction = args.get("netsim_direction") or "egress"
+    netsim_script = args.get("netsim_script") or "/root/steeleagle/tools/netsim/netsim.py"
     listen_address = os.getenv("STEELEAGLE_LISTEN_SOCKET")
     if not listen_address:
         raise ValueError("no listen socket address provided!")
