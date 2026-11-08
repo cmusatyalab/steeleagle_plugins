@@ -12,9 +12,10 @@ from conftest import (
     input_id,
     make_event,
 )
+from steeleagle_protocol.v1.messages.result import result_pb2
 
 from fusion import detection
-from fusion.detection import DetectionFusion, Report, Result, Wait
+from fusion.detection import DetectionFusion, Report, Result, Wait, summarize
 from fusion.engine import _report
 
 K = uriel.EventKind
@@ -36,6 +37,19 @@ def fusion(clock):
         timeout_ns=TIMEOUT_MS * 1_000_000,
         clock=clock,
     )
+
+
+def detections(*pairs):
+    """A serialized DetectionResult of the (class, score) `pairs`."""
+    return result_pb2.DetectionResult(
+        detections=[
+            result_pb2.Detection(class_name=name, score=score) for name, score in pairs
+        ]
+    ).SerializeToString()
+
+
+LOCAL_RESULT = detections(("car", 0.5), ("person", 0.75))
+REMOTE_RESULT = detections(("person", 0.875))
 
 
 def result(fusion, engine, seq, data):
@@ -233,6 +247,13 @@ def test_tracking_is_bounded_and_keeps_the_current_input(fusion, monkeypatch):
     assert decided(fusion, 0) == b"local"
 
 
+def test_summarizes_detections_highest_confidence_first():
+    assert summarize(LOCAL_RESULT) == "2 detections: person 0.75, car 0.50"
+    assert summarize(detections(("", 0.25))) == "1 detection: ? 0.25"
+    assert summarize(b"") == "0 detections"
+    assert summarize(b"\xff") == "undecodable result (1 bytes)"
+
+
 def logged(caplog):
     return [record.getMessage() for record in caplog.records]
 
@@ -240,13 +261,13 @@ def logged(caplog):
 def test_logs_a_remote_result_in_time(fusion, clock, caplog):
     caplog.set_level(logging.INFO, "fusion.detection")
     fusion.begin(input_id(1))
-    result(fusion, LOCAL, 1, b"local")
+    result(fusion, LOCAL, 1, LOCAL_RESULT)
     clock.advance_ms(50)
-    result(fusion, REMOTE, 1, b"remote")
+    result(fusion, REMOTE, 1, REMOTE_RESULT)
     fusion.decide(input_id(1))
     assert logged(caplog) == [
-        "input 1: local accepted first, waiting",
-        "input 1: remote accepted, 50.0 ms after local",
+        "input 1: local accepted first, waiting [2 detections: person 0.75, car 0.50]",
+        "input 1: remote accepted, 50.0 ms after local [1 detection: person 0.88]",
         "input 1: returning remote result (in time)",
     ]
 
@@ -256,30 +277,33 @@ def test_logs_the_local_result_when_the_grace_period_ends_and_a_late_remote(
 ):
     caplog.set_level(logging.INFO, "fusion.detection")
     fusion.begin(input_id(1))
-    result(fusion, LOCAL, 1, b"local")
+    result(fusion, LOCAL, 1, LOCAL_RESULT)
     clock.advance_ms(GRACE_MS)
     fusion.decide(input_id(1))
     fusion.end(input_id(1))
     clock.advance_ms(30)
-    result(fusion, REMOTE, 1, b"remote")
+    result(fusion, REMOTE, 1, REMOTE_RESULT)
     assert logged(caplog) == [
-        "input 1: local accepted first, waiting",
+        "input 1: local accepted first, waiting [2 detections: person 0.75, car 0.50]",
         "input 1: returning local result (grace period ended)",
-        "input 1: remote accepted too late, 30.0 ms after returning local",
+        (
+            "input 1: remote accepted too late, 30.0 ms after returning local "
+            "[1 detection: person 0.88]"
+        ),
     ]
     assert fusion.tracked == 0
 
 
 def test_logs_results_from_before_the_input_arrived_in_order(fusion, clock, caplog):
     caplog.set_level(logging.INFO, "fusion.detection")
-    result(fusion, REMOTE, 1, b"remote")
+    result(fusion, REMOTE, 1, REMOTE_RESULT)
     clock.advance_ms(5)
-    result(fusion, LOCAL, 1, b"local")
+    result(fusion, LOCAL, 1, LOCAL_RESULT)
     assert logged(caplog) == []
     fusion.begin(input_id(1))
     assert logged(caplog) == [
-        "input 1: remote accepted first, waiting",
-        "input 1: local accepted, 5.0 ms after remote",
+        "input 1: remote accepted first, waiting [1 detection: person 0.88]",
+        "input 1: local accepted, 5.0 ms after remote [2 detections: person 0.75, car 0.50]",
     ]
 
 
@@ -393,7 +417,8 @@ def test_a_result_after_the_timeout_is_logged_too_late(fusion, clock, caplog):
     fusion.decide(input_id(1))
     fusion.end(input_id(1))
     clock.advance_ms(10)
-    result(fusion, REMOTE, 1, b"remote")
+    result(fusion, REMOTE, 1, b"")
     assert logged(caplog)[-1] == (
-        "input 1: remote accepted too late, 10.0 ms after returning no result"
+        "input 1: remote accepted too late, 10.0 ms after returning no result "
+        "[0 detections]"
     )

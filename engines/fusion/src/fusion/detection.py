@@ -32,6 +32,8 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 
 import uriel
+from google.protobuf.message import DecodeError
+from steeleagle_protocol.v1.messages.result import result_pb2
 
 logger = logging.getLogger("fusion.detection")
 
@@ -43,6 +45,25 @@ MAX_TRACKED = 1024
 MAX_DECIDED = 256
 
 _FAILED = frozenset({uriel.EventKind.SKIPPED, uriel.EventKind.TIMED_OUT})
+
+
+def summarize(data):
+    """The detections in the serialized DetectionResult `data`: how many, and
+    the class and confidence of each, highest first."""
+    result = result_pb2.DetectionResult()
+    try:
+        result.ParseFromString(data)
+    except DecodeError:
+        return f"undecodable result ({len(data)} bytes)"
+    detections = sorted(result.detections, key=lambda d: d.score, reverse=True)
+    count = f"{len(detections)} detection{'' if len(detections) == 1 else 's'}"
+    if not detections:
+        return count
+    return (
+        count
+        + ": "
+        + ", ".join(f"{d.class_name or '?'} {d.score:.2f}" for d in detections)
+    )
 
 
 @dataclass(frozen=True)
@@ -137,11 +158,12 @@ class DetectionFusion:
             # It can no longer change what was reported
             if kind == uriel.EventKind.RESULT and not failed:
                 logger.info(
-                    "input %d: %s accepted too late, %.1f ms after returning %s",
+                    "input %d: %s accepted too late, %.1f ms after returning %s [%s]",
                     event.id.seq,
                     self._name(engine),
                     (self.clock() - decided.at_ns) / 1e6,
                     decided.name or "no result",
+                    summarize(event.result),
                 )
             return
         if kind == uriel.EventKind.RESULT:
@@ -185,18 +207,23 @@ class DetectionFusion:
         unlogged = [e for e in outcomes.results if e not in outcomes.logged]
         for engine in sorted(unlogged, key=lambda e: outcomes.results[e].at_ns):
             other = self.remote if engine == self.local else self.local
+            detections = summarize(outcomes.results[engine].data)
             if other in outcomes.logged:
                 after = outcomes.results[engine].at_ns - outcomes.results[other].at_ns
                 logger.info(
-                    "input %d: %s accepted, %.1f ms after %s",
+                    "input %d: %s accepted, %.1f ms after %s [%s]",
                     id.seq,
                     self._name(engine),
                     after / 1e6,
                     self._name(other),
+                    detections,
                 )
             else:
                 logger.info(
-                    "input %d: %s accepted first, waiting", id.seq, self._name(engine)
+                    "input %d: %s accepted first, waiting [%s]",
+                    id.seq,
+                    self._name(engine),
+                    detections,
                 )
             outcomes.logged.add(engine)
 
@@ -233,10 +260,14 @@ class DetectionFusion:
                 return self._report(id, local, self.local, "timed out")
             return Wait(min(deadline, self._timeout_at_ns))
         if remote is not None:
-            reason = "local failed" if self.local in outcomes.failed else "local pending"
+            reason = (
+                "local failed" if self.local in outcomes.failed else "local pending"
+            )
             return self._report(id, remote, self.remote, reason)
         if self.local in outcomes.failed and self.remote in outcomes.failed:
-            logger.info("input %d: neither engine accepted, returning no result", id.seq)
+            logger.info(
+                "input %d: neither engine accepted, returning no result", id.seq
+            )
             return self._report(id)
         if timed_out:
             logger.info(
