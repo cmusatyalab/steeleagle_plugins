@@ -1,9 +1,8 @@
-"""Tests of the conversion of decoded frames to RGB and of the scale arg."""
+"""Tests of the conversion of decoded frames to RGB."""
 import numpy as np
 import pytest
 
 from parrot_anafi.capture import to_rgb
-from parrot_anafi.stream import Stream, scale_dimensions
 
 WIDTH, HEIGHT = 8, 6
 # Limited-range BT.601 Y, U and V of a mid gray and of a saturated red
@@ -67,23 +66,3 @@ def test_rgb_frames_are_copied_without_their_padding():
 def test_other_formats_are_refused():
     with pytest.raises(ValueError):
         to_rgb(b'\0' * 1024, 'YUY2', WIDTH, HEIGHT, [0], [16])
-
-
-@pytest.mark.parametrize('scale,dimensions', [
-    ('480p', (854, 480)), ('360p', (640, 360)), ('240p', (426, 240)), ('180p', (320, 180)),
-])
-def test_scales_keep_the_aspect_ratio_with_even_dimensions(scale, dimensions):
-    assert scale_dimensions(scale) == dimensions
-    width, height = dimensions
-    assert width % 2 == 0 and height % 2 == 0
-    assert abs(width / height - 16 / 9) < 0.01
-
-
-@pytest.mark.parametrize('scale', ['', None, '720p', '1080p', 'small', '480P', ' 480p', 480, ['480p']])
-def test_a_blank_or_unknown_scale_leaves_frames_alone(scale):
-    assert scale_dimensions(scale) is None
-
-
-def test_stream_takes_its_scale():
-    assert Stream(drone=None, ip='192.0.2.1', scale='240p').scale == (426, 240)
-    assert Stream(drone=None, ip='192.0.2.1').scale is None

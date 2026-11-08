@@ -22,12 +22,6 @@ type = "string"
 description = "H.264 decoder of the video stream, in gst-launch syntax; its output must be NV12, I420 or RGB, and is converted to RGB on the CPU after it (e.g. \"qtic2vdec\" with the native environment)"
 default = "avdec_h264 max-threads=1"
 
-[[args]]
-name = "scale"
-type = "string"
-description = "What to rescale frames to before publishing them: 480p, 360p, 240p or 180p. Blank leaves them at 720p, and any other value is ignored"
-default = ""
-
 [driver]
 # Driver type: (copter, legged, wheeled, boat)
 type = "copter"

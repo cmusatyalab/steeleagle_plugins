@@ -98,10 +98,10 @@ def camera_request(uri=URI, camera=stream.CAMERA_NAME, resolution=None):
     return stream_proto.StreamCamerasRequest(primary=request)
 
 
-def streaming(uri=URI, resolution=None, scale=''):
+def streaming(uri=URI, resolution=None):
     """A Stream that the vehicle asked to stream its camera as `uri`, without
     starting its reading thread, so that a test can run it."""
-    s = Stream(drone=None, ip='192.0.2.1', scale=scale)
+    s = Stream(drone=None, ip='192.0.2.1')
     s._start_capture = lambda: None
     s.StreamCameras(camera_request(uri, resolution=resolution), FakeContext())
     return s
@@ -184,17 +184,6 @@ def test_frames_are_published_where_and_how_the_vehicle_asks(monkeypatch):
     [publisher] = FakePublisher.created
     assert publisher.uri == URI
     assert publisher.dimensions == (854, 480)
-
-
-def test_the_scale_arg_wins_over_the_resolution_asked_for(monkeypatch):
-    opening(monkeypatch, FakeCapture(reads=[FRAME]))
-    s = streaming(resolution=stream_proto.RESOLUTION_480P, scale='180p')
-
-    with pytest.raises(StopReading):
-        s._grab_frames()
-
-    [publisher] = FakePublisher.created
-    assert publisher.dimensions == (320, 180)
 
 
 class AskingCapture(FakeCapture):
