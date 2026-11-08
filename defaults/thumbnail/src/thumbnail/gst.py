@@ -1,4 +1,4 @@
-"""Shared GStreamer plumbing for the jpeg encoder and decoder: a pipeline an
+"""Shared GStreamer plumbing for the JPEG encoder and decoder: a pipeline an
 engine pushes one buffer into and pulls what it became from, matched by
 timestamp.
 """
@@ -10,15 +10,9 @@ gi.require_version("Gst", "1.0")
 gi.require_version("GstApp", "1.0")
 from gi.repository import Gst, GstApp  # noqa: E402,F401
 
-Gst.init(None)
+from thumbnail.frames import RGB_CHANNELS  # noqa: E402
 
-# RawFrame pixels are RGB, one byte per channel.
-RGB_CHANNELS = 3
-# Room in a frame for its fields besides its pixels: its ids, timestamp and
-# pose.
-FRAME_HEADROOM = 16 << 10
-# The default largest output of either engine: a 1080p RGB RawFrame.
-MAX_FRAME_SIZE = 1920 * 1080 * RGB_CHANNELS + FRAME_HEADROOM
+Gst.init(None)
 
 # Where a pipeline's timestamps start. An encoder based on GstVideoEncoder
 # shifts every timestamp by 1000 hours when a decoding timestamp would

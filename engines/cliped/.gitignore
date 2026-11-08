@@ -1,0 +1,6 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+tools/hf/
+tools/runs/
+tools/model*/

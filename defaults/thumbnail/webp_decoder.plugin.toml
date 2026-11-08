@@ -1,0 +1,21 @@
+[plugin]
+name = "WebP Decoder"
+type = "engine"
+description = "Decodes the WebP frames the WebP encoder on a vehicle sends, back into RGB frames"
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest decoded frame sent, in bytes"
+default = 6237184
+
+[[args]]
+name = "log_frames"
+type = "boolean"
+description = "Log every frame decoded"
+default = false
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]
+# No result: each frame is replaced with the RGB RawFrame it decodes to

@@ -1,0 +1,54 @@
+[project]
+name = "thumbnail"
+version = "0.2.0"
+requires-python = ">=3.14"
+dependencies = [
+    "protobuf>=7.35.1",
+    "steeleagle-protocol>=0.3.4",
+    "uriel>=0.2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/thumbnail"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+
+[tool.pixi.dependencies]
+python = "3.14.*"
+# GStreamer and its Python bindings, with the elements the JPEG pipelines
+# use: jpegenc and jpegdec (good)
+pygobject = "*"
+gstreamer = "*"
+gst-plugins-base = "*"
+gst-plugins-good = "*"
+# WebP, through libwebp
+pillow = "*"
+libwebp = "*"
+
+[tool.pixi.pypi-dependencies]
+thumbnail = { path = ".", editable = true }
+
+[tool.pixi.feature.test.dependencies]
+pytest = ">=8.4.2"
+numpy = ">=2"
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+test = { features = ["test"], solve-group = "default" }
+
+[tool.pixi.tasks]
+# Runs the plugin named by STEELEAGLE_PLUGIN (see src/thumbnail/main.py)
+start = "python -m thumbnail.main"
+
+[tool.pixi.feature.test.tasks]
+# Run with `pixi run -e test test`
+test = "pytest"

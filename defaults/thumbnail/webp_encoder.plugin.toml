@@ -1,0 +1,40 @@
+[plugin]
+name = "WebP Encoder"
+type = "engine"
+description = "Encodes frames as WebP, to send across the network to the WebP decoder on the remote daemon; suited to small images such as the tiles cliped sends"
+
+[[args]]
+name = "quality"
+type = "number"
+description = "WebP quality, 0-100 (60 is about JPEG 70 in PSNR, at about 40% fewer bytes)"
+default = 60
+
+[[args]]
+name = "method"
+type = "number"
+description = "WebP effort, 0 (fastest) to 6 (smallest)"
+default = 4
+
+[[args]]
+name = "lossless"
+type = "boolean"
+description = "Encode losslessly, ignoring quality"
+default = false
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest encoded frame sent, in bytes"
+default = 6237184
+
+[[args]]
+name = "log_frames"
+type = "boolean"
+description = "Log every frame encoded"
+default = false
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# No result: each frame is replaced with an EncodedFrame of WebP, sent as
+# CODEC_UNSPECIFIED until the protocol has a WebP codec

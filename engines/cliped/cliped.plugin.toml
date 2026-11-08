@@ -1,0 +1,103 @@
+[plugin]
+name = "CLIP Edge Filter"
+type = "engine"
+description = "Scores the tiles of each camera frame against a text prompt with MobileCLIP, and sends the remote verifier the best tiles, best first, keeping each until the verifier has it"
+
+[[args]]
+name = "prompt"
+type = "string"
+description = "What to search for, as a noun phrase, e.g. \"a red tarp\" or \"person lying down\"; required"
+default = ""
+
+[[args]]
+name = "verifier"
+type = "string"
+description = "Service name of the engine on the remote daemon that verifies tiles; a tile stays queued until its RESULT event for it shows it has the tile. Required"
+default = ""
+
+[[args]]
+name = "quantized"
+type = "boolean"
+description = "Run the INT8 image encoder (models/image_encoder_int8.tflite); false runs the FP32 one (models/distill_visual.pt) in PyTorch on the CPU"
+default = true
+
+[[args]]
+name = "tile_size"
+type = "number"
+description = "Side of the square tiles a frame is cut into, in pixels (tuned for 720p frames: put the rescale engine before this one)"
+default = 200
+
+[[args]]
+name = "stride"
+type = "number"
+description = "Distance between neighboring tiles, in pixels; below tile_size, tiles overlap"
+default = 150
+
+[[args]]
+name = "margin"
+type = "number"
+description = "How far above the adaptive threshold a tile's score must be to be sent, in standard deviations of the frame's scores"
+default = 0.25
+
+[[args]]
+name = "max_send"
+type = "number"
+description = "Most tiles of one frame queued to send"
+default = 1
+
+[[args]]
+name = "backgrounds"
+type = "array"
+description = "Background prompts a tile must look less like than the prompt"
+default = ["grass", "dirt", "rocks", "trees", "a road", "a roof"]
+
+[[args]]
+name = "k"
+type = "number"
+description = "Send budget the adaptive threshold tracks: it follows the k-th best score of each frame"
+default = 2
+
+[[args]]
+name = "ema"
+type = "number"
+description = "Weight of the adaptive threshold's old value at each frame, in [0, 1): higher moves it slower"
+default = 0.9
+
+[[args]]
+name = "max_queue"
+type = "number"
+description = "Most tiles waiting for the verifier; past it, the lowest-scored tile is dropped"
+default = 64
+
+[[args]]
+name = "resend_after_ms"
+type = "number"
+description = "Milliseconds a sent tile waits for the verifier's RESULT, with no other word, before it is sent again; keep it above the verifier's edge timeout plus its processing time"
+default = 5000
+
+[[args]]
+name = "npu"
+type = "boolean"
+description = "Run the INT8 image encoder on the HTP through QNN (libs/); false runs it on the CPU. Only with quantized"
+default = true
+
+[[args]]
+name = "threads"
+type = "number"
+description = "CPU threads for the text encoder, and for the image encoder off the HTP"
+default = 4
+
+[[args]]
+name = "log_tiles"
+type = "boolean"
+description = "Log every frame's scores, not only the frames that pick a tile"
+default = false
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# Each frame is replaced with the best queued tile, an RGB RawFrame at native
+# resolution with the id and pose of the frame it was cut from, or dropped if
+# no tile waits to be sent. Encode it (e.g. with the thumbnail plugin's WebP
+# encoder) before it crosses to the verifier.
+result = "steeleagle_protocol/v1/messages/result/DetectionResult"

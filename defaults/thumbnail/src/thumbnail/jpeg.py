@@ -17,22 +17,10 @@ import uriel
 
 import steeleagle_protocol.v1.messages.frame.frame_pb2 as frame_proto
 
-from jpeg.common import RGB_CHANNELS, Gst, Pipeline, pad_rows, unpad_rows
+from thumbnail.frames import ENCODED_FRAME_TYPE, RAW_FRAME_TYPE, RGB_CHANNELS, copy_fields
+from thumbnail.gst import Gst, Pipeline, pad_rows, unpad_rows
 
-logger = logging.getLogger("jpeg")
-
-# Uriel payload types, as named in plugin configs.
-RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
-ENCODED_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
-
-# Fields copied from a frame to what it is encoded or decoded to.
-_FRAME_FIELDS = ("timestamp", "gimbal_info", "position_info")
-
-
-def _copy_fields(src, dst):
-    for field in _FRAME_FIELDS:
-        if src.HasField(field):
-            getattr(dst, field).CopyFrom(getattr(src, field))
+logger = logging.getLogger("thumbnail.jpeg")
 
 
 class EncodeStream:
@@ -98,7 +86,7 @@ def _encode_frame(engine, streams, input, args):
         codec=frame_proto.CODEC_JPEG,
         keyframe=True,
     )
-    _copy_fields(frame, out)
+    copy_fields(frame, out)
     payload = out.SerializeToString()
     if len(payload) > args["max_output_size"]:
         logger.warning("frame %d of %s is %d bytes, over max_output_size; discarding it", number, producer, len(payload))
@@ -122,7 +110,7 @@ def _encode_frame(engine, streams, input, args):
 
 def encode(name, args):
     """Runs the encoder as the engine `name`. `args` has every arg of
-    encoder.plugin.toml."""
+    jpeg_encoder.plugin.toml."""
     streams = {}  # producer name -> EncodeStream
 
     with uriel.Engine(name, max_output_size=args["max_output_size"]) as engine:
@@ -192,7 +180,7 @@ def _decode_frame(engine, streams, input, args):
         id=number,
         camera_id=frame.camera_id,
     )
-    _copy_fields(frame, out)
+    copy_fields(frame, out)
     payload = out.SerializeToString()
     if len(payload) > args["max_output_size"]:
         logger.warning(
@@ -216,7 +204,7 @@ def _decode_frame(engine, streams, input, args):
 
 def decode(name, args):
     """Runs the decoder as the engine `name`. `args` has every arg of
-    decoder.plugin.toml."""
+    jpeg_decoder.plugin.toml."""
     streams = {}  # producer name -> DecodeStream
 
     with uriel.Engine(name, max_output_size=args["max_output_size"]) as engine:
