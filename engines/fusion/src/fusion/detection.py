@@ -25,10 +25,19 @@ The grace period starts when the engine receives the local result.
 
 An input still waiting when its timeout ends, counted from when it reaches the
 engine, is decided with what there is: the local result, or no result.
+
+Each decided input is logged on one line: the result chosen and why, then what
+each engine did with it, e.g.
+
+    input 412     chose: remote (in time)               | local: airplane (0.58)                   | remote +46 ms: robotic dog (0.79)
+
+Every SUMMARY_INTERVAL_NS of decided inputs is also summarized: what was
+chosen, what each engine did, and in how many inputs each engine reported
+each class.
 """
 
 import logging
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 
 import uriel
@@ -43,26 +52,61 @@ logger = logging.getLogger("fusion.detection")
 MAX_TRACKED = 1024
 # The most decided inputs remembered, to log the results that come too late.
 MAX_DECIDED = 256
+# How often the decided inputs are summarized
+SUMMARY_INTERVAL_NS = 30 * 1_000_000_000
+# The most classes listed per engine, and paired, in a summary
+SUMMARY_CLASSES = 8
+SUMMARY_PAIRED_CLASSES = 5
+# Widths the columns of an input's line are padded to, so they line up
+DECISION_WIDTH = 38
+LOCAL_WIDTH = 40
 
-_FAILED = frozenset({uriel.EventKind.SKIPPED, uriel.EventKind.TIMED_OUT})
+# Why an engine has no result for an input
+NO_RESULT = "no result"  # it dropped the input without one
+SKIPPED = "skipped"
+TIMED_OUT = "timed out"
+DISCONNECTED = "disconnected"
+LOST = "events lost"
+PENDING = "pending"
+# The order failures are counted in a summary; the first ones always are
+_FAILURES = (NO_RESULT, SKIPPED, TIMED_OUT, DISCONNECTED, LOST, PENDING)
+_ALWAYS_COUNTED = 3
+
+_FAILED = {
+    uriel.EventKind.SKIPPED: SKIPPED,
+    uriel.EventKind.TIMED_OUT: TIMED_OUT,
+}
 
 
-def summarize(data):
-    """The detections in the serialized DetectionResult `data`: how many, and
-    the class and confidence of each, highest first."""
+def parse(data):
+    """The (class, confidence) of each detection in the serialized
+    DetectionResult `data`, highest confidence first, or None if it does not
+    decode."""
     result = result_pb2.DetectionResult()
     try:
         result.ParseFromString(data)
     except DecodeError:
-        return f"undecodable result ({len(data)} bytes)"
+        return None
     detections = sorted(result.detections, key=lambda d: d.score, reverse=True)
-    count = f"{len(detections)} detection{'' if len(detections) == 1 else 's'}"
+    return [(d.class_name or "?", d.score) for d in detections]
+
+
+def summarize(data):
+    """The detections in the serialized DetectionResult `data`, as
+    `class (confidence)`, highest confidence first."""
+    detections = parse(data)
+    if detections is None:
+        return f"undecodable result ({len(data)} bytes)"
     if not detections:
-        return count
+        return "0 detections"
+    return ", ".join(f"{name} ({score:.2f})" for name, score in detections)
+
+
+def _failure_reason(engine_name, why):
+    """Why the result of the other engine was chosen, or none was, given that
+    `engine_name` ("local" or "remote") failed with `why`."""
     return (
-        count
-        + ": "
-        + ", ".join(f"{d.class_name or '?'} {d.score:.2f}" for d in detections)
+        f"{engine_name} had no result" if why == NO_RESULT else f"{engine_name} {why}"
     )
 
 
@@ -81,13 +125,20 @@ class Outcomes:
     pending."""
 
     results: dict = field(default_factory=dict)
-    failed: set = field(default_factory=set)
-    # The engines whose results were logged
-    logged: set = field(default_factory=set)
+    # Why each failed engine has no result
+    failed: dict = field(default_factory=dict)
 
-    def fail(self, engine):
+    def fail(self, engine, why):
         if engine not in self.results:
-            self.failed.add(engine)
+            self.failed[engine] = why
+
+    def status(self, engine):
+        """What `engine` did with the input: its detections, or why it has
+        none."""
+        result = self.results.get(engine)
+        if result is not None:
+            return summarize(result.data)
+        return self.failed.get(engine, PENDING)
 
 
 @dataclass(frozen=True)
@@ -116,8 +167,98 @@ class Decided:
     at_ns: int
 
 
+class Summary:
+    """Counts of the inputs decided since the last summary."""
+
+    def __init__(self, started_ns):
+        self.started_ns = started_ns
+        self.inputs = 0
+        self.chosen = Counter()
+        # Per engine name: results, and failures by why
+        self.outcomes = {"local": Counter(), "remote": Counter()}
+        # Per engine name: inputs it reported each class in, and inputs it
+        # reported no detections in
+        self.classes = {"local": Counter(), "remote": Counter()}
+        self.empty = Counter()
+        # Per class: inputs where both, only remote, or only local reported it
+        self.paired = {}
+
+    def add(self, chosen, classes, failures):
+        """Counts an input: the engine name `chosen` (or None), the set of
+        classes each engine name reported (absent if it had no result, None
+        if its result did not decode), and
+        why each engine name without a result had none."""
+        self.inputs += 1
+        self.chosen[chosen or "none"] += 1
+        for name, why in failures.items():
+            self.outcomes[name][why] += 1
+        for name, found in classes.items():
+            self.outcomes[name]["results"] += 1
+            if found is None:  # undecodable
+                continue
+            self.classes[name].update(found)
+            if not found:
+                self.empty[name] += 1
+        local = classes.get("local") or set()
+        remote = classes.get("remote") or set()
+        for name in local | remote:
+            both, remote_only, local_only = self.paired.get(name, (0, 0, 0))
+            self.paired[name] = (
+                both + (name in local and name in remote),
+                remote_only + (name in remote and name not in local),
+                local_only + (name in local and name not in remote),
+            )
+
+    def lines(self, now_ns):
+        seconds = (now_ns - self.started_ns) / 1e9
+        chosen = ", ".join(
+            f"{name} {self.chosen[name]}" for name in ("remote", "local", "none")
+        )
+        lines = [f"last {seconds:.0f} s: {self.inputs} inputs | chose {chosen}"]
+        for name in ("local", "remote"):
+            outcomes = self.outcomes[name]
+            counts = [f"{outcomes['results']} results"] + [
+                f"{outcomes[why]} {why}"
+                for i, why in enumerate(_FAILURES)
+                if i < _ALWAYS_COUNTED or outcomes[why]
+            ]
+            found = [
+                f"{cls} ({n})"
+                for cls, n in self.classes[name].most_common(SUMMARY_CLASSES)
+            ]
+            if len(self.classes[name]) > SUMMARY_CLASSES:
+                found.append(f"{len(self.classes[name]) - SUMMARY_CLASSES} more")
+            if self.empty[name]:
+                found.append(f"0 detections ({self.empty[name]})")
+            lines.append(
+                f"  {name + ':':<7} {', '.join(counts)}"
+                + (f" | {', '.join(found)}" if found else "")
+            )
+        if self.paired:
+            top = sorted(self.paired.items(), key=lambda item: -sum(item[1]))
+            lines.append(
+                "  inputs with class, both / remote only / local only: "
+                + ", ".join(
+                    f"{cls} {both}/{remote_only}/{local_only}"
+                    for cls, (both, remote_only, local_only) in top[
+                        :SUMMARY_PAIRED_CLASSES
+                    ]
+                )
+            )
+        return lines
+
+
 class DetectionFusion:
-    def __init__(self, *, local, remote, grace_ns, timeout_ns, clock):
+    def __init__(
+        self,
+        *,
+        local,
+        remote,
+        grace_ns,
+        timeout_ns,
+        clock,
+        summary_interval_ns=SUMMARY_INTERVAL_NS,
+    ):
         if local == remote:
             raise ValueError(f"the local and remote engines are both {local!r}")
         self.local = local
@@ -125,6 +266,8 @@ class DetectionFusion:
         self.grace_ns = grace_ns
         self.timeout_ns = timeout_ns
         self.clock = clock
+        self.summary_interval_ns = summary_interval_ns
+        self._summary = None
         self._inputs = OrderedDict()
         self._disconnected = set()
         # The input being decided, which is never forgotten for MAX_TRACKED
@@ -143,11 +286,11 @@ class DetectionFusion:
         if kind == uriel.EventKind.DISCONNECTED:
             logger.info("%s disconnected", engine)
             self._disconnected.add(engine)
-            self._fail_all(engine)
+            self._fail_all(engine, DISCONNECTED)
             return
         if kind == uriel.EventKind.LOST:
             logger.warning("%d events of %s were lost", event.lost, engine)
-            self._fail_all(engine)
+            self._fail_all(engine, LOST)
             return
         if engine in self._disconnected:
             logger.info("%s is reachable again", engine)
@@ -168,16 +311,15 @@ class DetectionFusion:
             return
         if kind == uriel.EventKind.RESULT:
             if failed:
-                self._outcomes(event.id).fail(engine)
+                self._outcomes(event.id).fail(engine, NO_RESULT)
             else:
                 outcomes = self._outcomes(event.id)
-                outcomes.failed.discard(engine)
+                outcomes.failed.pop(engine, None)
                 outcomes.results[engine] = Result(
                     event.result, event.payload_type, self.clock()
                 )
-                self._log_accepted(event.id, outcomes)
         elif kind in _FAILED:
-            self._outcomes(event.id).fail(engine)
+            self._outcomes(event.id).fail(engine, _FAILED[kind])
 
     def _outcomes(self, id):
         outcomes = self._inputs.get(id)
@@ -191,41 +333,12 @@ class DetectionFusion:
                     del self._inputs[oldest]
         return outcomes
 
-    def _fail_all(self, engine):
+    def _fail_all(self, engine, why):
         for outcomes in self._inputs.values():
-            outcomes.fail(engine)
+            outcomes.fail(engine, why)
 
     def _name(self, engine):
         return "local" if engine == self.local else "remote"
-
-    def _log_accepted(self, id, outcomes):
-        """Logs the results of the input being decided that are not logged
-        yet. An engine also finishes inputs that never reach this engine,
-        which are not logged."""
-        if id != self._current:
-            return
-        unlogged = [e for e in outcomes.results if e not in outcomes.logged]
-        for engine in sorted(unlogged, key=lambda e: outcomes.results[e].at_ns):
-            other = self.remote if engine == self.local else self.local
-            detections = summarize(outcomes.results[engine].data)
-            if other in outcomes.logged:
-                after = outcomes.results[engine].at_ns - outcomes.results[other].at_ns
-                logger.info(
-                    "input %d: %s accepted, %.1f ms after %s [%s]",
-                    id.seq,
-                    self._name(engine),
-                    after / 1e6,
-                    self._name(other),
-                    detections,
-                )
-            else:
-                logger.info(
-                    "input %d: %s accepted first, waiting [%s]",
-                    id.seq,
-                    self._name(engine),
-                    detections,
-                )
-            outcomes.logged.add(engine)
 
     # Inputs
 
@@ -236,8 +349,7 @@ class DetectionFusion:
         self._timeout_at_ns = self.clock() + self.timeout_ns
         outcomes = self._outcomes(id)
         for engine in self._disconnected:
-            outcomes.fail(engine)
-        self._log_accepted(id, outcomes)
+            outcomes.fail(engine, DISCONNECTED)
 
     def decide(self, id):
         """What to do with the input `id` now: a Wait or a Report."""
@@ -249,50 +361,79 @@ class DetectionFusion:
         if local is not None:
             deadline = local.at_ns + self.grace_ns
             if remote is not None and remote.at_ns <= deadline:
-                return self._report(id, remote, self.remote, "in time")
+                return self._report(id, outcomes, self.remote, "in time")
             if remote is not None:
-                return self._report(id, local, self.local, "remote was late")
+                return self._report(id, outcomes, self.local, "remote was late")
             if self.remote in outcomes.failed:
-                return self._report(id, local, self.local, "remote failed")
+                reason = _failure_reason("remote", outcomes.failed[self.remote])
+                return self._report(id, outcomes, self.local, reason)
             if now >= deadline:
-                return self._report(id, local, self.local, "grace period ended")
+                return self._report(id, outcomes, self.local, "grace period ended")
             if timed_out:
-                return self._report(id, local, self.local, "timed out")
+                return self._report(id, outcomes, self.local, "timed out")
             return Wait(min(deadline, self._timeout_at_ns))
         if remote is not None:
-            reason = (
-                "local failed" if self.local in outcomes.failed else "local pending"
-            )
-            return self._report(id, remote, self.remote, reason)
+            reason = _failure_reason("local", outcomes.failed.get(self.local, PENDING))
+            return self._report(id, outcomes, self.remote, reason)
         if self.local in outcomes.failed and self.remote in outcomes.failed:
-            logger.info(
-                "input %d: neither engine accepted, returning no result", id.seq
-            )
-            return self._report(id)
+            return self._report(id, outcomes, None, "neither engine accepted")
         if timed_out:
-            logger.info(
-                "input %d: timed out after %d ms, returning no result (%s)",
-                id.seq,
-                self.timeout_ns // 1_000_000,
-                ", ".join(
-                    f"{self._name(e)} {'failed' if e in outcomes.failed else 'pending'}"
-                    for e in (self.local, self.remote)
-                ),
-            )
-            return self._report(id)
+            reason = f"timed out after {self.timeout_ns // 1_000_000} ms"
+            return self._report(id, outcomes, None, reason)
         return Wait(self._timeout_at_ns)
 
-    def _report(self, id, result=None, source=None, reason=None):
-        """The Report of the input `id`, which is logged and remembered."""
-        name = None
-        if source is not None:
-            name = self._name(source)
-            logger.info("input %d: returning %s result (%s)", id.seq, name, reason)
+    def _report(self, id, outcomes, source, reason):
+        """The Report of the input `id`, with the result of the engine
+        `source` (None for no result), which is logged and remembered."""
+        name = None if source is None else self._name(source)
+        self._log_decided(id, outcomes, name, reason)
+        self._count(outcomes, name)
         self._decided[id] = Decided(name, self.clock())
         self._decided.move_to_end(id)
         while len(self._decided) > MAX_DECIDED:
             self._decided.popitem(last=False)
-        return Report(result, source)
+        if source is None:
+            return Report()
+        return Report(outcomes.results[source], source)
+
+    def _log_decided(self, id, outcomes, name, reason):
+        local = outcomes.results.get(self.local)
+        remote = outcomes.results.get(self.remote)
+        timing = ""
+        if local is not None and remote is not None:
+            timing = f" {(remote.at_ns - local.at_ns) / 1e6:+.0f} ms"
+        chose = f"chose: {name or 'none'} ({reason})"
+        logger.info(
+            "input %-7d %s| %s | remote%s: %s",
+            id.seq,
+            chose.ljust(DECISION_WIDTH),
+            f"local: {outcomes.status(self.local)}".ljust(LOCAL_WIDTH),
+            timing,
+            outcomes.status(self.remote),
+        )
+
+    def _count(self, outcomes, chosen):
+        """Counts the decided input in the summary, and logs the summary if
+        it is due."""
+        now = self.clock()
+        if self._summary is None:
+            self._summary = Summary(now)
+        classes, failures = {}, {}
+        for engine in (self.local, self.remote):
+            name = self._name(engine)
+            result = outcomes.results.get(engine)
+            if result is None:
+                failures[name] = outcomes.failed.get(engine, PENDING)
+            else:
+                detections = parse(result.data)
+                classes[name] = (
+                    None if detections is None else {cls for cls, _ in detections}
+                )
+        self._summary.add(chosen, classes, failures)
+        if now - self._summary.started_ns >= self.summary_interval_ns:
+            for line in self._summary.lines(now):
+                logger.info("%s", line)
+            self._summary = Summary(now)
 
     def end(self, id):
         """Forgets the input `id`, and every earlier input of its producer's

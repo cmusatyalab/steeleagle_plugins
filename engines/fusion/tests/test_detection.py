@@ -248,8 +248,8 @@ def test_tracking_is_bounded_and_keeps_the_current_input(fusion, monkeypatch):
 
 
 def test_summarizes_detections_highest_confidence_first():
-    assert summarize(LOCAL_RESULT) == "2 detections: person 0.75, car 0.50"
-    assert summarize(detections(("", 0.25))) == "1 detection: ? 0.25"
+    assert summarize(LOCAL_RESULT) == "person (0.75), car (0.50)"
+    assert summarize(detections(("", 0.25))) == "? (0.25)"
     assert summarize(b"") == "0 detections"
     assert summarize(b"\xff") == "undecodable result (1 bytes)"
 
@@ -258,17 +258,18 @@ def logged(caplog):
     return [record.getMessage() for record in caplog.records]
 
 
-def test_logs_a_remote_result_in_time(fusion, clock, caplog):
+def test_logs_a_remote_result_in_time_on_one_line(fusion, clock, caplog):
     caplog.set_level(logging.INFO, "fusion.detection")
     fusion.begin(input_id(1))
     result(fusion, LOCAL, 1, LOCAL_RESULT)
     clock.advance_ms(50)
     result(fusion, REMOTE, 1, REMOTE_RESULT)
+    assert logged(caplog) == []
     fusion.decide(input_id(1))
     assert logged(caplog) == [
-        "input 1: local accepted first, waiting [2 detections: person 0.75, car 0.50]",
-        "input 1: remote accepted, 50.0 ms after local [1 detection: person 0.88]",
-        "input 1: returning remote result (in time)",
+        "input 1       chose: remote (in time)               "
+        "| local: person (0.75), car (0.50)         "
+        "| remote +50 ms: person (0.88)"
     ]
 
 
@@ -284,27 +285,25 @@ def test_logs_the_local_result_when_the_grace_period_ends_and_a_late_remote(
     clock.advance_ms(30)
     result(fusion, REMOTE, 1, REMOTE_RESULT)
     assert logged(caplog) == [
-        "input 1: local accepted first, waiting [2 detections: person 0.75, car 0.50]",
-        "input 1: returning local result (grace period ended)",
-        (
-            "input 1: remote accepted too late, 30.0 ms after returning local "
-            "[1 detection: person 0.88]"
-        ),
+        "input 1       chose: local (grace period ended)     "
+        "| local: person (0.75), car (0.50)         "
+        "| remote: pending",
+        "input 1: remote accepted too late, 30.0 ms after returning local "
+        "[person (0.88)]",
     ]
     assert fusion.tracked == 0
 
 
-def test_logs_results_from_before_the_input_arrived_in_order(fusion, clock, caplog):
+def test_logs_a_remote_result_that_came_first_with_a_negative_time(
+    fusion, clock, caplog
+):
     caplog.set_level(logging.INFO, "fusion.detection")
     result(fusion, REMOTE, 1, REMOTE_RESULT)
     clock.advance_ms(5)
     result(fusion, LOCAL, 1, LOCAL_RESULT)
-    assert logged(caplog) == []
     fusion.begin(input_id(1))
-    assert logged(caplog) == [
-        "input 1: remote accepted first, waiting [1 detection: person 0.88]",
-        "input 1: local accepted, 5.0 ms after remote [2 detections: person 0.75, car 0.50]",
-    ]
+    fusion.decide(input_id(1))
+    assert logged(caplog)[0].endswith("| remote -5 ms: person (0.88)")
 
 
 def test_logs_no_result_if_neither_engine_accepts(fusion, caplog):
@@ -313,7 +312,118 @@ def test_logs_no_result_if_neither_engine_accepts(fusion, caplog):
     fusion.on_event(make_event(K.TIMED_OUT, LOCAL, 1))
     fusion.on_event(make_event(K.SKIPPED, REMOTE, 1))
     fusion.decide(input_id(1))
-    assert logged(caplog) == ["input 1: neither engine accepted, returning no result"]
+    assert logged(caplog) == [
+        "input 1       chose: none (neither engine accepted) "
+        "| local: timed out                         "
+        "| remote: skipped"
+    ]
+
+
+@pytest.mark.parametrize(
+    "event, reason, status",
+    [
+        (
+            make_event(K.RESULT, LOCAL, 1, outcome=uriel.Outcome.DROP),
+            "local had no result",
+            "no result",
+        ),
+        (make_event(K.SKIPPED, LOCAL, 1), "local skipped", "skipped"),
+        (make_event(K.TIMED_OUT, LOCAL, 1), "local timed out", "timed out"),
+        (make_event(K.DISCONNECTED, LOCAL), "local disconnected", "disconnected"),
+        (make_event(K.LOST, LOCAL), "local events lost", "events lost"),
+        (None, "local pending", "pending"),
+    ],
+    ids=["no_result", "skipped", "timed_out", "disconnected", "lost", "pending"],
+)
+def test_logs_why_local_has_no_result(fusion, caplog, event, reason, status):
+    caplog.set_level(logging.INFO, "fusion.detection")
+    fusion.begin(input_id(1))
+    if event is not None:
+        fusion.on_event(event)
+    caplog.clear()
+    result(fusion, REMOTE, 1, REMOTE_RESULT)
+    fusion.decide(input_id(1))
+    [line] = logged(caplog)
+    assert f"chose: remote ({reason})" in line
+    assert f"| local: {status} " in line
+    assert line.endswith("| remote: person (0.88)")
+
+
+def test_logs_why_remote_has_no_result(fusion, caplog):
+    caplog.set_level(logging.INFO, "fusion.detection")
+    fusion.begin(input_id(1))
+    result(fusion, LOCAL, 1, LOCAL_RESULT)
+    fusion.on_event(make_event(K.RESULT, REMOTE, 1, outcome=uriel.Outcome.DROP))
+    fusion.decide(input_id(1))
+    [line] = logged(caplog)
+    assert "chose: local (remote had no result)" in line
+    assert line.endswith("| remote: no result")
+
+
+def test_a_long_local_column_pushes_only_its_own_line(fusion, caplog):
+    caplog.set_level(logging.INFO, "fusion.detection")
+    fusion.begin(input_id(1))
+    result(fusion, LOCAL, 1, detections(*[("dining table", 0.5)] * 4))
+    result(fusion, REMOTE, 1, b"")
+    fusion.decide(input_id(1))
+    [line] = logged(caplog)
+    assert "| local: " + ", ".join(["dining table (0.50)"] * 4) + " | remote" in line
+
+
+def test_summarizes_the_inputs_of_each_interval(clock, caplog):
+    caplog.set_level(logging.INFO, "fusion.detection")
+    fusion = DetectionFusion(
+        local=LOCAL,
+        remote=REMOTE,
+        grace_ns=GRACE_MS * 1_000_000,
+        timeout_ns=TIMEOUT_MS * 1_000_000,
+        clock=clock,
+        summary_interval_ns=30 * 1_000_000_000,
+    )
+    dog = detections(("robotic dog", 0.8))
+
+    def run(seq, local=None, remote=None, local_event=None, remote_event=None):
+        fusion.begin(input_id(seq))
+        for engine, data, event in (
+            (LOCAL, local, local_event),
+            (REMOTE, remote, remote_event),
+        ):
+            if data is not None:
+                result(fusion, engine, seq, data)
+            if event is not None:
+                fusion.on_event(event)
+        assert not isinstance(fusion.decide(input_id(seq)), Wait)
+        fusion.end(input_id(seq))
+        clock.advance_ms(10_000)
+
+    # remote dog, local airplane; remote dog, local nothing; both dog
+    run(1, local=detections(("airplane", 0.6)), remote=dog)
+    run(
+        2,
+        remote=dog,
+        local_event=make_event(K.RESULT, LOCAL, 2, outcome=uriel.Outcome.DROP),
+    )
+    run(3, local=dog, remote=dog)
+    assert not any(m.startswith("last ") for m in logged(caplog))
+    # 30 s after the first input: remote empty, local skipped
+    run(4, remote=b"", local_event=make_event(K.SKIPPED, LOCAL, 4))
+    assert logged(caplog)[-4:] == [
+        "last 30 s: 4 inputs | chose remote 4, local 0, none 0",
+        "  local:  2 results, 1 no result, 1 skipped, 0 timed out "
+        "| airplane (1), robotic dog (1)",
+        "  remote: 4 results, 0 no result, 0 skipped, 0 timed out "
+        "| robotic dog (3), 0 detections (1)",
+        "  inputs with class, both / remote only / local only: "
+        "robotic dog 1/2/0, airplane 0/0/1",
+    ]
+    # The next summary starts afresh
+    caplog.clear()
+    run(5, remote=dog, local_event=make_event(K.TIMED_OUT, LOCAL, 5))
+    run(6, remote=dog, local_event=make_event(K.TIMED_OUT, LOCAL, 6))
+    run(7, remote=dog, local_event=make_event(K.TIMED_OUT, LOCAL, 7))
+    assert logged(caplog)[-3] == (
+        "  local:  0 results, 0 no result, 0 skipped, 3 timed out"
+    )
 
 
 def test_logs_nothing_for_inputs_that_never_arrive(fusion, caplog):
@@ -366,7 +476,9 @@ def test_no_result_when_nothing_is_heard_by_the_timeout(fusion, clock, caplog):
     clock.advance_ms(1)
     assert decided(fusion, 1) == b"<drop>"
     assert logged(caplog) == [
-        "input 1: timed out after 1000 ms, returning no result (local pending, remote pending)"
+        "input 1       chose: none (timed out after 1000 ms) "
+        "| local: pending                           "
+        "| remote: pending"
     ]
 
 
@@ -378,7 +490,8 @@ def test_a_skipped_local_and_a_silent_remote_do_not_hold_up_the_next_input(
     fusion.on_event(make_event(K.SKIPPED, LOCAL, 1))
     clock.advance_ms(TIMEOUT_MS)
     assert decided(fusion, 1) == b"<drop>"
-    assert "(local failed, remote pending)" in logged(caplog)[0]
+    assert "| local: skipped                           " in logged(caplog)[0]
+    assert logged(caplog)[0].endswith("| remote: pending")
     fusion.end(input_id(1))
 
     fusion.begin(input_id(2))
@@ -407,7 +520,7 @@ def test_timeout_shortens_the_grace_period(clock, caplog):
     assert fusion.decide(input_id(1)) == Wait(clock.ns + 200 * 1_000_000)
     clock.advance_ms(200)
     assert decided(fusion, 1) == b"local"
-    assert logged(caplog)[-1] == "input 1: returning local result (timed out)"
+    assert "chose: local (timed out)" in logged(caplog)[-1]
 
 
 def test_a_result_after_the_timeout_is_logged_too_late(fusion, clock, caplog):

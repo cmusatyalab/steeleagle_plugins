@@ -30,7 +30,14 @@ An input still waiting when `timeout` ends, counted from when it reaches the fus
 
 The local and remote engines must get the same inputs as the fusion engine (e.g. all three on edges from the same producer); the fusion engine waits on an input until it hears from them or it times out, and Uriel reports every offer it makes (a result, `SKIPPED`, `TIMED_OUT` or `DISCONNECTED`), but an input that is never offered to one of them holds up the engine until `timeout` ends.
 
-Each decided input is logged at `INFO`: which engine accepted first (returned a result), when the other accepted, and which result was returned and why, or that neither accepted. A result that arrives after its input was decided is logged as too late. Inputs that never reach the fusion engine are not logged.
+Each decided input is logged at `INFO` on one line: the result chosen (`local`, `remote` or `none`) and why, then each engine's detections as `class (confidence)`, or why it has none (`no result` when it dropped the input without one, as detection-qnn does when it detects nothing; `skipped`, `timed out`, `disconnected`, `events lost` or `pending`). When both engines returned results, the remote column shows when its result arrived relative to local's (`+46 ms` after, `-12 ms` before):
+
+```
+input 412     chose: remote (in time)               | local: airplane (0.58)                   | remote +46 ms: robotic dog (0.79)
+input 415     chose: remote (local had no result)   | local: no result                         | remote: robotic dog (0.73)
+```
+
+Every 30 s of decided inputs is summarized: what was chosen, what each engine did, the classes each engine reported (in how many inputs), and for the most common classes in how many inputs both engines, only remote, or only local reported them. A result that arrives after its input was decided is logged as too late. Inputs that never reach the fusion engine are not logged.
 
 ## Development
 
