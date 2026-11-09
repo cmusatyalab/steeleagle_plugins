@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
-import { defaultFeatureName, featuresToGeoJson, featuresToKml, parseImportFile, bboxFromFeature, vehicleColor, vehicleSpeed, hasTelemetry, isVehicleDisconnected, isVehicleSelectable, vehicleStatus, vehicleStatusColor, vehicleStatusRailFill, vehicleStatusMapColor, vehicleStatusTextColor, sortVehiclesForDisplay } from './mapUtils.js';
+import { defaultFeatureName, featuresToGeoJson, featuresToKml, parseImportFile, bboxFromFeature, vehicleColor, vehicleSpeed, hasTelemetry, isVehicleDisconnected, isVehicleSelectable, vehicleStatus, vehicleStatusColor, vehicleStatusRailFill, vehicleStatusMapColor, vehicleStatusTextColor, sortVehiclesForDisplay, vehicleTracksGeoJSON, vehicleTrackLabelsGeoJSON, TRACK_ELEVATION_SAMPLES } from './mapUtils.js';
 
 const SAMPLE_FC = {
     type: 'FeatureCollection',
@@ -319,5 +319,82 @@ describe('defaultFeatureName', () => {
 
     it('ignores unnamed features when checking for collisions', () => {
         expect(defaultFeatureName('Polygon', [{ geometry: { type: 'Polygon' }, properties: {} }])).toBe('Polygon_2');
+    });
+});
+
+describe('vehicleTracksGeoJSON', () => {
+    const v = (name, track, extra = {}) => ({
+        name, last_updated: 0, reachable: true,
+        current: { lat: 40.3, long: -79.7, alt: 10 }, track, ...extra,
+    });
+
+    it('draws each track to the vehicle\'s current position', () => {
+        const fc = vehicleTracksGeoJSON([v('d1', [[-79.9, 40.1, 0], [-79.8, 40.2, 5]])], []);
+        expect(fc.type).toBe('FeatureCollection');
+        expect(fc.features).toHaveLength(1);
+        expect(fc.features[0].geometry).toEqual({
+            type: 'LineString',
+            coordinates: [[-79.9, 40.1, 0], [-79.8, 40.2, 5], [-79.7, 40.3, 10]],
+        });
+        expect(fc.features[0].properties.name).toBe('d1');
+        expect(fc.features[0].properties.status).toBe('online');
+    });
+
+    it('carries the vehicle status for coloring', () => {
+        const fc = vehicleTracksGeoJSON([
+            v('d1', [[-79.9, 40.1, 0]]),
+            v('d2', [[-79.9, 40.1, 0]], { last_updated: 1e6, reachable: false }),
+        ], ['d1']);
+        expect(fc.features.map(f => f.properties.status)).toEqual(['selected', 'offline']);
+    });
+
+    it('skips vehicles without a track', () => {
+        const fc = vehicleTracksGeoJSON([v('d1', undefined), v('d2', [])], []);
+        expect(fc.features).toEqual([]);
+    });
+
+    it('does not repeat the current position when it ends the track', () => {
+        const fc = vehicleTracksGeoJSON([v('d1', [[-79.9, 40.1, 0], [-79.7, 40.3, 10]])], []);
+        expect(fc.features[0].geometry.coordinates).toEqual([[-79.9, 40.1, 0], [-79.7, 40.3, 10]]);
+    });
+
+    it('samples the altitude evenly along the line, for line-z-offset', () => {
+        // Along a meridian: the first leg is three times the second
+        const track = [[-79.7, 40.0, 0], [-79.7, 40.3, 30]];
+        const fc = vehicleTracksGeoJSON([v('d1', track, { current: { lat: 40.4, long: -79.7, alt: 40 } })], []);
+        const elevation = fc.features[0].properties.elevation;
+        expect(elevation).toHaveLength(TRACK_ELEVATION_SAMPLES);
+        expect(elevation[0]).toBeCloseTo(0);
+        expect(elevation[TRACK_ELEVATION_SAMPLES - 1]).toBeCloseTo(40);
+        // Three quarters along is the end of the first leg; the nearest
+        // sample is within a sample's spacing of it
+        const i = Math.round((TRACK_ELEVATION_SAMPLES - 1) * 0.75);
+        expect(elevation[i]).toBeCloseTo(30, 0);
+    });
+});
+
+describe('vehicleTrackLabelsGeoJSON', () => {
+    // 0.001 degrees of latitude is ~111 m
+    const v = (name, track, extra = {}) => ({
+        name, last_updated: 0, reachable: true,
+        current: { lat: 40.002, long: -79.7, alt: 20 }, track, ...extra,
+    });
+
+    it('labels the track every so many meters back from the vehicle', () => {
+        const fc = vehicleTrackLabelsGeoJSON([v('100.64.0.1.alpha', [[-79.7, 40.0, 0]])], [], 50);
+        // ~222 m of track: labels at 50, 100, 150, 200 m back
+        expect(fc.features).toHaveLength(4);
+        const f = fc.features[0];
+        expect(f.geometry.type).toBe('Point');
+        expect(f.geometry.coordinates[0]).toBeCloseTo(-79.7);
+        expect(f.geometry.coordinates[1]).toBeCloseTo(40.002 - 50 / 111195, 6);
+        expect(f.properties).toMatchObject({ label: 'alpha', status: 'online' });
+        // Altitude interpolated along the leg, 50 m of ~222 m back from 20
+        expect(f.properties.alt).toBeCloseTo(20 * (1 - 50 / 222.4), 0);
+    });
+
+    it('labels nothing on a track shorter than the spacing', () => {
+        const fc = vehicleTrackLabelsGeoJSON([v('d1', [[-79.7, 40.0019, 0]])], [], 50);
+        expect(fc.features).toEqual([]);
     });
 });
