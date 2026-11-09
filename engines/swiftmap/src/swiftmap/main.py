@@ -12,10 +12,14 @@ import signal
 import sys
 import threading
 
+from swiftmap import early_discard, engine
 from swiftmap.client import DEFAULT_PORT, SwiftMapClient
-from swiftmap.engine import SwiftMap, run
+from swiftmap.early_discard import KeyframeFilter
+from swiftmap.engine import SwiftMap
+from swiftmap.keyframe import DEFAULT_MIN_DISPARITY
 
 SWIFTMAP_PLUGIN = "swiftmap.plugin.toml"
+KEYFRAME_PLUGIN = "keyframe.plugin.toml"
 
 # Defaults of the args of each plugin, matching its plugin.toml. The daemon
 # passes only the args set in its config, so any arg left unset is defaulted
@@ -24,13 +28,17 @@ DEFAULTS = {
     SWIFTMAP_PLUGIN: {
         "server": "localhost",
         "server_port": DEFAULT_PORT,
-        "send_distance": 5.0,
         "jpeg_quality": 95,
         "max_output_size": 1 << 20,
+    },
+    KEYFRAME_PLUGIN: {
+        "min_disparity": DEFAULT_MIN_DISPARITY,
+        "send_distance": 5.0,
     },
 }
 REQUIRED = {
     SWIFTMAP_PLUGIN: ("server",),
+    KEYFRAME_PLUGIN: (),
 }
 
 
@@ -50,14 +58,18 @@ def parse_args(plugin, content):
     for name in REQUIRED[plugin]:
         if not str(args[name]).strip():
             raise ConfigError(f"the {name!r} arg must be set")
-    args["max_output_size"] = int(args["max_output_size"])
-    if args["max_output_size"] <= 0:
-        raise ConfigError("max_output_size must be positive")
-    if plugin == SWIFTMAP_PLUGIN:
-        args["server_port"] = int(args["server_port"])
+    if plugin == KEYFRAME_PLUGIN:
+        args["min_disparity"] = float(args["min_disparity"])
+        if args["min_disparity"] < 0:
+            raise ConfigError("min_disparity must not be negative")
         args["send_distance"] = float(args["send_distance"])
         if args["send_distance"] < 0:
             raise ConfigError("send_distance must not be negative")
+    if plugin == SWIFTMAP_PLUGIN:
+        args["max_output_size"] = int(args["max_output_size"])
+        if args["max_output_size"] <= 0:
+            raise ConfigError("max_output_size must be positive")
+        args["server_port"] = int(args["server_port"])
         args["jpeg_quality"] = int(args["jpeg_quality"])
         if not 1 <= args["jpeg_quality"] <= 100:
             raise ConfigError("jpeg_quality must be from 1 to 100")
@@ -83,6 +95,12 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
 
+    if plugin == KEYFRAME_PLUGIN:
+        keyframes = KeyframeFilter(
+            min_disparity=args["min_disparity"], send_distance=args["send_distance"]
+        )
+        early_discard.run(name, keyframes, stop=stop)
+        return
     client = SwiftMapClient(args["server"], args["server_port"])
     # The engine comes up without the server, and connects on the first frame
     # it sends
@@ -91,10 +109,8 @@ def main():
             "SwiftMap server at %s:%s is not reachable yet; connecting on the first frame",
             args["server"], args["server_port"],
         )
-    swiftmap = SwiftMap(
-        client, send_distance=args["send_distance"], jpeg_quality=args["jpeg_quality"]
-    )
-    run(name, swiftmap, max_output_size=args["max_output_size"], stop=stop)
+    swiftmap = SwiftMap(client, jpeg_quality=args["jpeg_quality"])
+    engine.run(name, swiftmap, max_output_size=args["max_output_size"], stop=stop)
 
 
 if __name__ == "__main__":

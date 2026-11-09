@@ -1,5 +1,6 @@
 """Tests of the swiftmap engine against a stand-in SwiftMap server."""
 
+import math
 import socket
 import struct
 import threading
@@ -13,7 +14,7 @@ from steeleagle_protocol.v1.common import common_pb2
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from steeleagle_protocol.v1.messages.telemetry import telemetry_pb2
 from swiftmap.client import GPS_FMT, PAYLOAD_LEN_FMT, REPLY_FMT, SIZE_FMT, SwiftMapClient
-from swiftmap.engine import ENCODED_FRAME_TYPE, RAW_FRAME_TYPE, SwiftMap, haversine_m
+from swiftmap.engine import ENCODED_FRAME_TYPE, RAW_FRAME_TYPE, SwiftMap
 from swiftmap.main import SWIFTMAP_PLUGIN, ConfigError, parse_args
 
 KML = b"<kml>next flight</kml>"
@@ -107,10 +108,8 @@ def server():
     s.close()
 
 
-def swiftmap(server, send_distance=5.0):
-    return SwiftMap(
-        SwiftMapClient("127.0.0.1", server.port), send_distance=send_distance, jpeg_quality=90
-    )
+def swiftmap(server):
+    return SwiftMap(SwiftMapClient("127.0.0.1", server.port), jpeg_quality=90)
 
 
 def test_raw_frames_go_to_the_server_as_jpegs_with_their_gps(server):
@@ -138,19 +137,18 @@ def test_a_planned_area_is_the_result(server):
     assert swiftmap(server).on_input(raw_input(1, (40.0, -79.0))) == KML
 
 
-def test_frames_closer_than_send_distance_are_held_back(server):
-    engine = swiftmap(server, send_distance=5.0)
-    # ~1.1 m and ~11 m north of the first frame
-    for seq, lat in enumerate((40.0, 40.00001, 40.0001), start=1):
-        engine.on_input(raw_input(seq, (lat, -79.0)))
-    assert [gps[0] for _, gps in server.received] == [40.0, 40.0001]
+def test_every_frame_is_sent_however_close_together(server):
+    # Choosing frames is the keyframe engine's job, in front of this one
+    engine = swiftmap(server)
+    for seq in (1, 2):
+        engine.on_input(raw_input(seq, (40.0, -79.0)))
+    assert len(server.received) == 2
 
 
-def test_frames_without_a_fix_are_held_back_unless_send_distance_is_0(server):
-    swiftmap(server, send_distance=5.0).on_input(raw_input(1))
-    assert server.received == []
-    swiftmap(server, send_distance=0).on_input(raw_input(2))
-    assert len(server.received) == 1
+def test_a_frame_without_a_fix_is_sent_with_a_nan_one(server):
+    swiftmap(server).on_input(raw_input(1))
+    [(_, gps)] = server.received
+    assert all(math.isnan(v) for v in gps)
 
 
 def test_the_engine_reconnects_when_the_server_drops_the_connection(server):
@@ -161,23 +159,18 @@ def test_the_engine_reconnects_when_the_server_drops_the_connection(server):
     assert len(server.received) == 2
 
 
-def test_an_unreachable_server_gives_no_result_and_does_not_advance_the_gate():
+def test_an_unreachable_server_gives_no_result():
     listener = socket.create_server(("127.0.0.1", 0))
     port = listener.getsockname()[1]
     listener.close()
-    engine = SwiftMap(SwiftMapClient("127.0.0.1", port), send_distance=5.0, jpeg_quality=90)
+    engine = SwiftMap(SwiftMapClient("127.0.0.1", port), jpeg_quality=90)
     assert engine.on_input(raw_input(1, (40.0, -79.0))) == b""
-    assert engine.last_sent_gps is None
-
-
-def test_haversine():
-    assert haversine_m((40.0, -79.0), (40.0, -79.0)) == 0
-    assert haversine_m((40.0, -79.0), (40.0001, -79.0)) == pytest.approx(11.12, abs=0.01)
+    assert engine.sent == 0
 
 
 def test_args_are_defaulted_and_checked():
     args = parse_args(SWIFTMAP_PLUGIN, '{"server": "mapper"}')
-    assert (args["server"], args["server_port"], args["send_distance"]) == ("mapper", 43322, 5.0)
+    assert (args["server"], args["server_port"], args["jpeg_quality"]) == ("mapper", 43322, 95)
     with pytest.raises(ConfigError):
         parse_args(SWIFTMAP_PLUGIN, '{"server": ""}')
     with pytest.raises(ConfigError):
