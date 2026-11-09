@@ -1,0 +1,46 @@
+[project]
+name = "swiftmap"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "numpy>=2",
+    "opencv-python-headless>=5.0.0.93",
+    "protobuf>=7.35.1",
+    "steeleagle-protocol>=0.3.4",
+    "uriel>=0.2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/swiftmap"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+
+[tool.pixi.dependencies]
+python = "3.14.*"
+
+[tool.pixi.pypi-dependencies]
+swiftmap = { path = ".", editable = true }
+
+[tool.pixi.feature.test.dependencies]
+pytest = ">=8.4.2"
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+test = { features = ["test"], solve-group = "default" }
+
+[tool.pixi.tasks]
+# Runs the plugin named by STEELEAGLE_PLUGIN (see src/swiftmap/main.py)
+start = "python -m swiftmap.main"
+
+[tool.pixi.feature.test.tasks]
+# Run with `pixi run -e test test`
+test = "pytest"

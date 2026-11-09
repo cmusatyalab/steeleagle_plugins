@@ -1,0 +1,45 @@
+[plugin]
+name = "SwiftMap"
+type = "engine"
+description = "Forwards camera frames and the GPS fix each was taken at to a SwiftMap mapping server, and reports the next-flight area it plans as a KML"
+
+[[args]]
+name = "server"
+type = "string"
+description = "Hostname or IP of the SwiftMap mapping server"
+default = "localhost"
+
+[[args]]
+name = "server_port"
+type = "number"
+description = "TCP port of the SwiftMap mapping server"
+default = 43322
+
+[[args]]
+name = "send_distance"
+type = "number"
+description = "Forward at most one frame per this many meters of travel; 0 to forward every frame. Frames without a GPS fix are not forwarded unless it is 0"
+default = 5.0
+
+[[args]]
+name = "jpeg_quality"
+type = "number"
+description = "JPEG quality (1-100) RawFrames are encoded at before they are forwarded; JPEG EncodedFrames are forwarded as they are"
+default = 95
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest result sent, in bytes; a planned area's KML over it is not reported"
+default = 1048576
+
+[engine]
+type = "generic"
+inputs = [
+    "steeleagle_protocol/v1/messages/frame/RawFrame",
+    "steeleagle_protocol/v1/messages/frame/EncodedFrame",
+]
+# The frame is forwarded unchanged. Its result is empty, or the bare KML of the
+# next-flight area the server just planned, which the vehicle stores as a
+# GenericResult's payload
+result = "steeleagle_protocol/v1/messages/result/GenericResult"
