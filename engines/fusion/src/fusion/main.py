@@ -1,4 +1,5 @@
-"""Entrypoint of the fusion plugins, which eagled starts with `pixi run start`.
+"""Entrypoint of the fusion plugins (fusion_detection, cop_tracking), which
+eagled starts with `pixi run start`.
 
 eagled names the plugin to run in STEELEAGLE_PLUGIN, its args in
 STEELEAGLE_PLUGIN_ARGS (a JSON object), the name to serve the engine as in
@@ -15,10 +16,12 @@ import sys
 import threading
 import time
 
+from fusion.cop import CopTracking
 from fusion.detection import DetectionFusion
 from fusion.engine import qualify, run
 
 FUSION_DETECTION_PLUGIN = "fusion_detection.plugin.toml"
+COP_TRACKING_PLUGIN = "cop_tracking.plugin.toml"
 DETECTION_RESULT_TYPE = "steeleagle_protocol/v1/messages/result/DetectionResult"
 # The largest result the engine reports; a larger one is dropped.
 MAX_RESULT_SIZE = 1 << 20
@@ -28,9 +31,18 @@ MAX_RESULT_SIZE = 1 << 20
 # here.
 DEFAULTS = {
     FUSION_DETECTION_PLUGIN: {"local": "", "remote": "", "grace": 200, "timeout": 1000},
+    COP_TRACKING_PLUGIN: {
+        "local": "",
+        "remote": "",
+        "class": "",
+        "overlap_threshold": 0.5,
+        "grace": 200,
+        "timeout": 1000,
+    },
 }
 REQUIRED = {
     FUSION_DETECTION_PLUGIN: ("local", "remote"),
+    COP_TRACKING_PLUGIN: ("local", "remote", "class"),
 }
 
 
@@ -65,6 +77,13 @@ def parse_args(plugin, content):
     args["timeout"] = milliseconds(args, "timeout")
     if args["timeout"] <= 0:
         raise ConfigError("timeout must be positive")
+    if "overlap_threshold" in DEFAULTS[plugin]:
+        value = args["overlap_threshold"]
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ConfigError(f"overlap_threshold must be a number, not {value!r}")
+        args["overlap_threshold"] = float(value)
+        if not 0 < args["overlap_threshold"] <= 1:
+            raise ConfigError("overlap_threshold must be in (0, 1]")
     return args
 
 
@@ -89,23 +108,44 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
 
+    common = dict(
+        local=local,
+        remote=remote,
+        grace_ns=args["grace"] * 1_000_000,
+        timeout_ns=args["timeout"] * 1_000_000,
+        clock=time.monotonic_ns,
+    )
     try:
-        handler = DetectionFusion(
-            local=local,
-            remote=remote,
-            grace_ns=args["grace"] * 1_000_000,
-            timeout_ns=args["timeout"] * 1_000_000,
-            clock=time.monotonic_ns,
-        )
+        if plugin == COP_TRACKING_PLUGIN:
+            handler = CopTracking(
+                target=args["class"],
+                overlap_threshold=args["overlap_threshold"],
+                **common,
+            )
+        else:
+            handler = DetectionFusion(**common)
     except ValueError as err:
         sys.exit(f"Bad args for {plugin}: {err}")
-    logging.getLogger("fusion").info(
-        "preferring %s's result for %d ms after %s's; giving up on a frame after %d ms",
-        remote,
-        args["grace"],
-        local,
-        args["timeout"],
-    )
+    if plugin == COP_TRACKING_PLUGIN:
+        logging.getLogger("fusion").info(
+            "checking %s against %s on %r (IoU >= %.2f) within %d ms of %s's result;"
+            " giving up on a frame after %d ms",
+            local,
+            remote,
+            args["class"],
+            args["overlap_threshold"],
+            args["grace"],
+            local,
+            args["timeout"],
+        )
+    else:
+        logging.getLogger("fusion").info(
+            "preferring %s's result for %d ms after %s's; giving up on a frame after %d ms",
+            remote,
+            args["grace"],
+            local,
+            args["timeout"],
+        )
     run(
         name,
         handler,

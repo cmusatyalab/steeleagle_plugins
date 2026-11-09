@@ -39,6 +39,35 @@ input 415     chose: remote (local had no result)   | local: no result          
 
 Every 30 s of decided inputs is summarized: what was chosen, what each engine did, the classes each engine reported (in how many inputs), and for the most common classes in how many inputs both engines, only remote, or only local reported them. A result that arrives after its input was decided is logged as too late. Inputs that never reach the fusion engine are not logged.
 
+## `cop_tracking`
+
+COP (correctable operation): reports the local engine's detections while they agree with the remote engine's on one class, and the remote engine's while they do not. It is always in one of three modes:
+
+| Mode | Reports | Goes to |
+| --- | --- | --- |
+| **local-checked** | the local result, as soon as it arrives | **remote-only** when a check disagrees; **local-only** when remote is unreachable |
+| **remote-only** | the remote result, as soon as it arrives, if it arrives within the grace period after the local one; local if the grace period ends first | **local-checked** when a check agrees; **local-only** when remote is unreachable |
+| **local-only** | the local result, as soon as it arrives | **local-checked** when a remote result arrives in time |
+
+It starts in local-only, until it hears from the remote engine.
+
+A **check** runs for each input both engines answered, with the remote answer no later than `grace` after the local one, whether it was decided yet or not (in local-checked the remote answer usually arrives after the local one was reported) and even if the input never reached the COP engine. It compares the highest-confidence detection of `class` in each (case-insensitive): they agree if the intersection over union of their boxes is at least `overlap_threshold`, and disagree if it is lower or only one of them found the class. If neither did, the check is inconclusive and the mode stays. A local engine that drops an input with no result found nothing. A check on an input older than the one the mode last switched on does not switch it.
+
+The remote engine is **unreachable** when it disconnects, times out on an input, answers more than `grace` after the local answer, or (in remote-only) has not answered when the grace period ends. A remote engine that skips an input because it was busy is not unreachable; in remote-only that input is dropped with no result, since the local one is not trusted. If the remote engine's events are lost, the inputs it had not finished fall back to the local result, but the mode does not change.
+
+If the local engine fails an input (skipped, timed out, disconnected), the remote result is reported if there is one; an input still waiting at `timeout` is reported with what there is.
+
+| Arg | Default | Description |
+| --- | --- | --- |
+| `local` | | Engine on this daemon, qualified with `STEELEAGLE_LOCAL_QUALIFIER` |
+| `remote` | | Engine on the remote daemon, qualified with `STEELEAGLE_REMOTE_QUALIFIER` |
+| `class` | | The class checked between local and remote; required |
+| `overlap_threshold` | `0.5` | The least IoU for the boxes to agree, in (0, 1] |
+| `grace` | `200` | How long after the local result the remote one is in time, in milliseconds |
+| `timeout` | `1000` | The longest to wait on an input, in milliseconds; must be positive |
+
+Each decided input is logged at `INFO` with the mode it was decided in, as for `fusion_detection`; each mode switch is logged at `INFO` with the input and reason (e.g. `input 212: local-checked -> remote-only: local and remote disagree, IoU 0.12 < 0.50`), and each check at `DEBUG`. Every 30 s, the choices, inputs per mode, check verdicts and switches are summarized.
+
 ## Development
 
 ```

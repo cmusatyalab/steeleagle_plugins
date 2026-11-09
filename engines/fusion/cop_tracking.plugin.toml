@@ -1,0 +1,49 @@
+[plugin]
+name = "COP Tracking"
+type = "engine"
+description = "Correctable operation: reports the local engine's detections while they agree with the remote engine's on the tracked class, the remote engine's while they do not, and the local engine's while the remote engine is unreachable"
+
+[[args]]
+name = "local"
+type = "string"
+description = "Service name of the detection engine on this daemon"
+default = ""
+
+[[args]]
+name = "remote"
+type = "string"
+description = "Service name of the detection engine on the remote daemon"
+default = ""
+
+[[args]]
+name = "class"
+type = "string"
+description = "The class whose highest-confidence detection is checked between local and remote"
+default = ""
+
+[[args]]
+name = "overlap_threshold"
+type = "number"
+description = "The least intersection over union of the local and remote boxes for them to agree, in (0, 1]"
+default = 0.5
+
+[[args]]
+name = "grace"
+type = "number"
+description = "How long after the local result the remote result counts as in time, in milliseconds"
+default = 200
+
+[[args]]
+name = "timeout"
+type = "number"
+description = "The longest to wait on a frame before reporting what there is, in milliseconds"
+default = 1000
+
+[engine]
+type = "detection"
+inputs = [
+    "steeleagle_protocol/v1/messages/frame/RawFrame",
+    "steeleagle_protocol/v1/messages/frame/EncodedFrame",
+]
+# Every frame is dropped; the chosen detections are its result
+result = "steeleagle_protocol/v1/messages/result/DetectionResult"
