@@ -27,6 +27,7 @@ DEFAULTS = {
         "max_output_size": MAX_FRAME_SIZE,
         "timeout_ms": 1000,
         "keyframe_timeout": 150,
+        "convert_threads": 4,
         "log_frames": False,
     },
     DECODER_PLUGIN: {
