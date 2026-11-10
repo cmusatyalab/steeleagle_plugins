@@ -19,6 +19,9 @@ const PERCENT = 100;
 // Below this many milliseconds, a time shows a decimal (e.g. "0.2 ms").
 const WHOLE_MS_FROM = 1;
 const NONE = '–';
+// How an edge that crosses the network is drawn.
+const NETWORK_EDGE_DASH = '6 4';
+const NETWORK_EDGE_LABEL = 'network';
 
 // Positions (top-left corners) of the nodes, left to right along the edges.
 export function layout(nodes, edges) {
@@ -51,6 +54,17 @@ export function formatRate(r) {
     return r == null ? NONE : `${r.toFixed(1)}/s`;
 }
 
+// An edge that crosses the network is dashed, and labeled with the round
+// trip's minimum over the window, the closest the page has to the propagation
+// delay.
+function networkEdge(network) {
+    const rtt = network?.rtt_min_seconds;
+    return {
+        label: rtt == null ? NETWORK_EDGE_LABEL : `${NETWORK_EDGE_LABEL} · RTT ${formatSeconds(rtt)}`,
+        style: { strokeDasharray: NETWORK_EDGE_DASH },
+    };
+}
+
 // React Flow's nodes and edges for a view from /api/metrics/flow.
 export function toReactFlow(view) {
     const at = layout(view.nodes, view.edges);
@@ -61,6 +75,11 @@ export function toReactFlow(view) {
             position: at[n.id],
             data: { kind: n.kind, label: n.label, host: n.host, metrics: n.metrics, bottleneck: n.bottleneck },
         })),
-        edges: view.edges.map((e) => ({ id: `${e.from}->${e.to}`, source: e.from, target: e.to })),
+        edges: view.edges.map((e) => ({
+            id: `${e.from}->${e.to}`,
+            source: e.from,
+            target: e.to,
+            ...(e.crosses_network ? networkEdge(view.network) : {}),
+        })),
     };
 }

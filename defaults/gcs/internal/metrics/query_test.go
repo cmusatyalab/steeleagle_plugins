@@ -157,6 +157,71 @@ func TestFillReportsAnUnreachablePrometheus(t *testing.T) {
 	}
 }
 
+func rttAnswers() []answer {
+	return append([]answer{
+		{"min_over_time(uriel_remote_rtt_seconds", scalar(0.071)},
+		{"avg_over_time(uriel_remote_rtt_seconds", scalar(0.084)},
+	}, encoderAnswers()...)
+}
+
+func TestFillReadsTheRoundTripTimeOfTheVehiclesDaemon(t *testing.T) {
+	prom := &fakeProm{answers: rttAnswers()}
+
+	v := filled(t, prom, "1m")
+
+	if v.Network == nil || v.Network.RTTMin == nil || v.Network.RTTMean == nil {
+		t.Fatalf("network = %+v, want min and mean round trip times", v.Network)
+	}
+	if *v.Network.RTTMin != 0.071 || *v.Network.RTTMean != 0.084 {
+		t.Errorf("round trip = min %v, mean %v; want 0.071, 0.084", *v.Network.RTTMin, *v.Network.RTTMean)
+	}
+	var daemonQueries int
+	for _, q := range prom.queries {
+		if strings.Contains(q, "uriel_remote_rtt_seconds") && strings.Contains(q, `daemon_ip="`+fermiIP+`"`) {
+			daemonQueries++
+		}
+	}
+	if daemonQueries != 2 {
+		t.Errorf("%d round trip queries select the vehicle's daemon, want 2 (min and mean)", daemonQueries)
+	}
+}
+
+func TestNoNetworkWithoutRoundTripSamples(t *testing.T) {
+	v := filled(t, &fakeProm{answers: encoderAnswers()}, "1m")
+
+	if v.Network != nil {
+		t.Errorf("network = %+v, want null without samples", v.Network)
+	}
+}
+
+func TestNoNetworkWhenNoEdgeCrossesIt(t *testing.T) {
+	const localFlow = `
+[[producers]]
+name = "rgb"
+
+[[engines]]
+name = "100.101.84.40.encoder"
+location = "local"
+
+[[edges]]
+from = "rgb"
+to = "100.101.84.40.encoder"
+timeout = "1s"
+`
+	v, err := BuildView([]byte(localFlow), fakeDrone, testHostnames)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Fill(context.Background(), &fakeProm{answers: rttAnswers()}, &v, fakeDrone, "1m"); err != nil {
+		t.Fatal(err)
+	}
+
+	if v.Network != nil {
+		t.Errorf("network = %+v, want null for a flow that stays on the vehicle", v.Network)
+	}
+}
+
 func TestFillReportsTheShareOfFramesStampedInTheFuture(t *testing.T) {
 	answers := append([]answer{
 		{"gcs_frame_age_negative_total", scalar(5)},

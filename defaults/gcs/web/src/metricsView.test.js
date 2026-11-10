@@ -69,4 +69,33 @@ describe('toReactFlow', () => {
         expect(enc.position).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
         expect(edges).toEqual([expect.objectContaining({ source: 'rgb', target: 'enc' })]);
     });
+
+    const crossing = {
+        nodes: [
+            { id: 'rgb', kind: 'producer', label: 'rgb', host: 'fermi', metrics: null, bottleneck: false },
+            { id: 'enc', kind: 'engine', label: 'encoder', host: 'fermi', metrics: null, bottleneck: false },
+            { id: 'gcs', kind: 'engine', label: 'gcs', host: 'lambda2', metrics: null, bottleneck: false },
+        ],
+        edges: [
+            { from: 'rgb', to: 'enc', crosses_network: false },
+            { from: 'enc', to: 'gcs', crosses_network: true },
+        ],
+    };
+
+    it('dashes the edges that cross the network and labels them with the round trip', () => {
+        const { edges } = toReactFlow({ ...crossing, network: { rtt_min_seconds: 0.071, rtt_mean_seconds: 0.084 } });
+
+        const onVehicle = edges.find((e) => e.target === 'enc');
+        const network = edges.find((e) => e.target === 'gcs');
+        expect(onVehicle.label).toBeUndefined();
+        expect(onVehicle.style).toBeUndefined();
+        expect(network.label).toBe('network · RTT 71 ms');
+        expect(network.style.strokeDasharray).toBeTruthy();
+    });
+
+    it('labels a network edge without a round trip when there are no samples', () => {
+        const { edges } = toReactFlow({ ...crossing, network: null });
+
+        expect(edges.find((e) => e.target === 'gcs').label).toBe('network');
+    });
 });

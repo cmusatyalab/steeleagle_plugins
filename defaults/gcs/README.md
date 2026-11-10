@@ -165,6 +165,14 @@ skips inputs. Above the graph is the end-to-end time from capture to the GCS;
 engine times don't add up to it, since capture, transfer and queueing aren't
 engine time.
 
+Edges that cross the network, between an engine on the vehicle and one on the
+remote server, are dashed. When the flow has any, the page also shows the round
+trip time between the vehicle's daemon and its remote server
+(`uriel_remote_rtt_seconds`, QUIC's smoothed estimate), as its minimum and mean
+over the window. The minimum is close to the round trip propagation delay; it
+doesn't include the time to send a frame, which grows with its size over the
+bandwidth.
+
 The numbers come from a Prometheus server, the `prometheus` plugin of
 `engines/prometheus`, run as an `extra` service on the GCS's daemon:
 

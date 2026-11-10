@@ -51,10 +51,21 @@ type Node struct {
 	Bottleneck bool           `json:"bottleneck"`
 }
 
-// Edge leads from a producer or engine to an engine.
+// Edge leads from a producer or engine to an engine. It crosses the network
+// when one end runs on the vehicle and the other on the remote server.
 type Edge struct {
-	From string `json:"from"`
-	To   string `json:"to"`
+	From           string `json:"from"`
+	To             string `json:"to"`
+	CrossesNetwork bool   `json:"crosses_network"`
+}
+
+// Network is the round trip time between the vehicle's daemon and its remote
+// server over a window, as its QUIC connection estimates it, each null
+// without samples. The minimum approaches the round trip propagation delay;
+// the mean adds the queueing on the way.
+type Network struct {
+	RTTMin  *float64 `json:"rtt_min_seconds"`
+	RTTMean *float64 `json:"rtt_mean_seconds"`
 }
 
 // View is a vehicle's running flow, with the numbers of a window.
@@ -71,6 +82,9 @@ type View struct {
 	// the end-to-end time then leaves those frames out and is biased low, or
 	// missing if every frame was.
 	ClockSkewShare *float64 `json:"clock_skew_share"`
+	// Network is null when no edge crosses the network, or there are no
+	// round trip samples in the window.
+	Network *Network `json:"network"`
 }
 
 // BuildView makes the view of flowTOML, the flow vehicle runs, without
@@ -93,15 +107,20 @@ func BuildView(flowTOML []byte, vehicle string, hostnames map[string]string) (Vi
 		return ip
 	}
 	vehicleIP, _ := fleet.SplitName(vehicle)
+	// Where each node runs: producers on the vehicle, engines where the flow
+	// places them
+	location := make(map[string]string, len(flow.Producers)+len(flow.Engines))
 	for _, p := range flow.Producers {
 		v.Nodes = append(v.Nodes, Node{ID: p.Name, Kind: KindProducer, Label: p.Name, Host: host(vehicleIP)})
+		location[p.Name] = config.LocationLocal
 	}
 	for _, e := range flow.Engines {
 		ip, bare := fleet.SplitName(e.Name)
 		v.Nodes = append(v.Nodes, Node{ID: e.Name, Kind: KindEngine, Label: bare, Host: host(ip)})
+		location[e.Name] = e.Location
 	}
 	for _, e := range flow.Edges {
-		v.Edges = append(v.Edges, Edge{From: e.From, To: e.To})
+		v.Edges = append(v.Edges, Edge{From: e.From, To: e.To, CrossesNetwork: location[e.From] != location[e.To]})
 	}
 	return v, nil
 }

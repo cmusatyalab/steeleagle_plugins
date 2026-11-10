@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"time"
 
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 )
@@ -77,6 +79,15 @@ func frameCountQueries(vehicle, window string) (future, observed string) {
 		"sum(increase(gcs_frame_age_seconds_count" + selector + "))"
 }
 
+// rttQueries are the minimum and the mean over the window of the round trip
+// time between the vehicle's daemon and its remote server. A daemon has one
+// remote server at a time, but its address can change within the window.
+func rttQueries(vehicle, window string) (minimum, mean string) {
+	ip, _ := fleet.SplitName(vehicle)
+	selector := fmt.Sprintf("uriel_remote_rtt_seconds{%s=%s}[%s]", daemonIPLabel, strconv.Quote(ip), window)
+	return "min(min_over_time(" + selector + "))", "avg(avg_over_time(" + selector + "))"
+}
+
 func formatQuantile(q float64) string {
 	return strconv.FormatFloat(q, 'f', -1, 64)
 }
@@ -125,6 +136,13 @@ func Fill(ctx context.Context, q Querier, v *View, vehicle, window string) error
 		return err
 	}
 
+	var network *Network
+	if slices.ContainsFunc(v.Edges, func(e Edge) bool { return e.CrossesNetwork }) {
+		if network, err = roundTrip(ctx, q, vehicle, window, now); err != nil {
+			return err
+		}
+	}
+
 	for i := range v.Nodes {
 		if v.Nodes[i].Kind == KindEngine {
 			v.Nodes[i].Metrics = byEngine[v.Nodes[i].ID]
@@ -134,7 +152,31 @@ func Fill(ctx context.Context, q Querier, v *View, vehicle, window string) error
 		v.EndToEnd = &e2e
 	}
 	v.ClockSkewShare = skew
+	v.Network = network
 	return nil
+}
+
+// roundTrip is the network between the vehicle's daemon and its remote server
+// over the window, or nil if there are no samples.
+func roundTrip(ctx context.Context, q Querier, vehicle, window string, at time.Time) (*Network, error) {
+	var n Network
+	minimum, mean := rttQueries(vehicle, window)
+	for _, part := range []struct {
+		promql string
+		field  **float64
+	}{{minimum, &n.RTTMin}, {mean, &n.RTTMean}} {
+		samples, err := vector(ctx, q, part.promql, at)
+		if err != nil {
+			return nil, err
+		}
+		if len(samples) > 0 {
+			*part.field = finite(samples[0].Value)
+		}
+	}
+	if n.RTTMin == nil && n.RTTMean == nil {
+		return nil, nil
+	}
+	return &n, nil
 }
 
 // clockSkewShare is the share of the vehicle's frames in the window that

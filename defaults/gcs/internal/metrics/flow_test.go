@@ -89,9 +89,32 @@ func TestBuildViewMakesNodesAndEdgesWithHosts(t *testing.T) {
 	if !reflect.DeepEqual(v.Nodes, want) {
 		t.Errorf("nodes = %+v, want %+v", v.Nodes, want)
 	}
-	wantEdges := []Edge{{From: "rgb", To: encoder}, {From: encoder, To: gcs}, {From: "telemetry", To: gcs}}
+	wantEdges := []Edge{
+		{From: "rgb", To: encoder},
+		{From: encoder, To: gcs, CrossesNetwork: true},
+		{From: "telemetry", To: gcs, CrossesNetwork: true},
+	}
 	if !reflect.DeepEqual(v.Edges, wantEdges) {
 		t.Errorf("edges = %+v, want %+v", v.Edges, wantEdges)
+	}
+}
+
+func TestBuildViewMarksTheEdgesThatCrossTheNetwork(t *testing.T) {
+	v, err := BuildView([]byte(gcsFlow), fakeDrone, testHostnames)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]bool{
+		"rgb->" + encoder:    false, // producer to a local engine
+		encoder + "->" + gcs: true,  // local engine to a remote engine
+		"telemetry->" + gcs:  true,  // producer to a remote engine
+	}
+	for _, e := range v.Edges {
+		key := e.From + "->" + e.To
+		if got, ok := want[key]; !ok || e.CrossesNetwork != got {
+			t.Errorf("edge %s crosses the network = %v, want %v", key, e.CrossesNetwork, got)
+		}
 	}
 }
 

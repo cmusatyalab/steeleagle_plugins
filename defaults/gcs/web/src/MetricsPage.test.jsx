@@ -143,6 +143,24 @@ describe('MetricsPage', () => {
         expect(container.textContent).toContain('Failed to fetch');
     });
 
+    it('shows the network round trip', async () => {
+        respondWith({ ...okView, network: { rtt_min_seconds: 0.071, rtt_mean_seconds: 0.084 } });
+
+        const { container } = await render();
+
+        expect(container.textContent).toContain('Network RTT');
+        expect(container.textContent).toContain('min 71 ms');
+        expect(container.textContent).toContain('mean 84 ms');
+    });
+
+    it('shows no network round trip without one', async () => {
+        respondWith(okView);
+
+        const { container } = await render();
+
+        expect(container.textContent).not.toContain('Network RTT');
+    });
+
     it('warns when frames are stamped in the future', async () => {
         respondWith({ ...okView, clock_skew_share: 0.05 });
 
