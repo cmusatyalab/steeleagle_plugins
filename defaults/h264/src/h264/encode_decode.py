@@ -22,7 +22,7 @@ from google.protobuf.message import DecodeError
 import steeleagle_protocol.v1.messages.frame.frame_pb2 as frame_proto
 
 from h264 import h264_pb2
-from h264.common import RGB_CHANNELS, Gst, Pipeline, pad_rows, unpad_rows
+from h264.common import RGB_CHANNELS, Gst, Pipeline, unpad_rows
 
 logger = logging.getLogger("h264")
 
@@ -160,7 +160,7 @@ def _encode_frame(engine, streams, input, args):
     stream.last_pts_ns = pts_ns
     if policy.needed:
         pipeline.force_keyframe()
-    pipeline.push(pad_rows(frame.data, width, height), pts_ns)
+    pipeline.push_frame(frame.data, width, height, pts_ns)
     sample, dropped_late = pipeline.pull(pts_ns, args["timeout_ms"])
     if dropped_late:
         policy.needed = True
