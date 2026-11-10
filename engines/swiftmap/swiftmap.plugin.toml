@@ -1,7 +1,7 @@
 [plugin]
 name = "SwiftMap"
 type = "engine"
-description = "Sends each camera frame, with the GPS fix it was taken at, to a SwiftMap mapping server, and reports the next-flight area it plans as a KML. Put the keyframe engine in front of it to choose which frames are sent"
+description = "Sends each camera frame, with the GPS fix it was taken at, to a SwiftMap mapping server, in the order they were taken, and reports the next-flight area it plans as a KML. Put the keyframe engine in front of it to choose which frames are sent, and the reachback engine to send back frames lost on the way"
 
 [[args]]
 name = "server"
@@ -22,6 +22,12 @@ description = "JPEG quality (1-100) RawFrames are encoded at before they are for
 default = 95
 
 [[args]]
+name = "gap_timeout"
+type = "number"
+description = "Seconds to wait for frames lost on the way, which the JPEG encoder's frame numbers show, to be sent back before the frames after them are sent without them; 0 to send each frame as it arrives, in any order"
+default = 30.0
+
+[[args]]
 name = "max_output_size"
 type = "number"
 description = "Largest result sent, in bytes; a planned area's KML over it is not reported"
@@ -34,6 +40,6 @@ inputs = [
     "steeleagle_protocol/v1/messages/frame/EncodedFrame",
 ]
 # The frame is forwarded unchanged. Its result is empty, or the bare KML of the
-# next-flight area the server just planned, which the vehicle stores as a
-# GenericResult's payload
+# next-flight area the server planned since the last frame, which the vehicle
+# stores as a GenericResult's payload
 result = "steeleagle_protocol/v1/messages/result/GenericResult"

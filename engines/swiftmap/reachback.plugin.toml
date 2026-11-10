@@ -1,0 +1,15 @@
+[plugin]
+name = "SwiftMap Reachback"
+type = "engine"
+description = "Stores every frame and forwards it on unchanged. When the swiftmap engine on the remote daemon finds frames lost on the way, it asks for them, and they are sent to its daemon as files, outside the flow. Put it right after the JPEG encoder, which numbers the frames the swiftmap engine asks for"
+
+[[args]]
+name = "remote"
+type = "string"
+description = "Service name of the swiftmap engine on the remote daemon, whose requests for lost frames it answers"
+default = "swiftmap"
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]
+# No result: every frame is forwarded unchanged

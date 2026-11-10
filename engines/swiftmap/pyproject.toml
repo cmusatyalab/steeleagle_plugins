@@ -3,6 +3,7 @@ name = "swiftmap"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
+    "grpcio>=1.51.1",
     "numpy>=2",
     "opencv-python-headless>=5.0.0.93",
     "protobuf>=7.35.1",

@@ -899,6 +899,7 @@ packages:
 - pypi: ./
   name: swiftmap
   requires_dist:
+  - grpcio>=1.51.1
   - numpy>=2
   - opencv-python-headless>=5.0.0.93
   - protobuf>=7.35.1

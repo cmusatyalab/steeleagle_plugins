@@ -1,13 +1,18 @@
-"""The swiftmap engine: each frame is forwarded unchanged, and sent with its
-GPS fix to the SwiftMap mapping server. Which frames reach it is up to the
-flow: the keyframe engine (swiftmap.early_discard) in front of it drops the
-frames that are too close together or not keyframes. When the server plans a
-next-flight area, its KML is the frame's result. The engine's result type is
-GenericResult, whose payload the vehicle sets to the result as it is, so the
-result is the bare KML."""
+"""The swiftmap engine: forwards each frame unchanged and sends it, with its
+GPS fix, to the SwiftMap server in capture order. A gap in the JPEG encoder's
+frame numbers is a lost frame: the engine asks reachback for it, holds the
+frames after it, and sends them once it is back (as a file in the daemon's
+files directory) or given up on. A planned next-flight KML is the next
+frame's result, a GenericResult payload."""
 
+import contextlib
+import json
 import logging
 import math
+import os
+import queue
+import re
+import threading
 import time
 
 import cv2
@@ -17,17 +22,43 @@ from google.protobuf.message import DecodeError
 
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from swiftmap.client import ERROR
+from swiftmap.inorder import InOrder
 
 logger = logging.getLogger("swiftmap")
 
 RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
 ENCODED_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
 GENERIC_RESULT_TYPE = "steeleagle_protocol/v1/messages/result/GenericResult"
+REQUEST_TYPE = "swiftmap/ReachbackRequest"
+# A derived result must name a flow; reachback ignores it
+REQUEST_FLOW = "swiftmap-reachback"
 RGB_CHANNELS = 3
-# How long the engine waits for an input before it checks whether to stop.
 POLL_INTERVAL_S = 0.1
-# Seconds between fps log lines.
+FILE_SCAN_INTERVAL_S = 0.5
 STATS_INTERVAL_S = 5.0
+NO_GPS = (math.nan, math.nan, math.nan)
+FRAME_FILE = re.compile(r"reachback-(\d+)\.frame")
+
+
+def frame_filename(number):
+    return f"reachback-{number}.frame"
+
+
+def encode_request(first, last):
+    return json.dumps({"first": first, "last": last}).encode()
+
+
+def decode_request(data):
+    """(first, last) of a request; ValueError if it is not one."""
+    try:
+        request = json.loads(data)
+        first, last = request["first"], request["last"]
+    except (KeyError, TypeError) as err:
+        raise ValueError(f"not a request: {err}") from None
+    if not (isinstance(first, int) and isinstance(last, int) and 0 <= first <= last):
+        raise ValueError(f"bad range {first!r} to {last!r}")
+    return first, last
+
 
 class FrameError(Exception):
     pass
@@ -89,75 +120,187 @@ def to_jpeg(frame, quality):
     return jpeg.tobytes()
 
 
-class SwiftMap:
-    """Sends each frame to the server, and turns what it sends back into
-    results."""
+class Sender:
+    """Sends frames to the server in order. Once entered, it sends on its own
+    thread, so a burst of released frames doesn't block the engine."""
 
-    def __init__(self, client, *, jpeg_quality):
+    def __init__(self, client):
         self.client = client
-        self.jpeg_quality = jpeg_quality
-        self.received = 0
         self.sent = 0
+        self._kml = b""
+        self._lock = threading.Lock()
+        self._queue = None
+
+    def __enter__(self):
+        self._queue = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name="sender", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self._queue.put(None)
+        self._thread.join()
+        self.client.close()
+
+    def send(self, jpeg, gps):
+        if self._queue is None:
+            self._send(jpeg, gps)
+        else:
+            self._queue.put((jpeg, gps))
+
+    def take_kml(self):
+        """The KML planned since the last call, or b""."""
+        with self._lock:
+            kml, self._kml = self._kml, b""
+        return kml
+
+    def _run(self):
+        while (item := self._queue.get()) is not None:
+            try:
+                self._send(*item)
+            except Exception:
+                logger.exception("failed to send a frame")
+
+    def _send(self, jpeg, gps):
+        status, kml = self.client.send_frame(jpeg, gps)
+        if status == ERROR:
+            logger.warning("SwiftMap server unreachable; frame not mapped")
+            return
+        self.sent += 1
+        if kml:
+            logger.info("SwiftMap planned a next-flight area (%d bytes of KML)", len(kml))
+            with self._lock:
+                self._kml = kml
+
+
+class SwiftMap:
+    """Sends frames in order with `sender`; a gap_timeout of 0 sends them as
+    they come. Frames sent back arrive in `files_dir`."""
+
+    def __init__(self, sender, *, jpeg_quality, gap_timeout, files_dir=None):
+        self.sender = sender
+        self.jpeg_quality = jpeg_quality
+        self.inorder = InOrder(gap_timeout) if gap_timeout > 0 else None
+        self.files_dir = files_dir
+        self.stream = None  # (producer, session)
+        self.last_id = None  # requests are about the last input
+        self.received = 0
+        self._last_scan = float("-inf")
         self._last_received = 0
         self._last_stats = time.monotonic()
 
-    def on_input(self, input):
-        """The result for an input: the next-flight area KML if the server
-        planned one, empty otherwise."""
+    def _item(self, frame):
+        return to_jpeg(frame, self.jpeg_quality), frame_gps(frame) or NO_GPS
+
+    def _send(self, items):
+        for item in items:
+            self.sender.send(*item)
+
+    def on_input(self, input, now):
         self._log_stats()
         try:
             frame = read_frame(input.payload_type, bytes(input.data))
-            # The server takes a NaN fix for none
-            gps = frame_gps(frame) or (math.nan, math.nan, math.nan)
-            jpeg = to_jpeg(frame, self.jpeg_quality)
+            item = self._item(frame)
         except FrameError as err:
             logger.warning("input %d: %s", input.id.seq, err)
-            return b""
-        status, kml = self.client.send_frame(jpeg, gps)
-        if status == ERROR:
-            logger.warning("input %d: SwiftMap server unreachable; frame not mapped", input.id.seq)
-            return b""
-        self.sent += 1
-        if kml:
-            logger.info("input %d: SwiftMap planned a next-flight area (%d bytes of KML)",
-                        input.id.seq, len(kml))
-        return kml
+            return
+        if self.inorder is None:
+            self._send([item])
+            return
+        stream = (input.id.producer, input.id.session)
+        if stream != self.stream:
+            self._send(self.inorder.flush())
+            self.stream = stream
+        self.last_id = input.id
+        missing = len(self.inorder.missing)
+        self._send(self.inorder.add(frame.id, item, now))
+        if len(self.inorder.missing) > missing:
+            logger.info("frame %d: %d lost before it", frame.id, len(self.inorder.missing) - missing)
+
+    def poll(self, now):
+        """Takes in frames sent back and gives up on late ones; returns the
+        requests to publish, as (input id, payload)."""
+        if self.inorder is None:
+            return []
+        if self.files_dir and now - self._last_scan >= FILE_SCAN_INTERVAL_S:
+            self._last_scan = now
+            self._read_files()
+        given_up = self.inorder.given_up
+        self._send(self.inorder.expire(now))
+        if self.inorder.given_up > given_up:
+            logger.warning("gave up on %d lost frames", self.inorder.given_up - given_up)
+        requests = self.inorder.requests(now)
+        for first, last in requests:
+            logger.info("asking reachback for frames %d to %d", first, last)
+        return [(self.last_id, encode_request(first, last)) for first, last in requests]
+
+    def _read_files(self):
+        """Fills in missing frames from their files, and removes all frame files."""
+        try:
+            entries = list(os.scandir(self.files_dir))
+        except OSError as err:
+            logger.warning("can't read %s: %s", self.files_dir, err)
+            return
+        for entry in entries:
+            match = FRAME_FILE.fullmatch(entry.name)
+            if match is None:
+                continue
+            number = int(match[1])
+            if number in self.inorder.missing:
+                try:
+                    with open(entry.path, "rb") as f:
+                        frame = frame_pb2.EncodedFrame.FromString(f.read())
+                    if frame.id != number:
+                        raise FrameError(f"it holds frame {frame.id}")
+                    self._send(self.inorder.fill(number, self._item(frame)))
+                    logger.info("frame %d sent back", number)
+                except (OSError, DecodeError, FrameError) as err:
+                    logger.warning("can't read %s: %s", entry.name, err)
+            with contextlib.suppress(OSError):
+                os.remove(entry.path)
 
     def _log_stats(self):
         self.received += 1
         now = time.monotonic()
         elapsed = now - self._last_stats
-        if elapsed > STATS_INTERVAL_S:
-            logger.info("%.2f fps (received %d, sent %d)",
-                        (self.received - self._last_received) / elapsed, self.received, self.sent)
-            self._last_received = self.received
-            self._last_stats = now
+        if elapsed <= STATS_INTERVAL_S:
+            return
+        extra = ""
+        if self.inorder is not None:
+            o = self.inorder
+            extra = (f", {len(o.held)} held, {len(o.missing)} missing, "
+                     f"{o.recovered} sent back, {o.given_up} given up")
+        logger.info("%.2f fps (received %d, sent %d%s)",
+                    (self.received - self._last_received) / elapsed, self.received,
+                    self.sender.sent, extra)
+        self._last_received, self._last_stats = self.received, now
 
 
 def run(name, swiftmap, *, max_output_size, stop, on_ready=None):
-    """Serves the engine `name` until the threading.Event `stop` is set. Each
-    frame is forwarded on, with what `swiftmap` makes of it as the result."""
-    try:
-        with uriel.Engine(
-            name, result_type=GENERIC_RESULT_TYPE, max_output_size=max_output_size
-        ) as engine:
-            logger.info("engine %s ready; mapping on %s:%s",
-                        name, swiftmap.client.server, swiftmap.client.port)
-            if on_ready is not None:
-                on_ready()
-            while not stop.is_set():
-                input = engine.next(POLL_INTERVAL_S)
-                if input is None:
-                    continue
+    """Serves the engine `name` until `stop` is set."""
+    with uriel.Engine(
+        name, result_type=GENERIC_RESULT_TYPE, max_output_size=max_output_size
+    ) as engine:
+        client = swiftmap.sender.client
+        logger.info("engine %s ready; mapping on %s:%s", name, client.server, client.port)
+        if on_ready is not None:
+            on_ready()
+        while not stop.is_set():
+            input = engine.next(POLL_INTERVAL_S)
+            now = time.monotonic()
+            if input is not None:
                 try:
-                    result = swiftmap.on_input(input)
+                    swiftmap.on_input(input, now)
                 except Exception:
                     logger.exception("input %d: failed to handle it", input.id.seq)
-                    result = b""
+                result = swiftmap.sender.take_kml()
                 if len(result) > max_output_size:
-                    logger.warning("input %d: result is %d bytes, over max_output_size; "
-                                   "not reporting it", input.id.seq, len(result))
+                    logger.warning("input %d: KML of %d bytes is over max_output_size",
+                                   input.id.seq, len(result))
                     result = b""
                 engine.forward(result=result)
-    finally:
-        swiftmap.client.close()
+            try:
+                for id, payload in swiftmap.poll(now):
+                    engine.publish_derived(id, REQUEST_FLOW, payload, result_type=REQUEST_TYPE)
+            except Exception:
+                logger.exception("failed to handle the frames sent back")

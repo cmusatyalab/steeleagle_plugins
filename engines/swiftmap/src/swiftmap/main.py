@@ -2,7 +2,8 @@
 
 eagled names the plugin to run in STEELEAGLE_PLUGIN, its args in
 STEELEAGLE_PLUGIN_ARGS (a JSON object), and the name to serve the engine as in
-STEELEAGLE_ENGINE_ENDPOINT.
+STEELEAGLE_ENGINE_ENDPOINT. Reachback also uses STEELEAGLE_CLIENT_SOCKET and
+STEELEAGLE_REMOTE_QUALIFIER; swiftmap, STEELEAGLE_FILES.
 """
 
 import json
@@ -10,16 +11,20 @@ import logging
 import os
 import signal
 import sys
+import tempfile
 import threading
+from pathlib import Path
 
-from swiftmap import early_discard, engine
+from swiftmap import early_discard, engine, reachback
 from swiftmap.client import DEFAULT_PORT, SwiftMapClient
 from swiftmap.early_discard import KeyframeFilter
-from swiftmap.engine import SwiftMap
+from swiftmap.engine import Sender, SwiftMap
 from swiftmap.keyframe import DEFAULT_MIN_DISPARITY
+from swiftmap.reachback import FrameStore, Reachback, Transfer
 
 SWIFTMAP_PLUGIN = "swiftmap.plugin.toml"
 KEYFRAME_PLUGIN = "keyframe.plugin.toml"
+REACHBACK_PLUGIN = "reachback.plugin.toml"
 
 # Defaults of the args of each plugin, matching its plugin.toml. The daemon
 # passes only the args set in its config, so any arg left unset is defaulted
@@ -29,16 +34,21 @@ DEFAULTS = {
         "server": "localhost",
         "server_port": DEFAULT_PORT,
         "jpeg_quality": 95,
+        "gap_timeout": 30.0,
         "max_output_size": 1 << 20,
     },
     KEYFRAME_PLUGIN: {
         "min_disparity": DEFAULT_MIN_DISPARITY,
         "send_distance": 5.0,
     },
+    REACHBACK_PLUGIN: {
+        "remote": "swiftmap",
+    },
 }
 REQUIRED = {
     SWIFTMAP_PLUGIN: ("server",),
     KEYFRAME_PLUGIN: (),
+    REACHBACK_PLUGIN: ("remote",),
 }
 
 
@@ -73,7 +83,43 @@ def parse_args(plugin, content):
         args["jpeg_quality"] = int(args["jpeg_quality"])
         if not 1 <= args["jpeg_quality"] <= 100:
             raise ConfigError("jpeg_quality must be from 1 to 100")
+        args["gap_timeout"] = float(args["gap_timeout"])
+        if args["gap_timeout"] < 0:
+            raise ConfigError("gap_timeout must not be negative")
     return args
+
+
+def run_reachback(name, args, stop):
+    socket_path = os.environ.get("STEELEAGLE_CLIENT_SOCKET")
+    remote_ip = os.environ.get("STEELEAGLE_REMOTE_QUALIFIER")
+    if not socket_path or not remote_ip:
+        sys.exit("reachback needs STEELEAGLE_CLIENT_SOCKET and STEELEAGLE_REMOTE_QUALIFIER")
+    remote = f"{remote_ip}.{args['remote']}"
+    with tempfile.TemporaryDirectory(prefix="swiftmap-reachback-") as scratch:
+        store = FrameStore(str(Path(scratch) / "frames.sqlite3"))
+        try:
+            with Transfer(socket_path, remote_ip) as transfer:
+                reachback.run(name, Reachback(store, transfer.send), remote, stop=stop)
+        finally:
+            store.close()
+
+
+def run_swiftmap(name, args, stop):
+    files_dir = os.environ.get("STEELEAGLE_FILES")
+    if args["gap_timeout"] > 0 and not files_dir:
+        logging.getLogger("swiftmap").warning("STEELEAGLE_FILES is not set; lost frames can't come back")
+    client = SwiftMapClient(args["server"], args["server_port"])
+    # The engine comes up without the server, and connects on the first frame
+    # it sends
+    if not client.connect(max_retries=1):
+        logging.getLogger("swiftmap").warning(
+            "SwiftMap server at %s:%s is not reachable yet; connecting on the first frame",
+            args["server"], args["server_port"],
+        )
+    with Sender(client) as sender:
+        swiftmap = SwiftMap(sender, jpeg_quality=args["jpeg_quality"],
+                            gap_timeout=args["gap_timeout"], files_dir=files_dir)
+        engine.run(name, swiftmap, max_output_size=args["max_output_size"], stop=stop)
 
 
 def main():
@@ -100,17 +146,10 @@ def main():
             min_disparity=args["min_disparity"], send_distance=args["send_distance"]
         )
         early_discard.run(name, keyframes, stop=stop)
-        return
-    client = SwiftMapClient(args["server"], args["server_port"])
-    # The engine comes up without the server, and connects on the first frame
-    # it sends
-    if not client.connect(max_retries=1):
-        logging.getLogger("swiftmap").warning(
-            "SwiftMap server at %s:%s is not reachable yet; connecting on the first frame",
-            args["server"], args["server_port"],
-        )
-    swiftmap = SwiftMap(client, jpeg_quality=args["jpeg_quality"])
-    engine.run(name, swiftmap, max_output_size=args["max_output_size"], stop=stop)
+    elif plugin == REACHBACK_PLUGIN:
+        run_reachback(name, args, stop)
+    else:
+        run_swiftmap(name, args, stop)
 
 
 if __name__ == "__main__":
