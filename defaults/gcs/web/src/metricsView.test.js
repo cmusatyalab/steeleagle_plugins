@@ -89,7 +89,7 @@ describe('toReactFlow', () => {
         const network = edges.find((e) => e.target === 'gcs');
         expect(onVehicle.label).toBeUndefined();
         expect(onVehicle.style).toBeUndefined();
-        expect(network.label).toBe('RTT 71 ms');
+        expect(network.label).toBe('RTT 84 ms');
         expect(network.labelStyle.fontSize).toBe(EDGE_LABEL_FONT_SIZE);
         expect(network.style.strokeDasharray).toBeTruthy();
     });

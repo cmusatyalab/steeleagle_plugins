@@ -57,11 +57,11 @@ export function formatRate(r) {
 }
 
 // An edge that crosses the network is dashed, and labeled with the round
-// trip's minimum over the window, the closest the page has to the propagation
-// delay, when there is one.
+// trip's mean over the window, what frames crossing it typically see, when
+// there is one.
 function networkEdge(network) {
     const style = { strokeDasharray: NETWORK_EDGE_DASH };
-    const rtt = network?.rtt_min_seconds;
+    const rtt = network?.rtt_mean_seconds;
     if (rtt == null) return { style };
     return {
         style,

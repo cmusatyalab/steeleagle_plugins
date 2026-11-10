@@ -166,7 +166,8 @@ engine times don't add up to it, since capture, transfer and queueing aren't
 engine time.
 
 Edges that cross the network, between an engine on the vehicle and one on the
-remote server, are dashed. When the flow has any, the page also shows the round
+remote server, are dashed and labeled with the mean round trip time. When the
+flow has any, the page also shows the round
 trip time between the vehicle's daemon and its remote server
 (`uriel_remote_rtt_seconds`, QUIC's smoothed estimate), as its minimum and mean
 over the window. The minimum is close to the round trip propagation delay; it
