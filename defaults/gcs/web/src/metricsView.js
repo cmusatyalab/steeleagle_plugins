@@ -19,9 +19,11 @@ const PERCENT = 100;
 // Below this many milliseconds, a time shows a decimal (e.g. "0.2 ms").
 const WHOLE_MS_FROM = 1;
 const NONE = '–';
-// How an edge that crosses the network is drawn.
+// How an edge that crosses the network is drawn. Its label is small, so it
+// fits in the gap between the nodes.
 const NETWORK_EDGE_DASH = '6 4';
-const NETWORK_EDGE_LABEL = 'network';
+export const EDGE_LABEL_FONT_SIZE = 9;
+const EDGE_LABEL_PADDING = [2, 1];
 
 // Positions (top-left corners) of the nodes, left to right along the edges.
 export function layout(nodes, edges) {
@@ -56,12 +58,16 @@ export function formatRate(r) {
 
 // An edge that crosses the network is dashed, and labeled with the round
 // trip's minimum over the window, the closest the page has to the propagation
-// delay.
+// delay, when there is one.
 function networkEdge(network) {
+    const style = { strokeDasharray: NETWORK_EDGE_DASH };
     const rtt = network?.rtt_min_seconds;
+    if (rtt == null) return { style };
     return {
-        label: rtt == null ? NETWORK_EDGE_LABEL : `${NETWORK_EDGE_LABEL} · RTT ${formatSeconds(rtt)}`,
-        style: { strokeDasharray: NETWORK_EDGE_DASH },
+        style,
+        label: `RTT ${formatSeconds(rtt)}`,
+        labelStyle: { fontSize: EDGE_LABEL_FONT_SIZE },
+        labelBgPadding: EDGE_LABEL_PADDING,
     };
 }
 

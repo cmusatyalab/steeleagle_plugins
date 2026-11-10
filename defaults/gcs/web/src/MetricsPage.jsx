@@ -93,8 +93,7 @@ function MetricsPage({ vehicles, theme, active }) {
                         Network RTT: <b>min {formatSeconds(view.network.rtt_min_seconds)} · mean {formatSeconds(view.network.rtt_mean_seconds)}</b>
                     </div>
                     <div style={{ fontSize: 11, opacity: 0.65 }}>
-                        The vehicle's connection to the remote server, as QUIC estimates it. The minimum is close to the
-                        round trip propagation delay (one way is about half); sending a frame takes longer, by its size over the bandwidth.
+                        Vehicle ↔ remote server, by QUIC. Min ≈ round trip propagation delay.
                     </div>
                 </div>
             )}

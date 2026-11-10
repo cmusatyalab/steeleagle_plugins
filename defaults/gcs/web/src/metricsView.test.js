@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { NODE_HEIGHT, NODE_WIDTH, formatRate, formatSeconds, formatShare, layout, toReactFlow } from './metricsView.js';
+import { EDGE_LABEL_FONT_SIZE, NODE_HEIGHT, NODE_WIDTH, formatRate, formatSeconds, formatShare, layout, toReactFlow } from './metricsView.js';
 
 const diamond = {
     nodes: [
@@ -89,13 +89,16 @@ describe('toReactFlow', () => {
         const network = edges.find((e) => e.target === 'gcs');
         expect(onVehicle.label).toBeUndefined();
         expect(onVehicle.style).toBeUndefined();
-        expect(network.label).toBe('network · RTT 71 ms');
+        expect(network.label).toBe('RTT 71 ms');
+        expect(network.labelStyle.fontSize).toBe(EDGE_LABEL_FONT_SIZE);
         expect(network.style.strokeDasharray).toBeTruthy();
     });
 
-    it('labels a network edge without a round trip when there are no samples', () => {
+    it('dashes a network edge without a label when there are no samples', () => {
         const { edges } = toReactFlow({ ...crossing, network: null });
 
-        expect(edges.find((e) => e.target === 'gcs').label).toBe('network');
+        const network = edges.find((e) => e.target === 'gcs');
+        expect(network.label).toBeUndefined();
+        expect(network.style.strokeDasharray).toBeTruthy();
     });
 });
