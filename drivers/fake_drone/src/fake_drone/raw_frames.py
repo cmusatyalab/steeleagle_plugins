@@ -1,5 +1,8 @@
-"""Publishes decoded video frames to Uriel, as RawFrame inputs. Unchanged
-from parrot_anafi's RawFramePublisher.
+"""Publishes the decoded video frames to Uriel, as RawFrame inputs.
+
+This is parrot_anafi's RawFramePublisher, except that each frame's pose is
+given with it, since it is the pose recorded with that frame rather than the
+vehicle's latest.
 """
 import logging
 
@@ -11,36 +14,39 @@ import steeleagle_protocol.v1.messages.frame.frame_pb2 as frame_proto
 
 logger = logging.getLogger('fake-drone/raw-frames')
 
+# Engines read a RawFrame's pixels as RGB, one byte per channel.
 RGB_CHANNELS = 3
+# Room in an input for a RawFrame's fields besides its pixels: its ids,
+# timestamp and pose.
 RAW_FRAME_HEADROOM = 16 << 10
+# Uriel payload type of the frames, as named in plugin configs.
 RAW_FRAME_TYPE = 'steeleagle_protocol/v1/messages/frame/RawFrame'
 
 
 class RawFramePublisher:
     """Publishes frames as the Uriel producer `uri`.
 
-    Frames are resized to `dimensions` (width, height), if given. `pose`
-    returns the vehicle's PositionInfo and GimbalInfo, which go with each
-    frame. The producer is created on the first frame, large enough for it,
-    so a publisher must be used, and closed, on one thread.
+    Frames are resized to `dimensions` (width, height), if given. The producer
+    is created on the first frame, large enough for it, so a publisher must be
+    used, and closed, on one thread.
     """
 
-    def __init__(self, uri, dimensions, pose):
+    def __init__(self, uri, dimensions):
         self.uri = uri
         self.dimensions = dimensions
-        self._pose = pose
         self._producer = None
         self._max_input_size = 0
         self._next_id = 0
 
-    def publish(self, rgb):
-        """Publishes `rgb`, an RGB image as GstCapture decodes it. A frame
-        that finds no free input buffer is dropped: newer frames follow."""
+    def publish(self, rgb, position_info=None, gimbal_info=None):
+        """Publishes `rgb`, an RGB image as GstCapture decodes it, with the
+        vehicle's PositionInfo and GimbalInfo when it was taken, if given. A
+        frame that finds no free input buffer is dropped: newer frames
+        follow."""
         if self.dimensions is not None and rgb.shape[1::-1] != self.dimensions:
             rgb = cv2.resize(rgb, self.dimensions, interpolation=cv2.INTER_AREA)
         timestamp = Timestamp()
         timestamp.GetCurrentTime()
-        position_info, gimbal_info = self._pose()
         frame = frame_proto.RawFrame(
             timestamp=timestamp,
             data=rgb.tobytes(),

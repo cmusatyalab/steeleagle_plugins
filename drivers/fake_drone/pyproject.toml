@@ -30,9 +30,9 @@ python = "3.11.*"
 fake-drone = { path = ".", editable = true }
 
 # conda-forge GStreamer and its Python bindings, with the elements the video
-# pipeline uses: filesrc and qtdemux (good), h264parse (bad) and avdec_h264
-# (libav) -- same decode elements parrot_anafi uses, minus rtspsrc/
-# rtph264depay, since this reads a file instead of the drone's RTSP stream.
+# pipeline uses: qtdemux and capssetter (good), h264parse (bad) and
+# avdec_h264 (libav), as parrot_anafi uses, but reading a file instead of
+# the drone's RTSP stream.
 [tool.pixi.feature.conda-gstreamer.dependencies]
 pygobject = "*"
 gstreamer = "*"
@@ -41,6 +41,12 @@ gst-plugins-good = "*"
 gst-plugins-bad = "*"
 gst-libav = "*"
 
+# native is the default environment with the device's own GStreamer plugins
+# added, as in parrot_anafi, so that a Qualcomm hardware decoder (set with the
+# decoder arg, e.g. "qtic2vdec") loads into conda's GStreamer. Its frames are
+# still mapped into CPU memory and converted to RGB there. Set GST_PLUGIN_PATH
+# to the directory holding the device's plugins; their libraries are found in
+# the system library directories.
 [tool.pixi.feature.native]
 platforms = ["linux-aarch64"]
 

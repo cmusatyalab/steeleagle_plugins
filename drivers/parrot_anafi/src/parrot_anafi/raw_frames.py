@@ -27,8 +27,9 @@ class RawFramePublisher:
     """Publishes frames as the Uriel producer `uri`.
 
     Frames are resized to `dimensions` (width, height), if given. `pose`
-    returns the vehicle's PositionInfo and GimbalInfo, which go with each
-    frame. The producer is created on the first frame, large enough for it,
+    returns the vehicle's PositionInfo and GimbalInfo, either of which may be
+    None, from a frame's metadata, as GstCapture reads it, or None; they go
+    with the frame. The producer is created on the first frame, large enough for it,
     so a publisher must be used, and closed, on one thread.
     """
 
@@ -40,14 +41,15 @@ class RawFramePublisher:
         self._max_input_size = 0
         self._next_id = 0
 
-    def publish(self, rgb):
-        """Publishes `rgb`, an RGB image as GstCapture decodes it. A frame
-        that finds no free input buffer is dropped: newer frames follow."""
+    def publish(self, rgb, metadata=None):
+        """Publishes `rgb`, an RGB image as GstCapture decodes it, with the
+        pose in `metadata`, its frame metadata. A frame that finds no free
+        input buffer is dropped: newer frames follow."""
         if self.dimensions is not None and rgb.shape[1::-1] != self.dimensions:
             rgb = cv2.resize(rgb, self.dimensions, interpolation=cv2.INTER_AREA)
         timestamp = Timestamp()
         timestamp.GetCurrentTime()
-        position_info, gimbal_info = self._pose()
+        position_info, gimbal_info = self._pose(metadata)
         frame = frame_proto.RawFrame(
             timestamp=timestamp,
             data=rgb.tobytes(),

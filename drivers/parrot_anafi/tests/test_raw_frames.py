@@ -65,7 +65,7 @@ def frame(height=HEIGHT, width=WIDTH):
 
 
 def publisher(dimensions=None):
-    return raw_frames.RawFramePublisher(URI, dimensions, lambda: (POSITION, GIMBAL))
+    return raw_frames.RawFramePublisher(URI, dimensions, lambda metadata: (POSITION, GIMBAL))
 
 
 def unique(name):
@@ -137,7 +137,7 @@ def test_close_closes_the_producer(producer):
 def test_raw_frames_round_trip_through_uriel():
     uri = unique('harpy.rgb')
     reader = uriel.Reader(uri)
-    raw = raw_frames.RawFramePublisher(uri, None, lambda: (POSITION, GIMBAL))
+    raw = raw_frames.RawFramePublisher(uri, None, lambda metadata: (POSITION, GIMBAL))
     try:
         raw.publish(frame())
         read = reader.next(timeout=READ_WAIT_S)
