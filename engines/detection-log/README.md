@@ -14,6 +14,7 @@ Each detection is drawn as a red box, labelled with its class and score.
 | --- | --- | --- |
 | `detector` | | Detection engine on this daemon, qualified with `STEELEAGLE_LOCAL_QUALIFIER` |
 | `timeout` | `2000` | The longest to wait for the detector's result on a frame, in milliseconds |
+| `refresh` | `false` | Remove everything already in `<files>/<engine>/` when the plugin starts, so only this run's frames are there |
 
 ## Flow
 
@@ -33,7 +34,7 @@ The detector's result may arrive before or after the frame. For each frame:
 
 A disconnected detector's waiting frames are given up, and so is every new frame until it is heard from again. At most 32 frames wait on the detector at once; past that, the oldest is given up.
 
-The engine reads and drops each frame right away and writes the JPEGs on a separate thread. If the disk falls behind, frames are skipped and a warning is logged. Every 30 s, a log line counts the frames saved and the frames not saved, with the reason for each. Nothing is deleted: 720p at 10 fps fills roughly 0.5 GB every 10 minutes.
+The engine reads and drops each frame right away and writes the JPEGs on a separate thread. If the disk falls behind, frames are skipped and a warning is logged. Every 30 s, a log line counts the frames saved and the frames not saved, with the reason for each. Nothing is deleted unless `refresh` is set: 720p at 10 fps fills roughly 0.5 GB every 10 minutes.
 
 ## Tests
 

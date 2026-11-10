@@ -15,6 +15,12 @@ type = "number"
 description = "The longest to wait for the detector's result on a frame before giving up on saving it, in milliseconds"
 default = 2000
 
+[[args]]
+name = "refresh"
+type = "boolean"
+description = "Remove everything already in the directory frames are saved to when the plugin starts"
+default = false
+
 [engine]
 type = "detection"
 inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]

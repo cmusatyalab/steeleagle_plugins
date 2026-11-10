@@ -11,6 +11,7 @@ transferred files are saved in in STEELEAGLE_FILES.
 import json
 import logging
 import os
+import shutil
 import signal
 import sys
 import threading
@@ -28,7 +29,7 @@ FILES_ENV = "STEELEAGLE_FILES"
 SANDBOX_FILES_DIR = Path("/steeleagle/files")
 # Defaults of the args, matching the plugin.toml. The daemon passes only the
 # args set in its config, so any arg left unset is defaulted here.
-DEFAULTS = {"detector": "", "timeout": 2000}
+DEFAULTS = {"detector": "", "timeout": 2000, "refresh": False}
 
 
 class ConfigError(Exception):
@@ -53,6 +54,8 @@ def parse_args(content):
     args["timeout"] = int(timeout)
     if args["timeout"] <= 0:
         raise ConfigError("timeout must be positive")
+    if not isinstance(args["refresh"], bool):
+        raise ConfigError(f"refresh must be true or false, not {args['refresh']!r}")
     return args
 
 
@@ -64,8 +67,23 @@ def qualify(qualifier, name):
 
 def engine_dir_name(endpoint):
     """The name the plugin runs as: the last '.'-separated part of its
-    STEELEAGLE_ENGINE_ENDPOINT."""
-    return endpoint.rsplit(".", 1)[-1]
+    STEELEAGLE_ENGINE_ENDPOINT. It must name a directory inside the files
+    directory, never the files directory itself, which refresh would empty."""
+    name = endpoint.rsplit(".", 1)[-1]
+    if not name or Path(name).name != name:
+        raise ConfigError(f"{endpoint!r} does not end in a name to save frames under")
+    return name
+
+
+def clear_directory(directory):
+    """Removes everything in `directory`, if it exists."""
+    if not directory.is_dir():
+        return
+    for path in directory.iterdir():
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
 
 
 def files_dir(env):
@@ -93,6 +111,9 @@ def main():
         directory = files_dir(os.environ) / engine_dir_name(name)
     except (ConfigError, ValueError, TypeError) as err:
         sys.exit(f"Bad args for {PLUGIN_FILE}: {err}")
+    if args["refresh"]:
+        logging.getLogger("detection_log").info("removing everything in %s", directory)
+        clear_directory(directory)
     detector = qualify(os.environ.get("STEELEAGLE_LOCAL_QUALIFIER", ""), args["detector"])
 
     stop = threading.Event()
