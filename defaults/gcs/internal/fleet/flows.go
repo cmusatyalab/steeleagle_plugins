@@ -440,6 +440,18 @@ func (f *Flows) Status(vehicle string) string {
 // Wait waits for every background check and push to finish. It is for tests.
 func (f *Flows) Wait() { f.pending.Wait() }
 
+// GetFlow reads the TOML of the flow vehicle runs, empty if it runs none,
+// from the daemon at conn, which routes the call to the vehicle's daemon.
+func GetFlow(ctx context.Context, conn grpc.ClientConnInterface, vehicle string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, pushTimeout)
+	defer cancel()
+	resp, err := vehiclepb.NewDataServiceClient(conn).GetFlow(route(ctx, vehicle), &vehiclepb.GetFlowRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetToml(), nil
+}
+
 // route returns ctx with calls routed to the named vehicle.
 func route(ctx context.Context, vehicle string) context.Context {
 	return metadata.AppendToOutgoingContext(ctx, routeHeader, vehicle)

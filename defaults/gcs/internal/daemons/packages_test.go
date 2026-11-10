@@ -48,7 +48,7 @@ func TestCatalog(t *testing.T) {
 		t.Errorf("h264 plugins = %v, want sorted", names)
 	}
 	gcs := pkgs[0].Plugins[0]
-	if gcs.Name != "gcs" || gcs.Type != "engine" || gcs.Error != "" || len(gcs.Args) != 6 {
+	if gcs.Name != "gcs" || gcs.Type != "engine" || gcs.Error != "" || len(gcs.Args) != 8 {
 		t.Fatalf("gcs plugin = %+v", gcs)
 	}
 	var mapbox *Arg

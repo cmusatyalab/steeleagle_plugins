@@ -154,6 +154,44 @@ orchestrator's address. After an Apply or a restart, the page follows the daemon
 until it is back, or reports that its services failed or that it didn't come
 back within a minute.
 
+## Metrics page
+
+The Metrics page draws a vehicle's running flow, whichever flow it runs, as a
+graph, with each engine's numbers over the last 1, 5 or 15 minutes or hour:
+time per input (p50, p95 on hover), wait before the engine, inputs per second,
+and the share of inputs skipped. On each path from a producer, the busiest
+engine is marked as the bottleneck when it is busy at least 80% of the time or
+skips inputs. Above the graph is the end-to-end time from capture to the GCS;
+engine times don't add up to it, since capture, transfer and queueing aren't
+engine time.
+
+The numbers come from a Prometheus server, the `prometheus` plugin of
+`engines/prometheus`, run as an `extra` service on the GCS's daemon:
+
+```toml
+[[services]]
+name = "prometheus"
+type = "extra"
+[services.plugin]
+plugin = "prometheus"
+package = "github.com/cmusatyalab/steeleagle_plugins//engines/prometheus"
+```
+
+- It scrapes every daemon that sets `[daemon] metrics_port`, which it learns
+  from the GCS at `GET /api/metrics/targets` (Prometheus HTTP service
+  discovery), so new daemons need no change to it.
+- It scrapes the GCS's own `GET /metrics`, whose `gcs_frame_age_seconds`
+  histogram is each frame's age on arrival (arrival minus the capture time the
+  vehicle stamped; frames that seem to arrive before capture, from clock skew,
+  count in `gcs_frame_age_negative_total` instead).
+- The GCS queries it at the `prometheus_url` arg (default
+  `http://localhost:9090`) for `GET /api/metrics/flow?vehicle=&window=`. While
+  it can't be reached, the page shows the flow without numbers; video and
+  control don't depend on it.
+
+`PROMETHEUS_URL=http://localhost:9090 pixi run go test ./internal/metrics/`
+also checks every query against that server.
+
 ## Pixi tasks
 
 Run these in `gcs/`. The package builds on its own: `go.mod` takes `api/go` and
