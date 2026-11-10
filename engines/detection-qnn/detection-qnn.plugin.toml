@@ -57,6 +57,12 @@ type = "number"
 description = "Largest DetectionResult this engine will emit, in bytes"
 default = 65536
 
+[[args]]
+name = "early_discard"
+type = "boolean"
+description = "Drop frames with no detections instead of forwarding them to the next engines"
+default = false
+
 [engine]
 type = "detection"
 inputs = [

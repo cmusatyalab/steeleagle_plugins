@@ -58,10 +58,10 @@ description = "Largest result sent, in bytes"
 default = 65536
 
 [[args]]
-name = "save_frames"
-type = "string"
-description = "Directory in the daemon's files directory to save every frame received to, as a JPEG (quality 95) in a subdirectory per producer, before inference. Empty to save none"
-default = ""
+name = "early_discard"
+type = "boolean"
+description = "Drop frames with no detections instead of forwarding them to the next engines"
+default = false
 
 [engine]
 type = "detection"

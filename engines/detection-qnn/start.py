@@ -14,6 +14,7 @@ DEFAULTS = {
     "nms_iou_threshold": 0.3,
     "log_level": "info",
     "max_output_size": 65536,
+    "early_discard": False,
 }
 
 args = json.loads(os.environ.get("STEELEAGLE_PLUGIN_ARGS") or "{}")
@@ -80,6 +81,8 @@ server_args = [
     "--backend", resolve(args["backend"]),
     "--uriel_engine", name,
     "--uriel_task", "detect",
+    # Forward every frame, or only the frames with detections
+    "--uriel_forward", "detections" if args["early_discard"] else "always",
     "--confidence_threshold", str(args["confidence"]),
     "--nms_score_threshold", str(args["nms_score_threshold"]),
     "--nms_iou_threshold", str(args["nms_iou_threshold"]),

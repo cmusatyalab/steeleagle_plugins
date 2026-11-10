@@ -86,7 +86,3 @@ def test_the_manifest_defaults_are_the_config_defaults():
 
 def test_the_default_model_is_accepted():
     parse_args(json.dumps({"model": Config().model}))
-
-
-def test_frames_are_not_saved_by_default():
-    assert parse_args(None).save_frames == ""

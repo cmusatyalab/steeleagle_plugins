@@ -1,6 +1,6 @@
 # Object Detection
 
-A SteelEagle engine plugin that detects objects in camera frames with YOLO26 or RF-DETR. It takes `RawFrame`s and reports a `DetectionResult` (class, score, normalized box) for each, forwarding the frame unchanged. Detections can be limited to some classes and to a geofence.
+A SteelEagle engine plugin that detects objects in camera frames with YOLO26 or RF-DETR. It takes `RawFrame`s and reports a `DetectionResult` (class, score, normalized box) for each, forwarding the frame unchanged (or, with `early_discard`, dropping it if nothing was detected). Detections can be limited to some classes and to a geofence.
 
 ## Args
 
@@ -13,13 +13,9 @@ A SteelEagle engine plugin that detects objects in camera frames with YOLO26 or 
 | `confidence` | `0.5` | Confidence threshold. |
 | `geofence` | `""` | KML file (e.g. from Google Maps) in the daemon's files directory. Only detections whose estimated location is inside it are reported. |
 | `hfov`, `vfov` | `69`, `43` | Camera field of view, in degrees. |
-| `save_frames` | `""` | Directory in the daemon's files directory to save every received frame to, as a quality-95 JPEG, before inference. Empty saves none. |
+| `early_discard` | `false` | Drop frames with no detections instead of forwarding them. Their empty result still reaches subscribers. |
 
 Transfer models and the KML to the daemon with its `TransferService`.
-
-## Saving frames
-
-To inspect the quality of the frames the engine receives, set `save_frames` to a directory name, e.g. `"frames"`. Each frame is written to `<files>/frames/<producer>/<UTC time>_<seq>.jpg`, where `<files>` is the daemon's files directory (`STEELEAGLE_FILES`). Frames are written on a separate thread so inference is not slowed; if the disk falls behind, frames are skipped and a warning is logged. Nothing is deleted, so turn it off when done: 720p at 10 fps is on the order of 1 GB per 10 minutes.
 
 ## Location estimate
 
