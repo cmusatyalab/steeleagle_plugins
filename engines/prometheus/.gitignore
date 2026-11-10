@@ -1,0 +1,5 @@
+bin/
+data/
+.pixi/
+*.egg-info/
+__pycache__/
