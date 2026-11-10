@@ -259,22 +259,13 @@ func (s *Service) ServeCompile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !g.Flow.Empty() {
-		if s.catalog == nil {
-			writeError(w, http.StatusServiceUnavailable, noDaemon)
-			return
-		}
-		cat, err := s.catalog(r.Context())
-		if err != nil {
-			writeError(w, http.StatusServiceUnavailable, "Cannot list the flow catalog: "+err.Error())
-			return
-		}
-		res, err := s.resolveForValidate(cat, *g.Flow, g.Graph)
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"errors": []GraphError{{Message: err.Error()}}})
-			return
-		}
-		target.Flow, target.Manifest, target.Engines = res.Flow, res.Manifest, res.Engines
+	flowErr, ok := s.addFlow(w, r, g, &target)
+	if !ok {
+		return
+	}
+	if flowErr != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"errors": []GraphError{{Message: flowErr.Error()}}})
+		return
 	}
 	_, errs, err := s.CompileGraph(r.Context(), g.Graph, []BuildTarget{target})
 	if err != nil {
@@ -286,6 +277,30 @@ func (s *Service) ServeCompile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// addFlow resolves the request's flow, if it has one, into target. It writes
+// a 503 and returns ok=false when the daemon can't be reached; a flow that
+// fails to check or resolve is returned as flowErr for the caller to report.
+func (s *Service) addFlow(w http.ResponseWriter, r *http.Request, g graphRequest, target *BuildTarget) (flowErr error, ok bool) {
+	if g.Flow.Empty() {
+		return nil, true
+	}
+	if s.catalog == nil {
+		writeError(w, http.StatusServiceUnavailable, noDaemon)
+		return nil, false
+	}
+	cat, err := s.catalog(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "Cannot list the flow catalog: "+err.Error())
+		return nil, false
+	}
+	res, err := s.resolveForValidate(cat, *g.Flow, g.Graph)
+	if err != nil {
+		return err, true
+	}
+	target.Flow, target.Manifest, target.Engines = res.Flow, res.Manifest, res.Engines
+	return nil, true
 }
 
 // resolveForValidate checks the flow and resolves it for the vehicle it was
@@ -381,7 +396,8 @@ func (s *Service) ServeParseDSL(w http.ResponseWriter, r *http.Request) {
 }
 
 // ServeBuild serves POST /api/build: the binary for one architecture, with
-// the driver config of the request's vehicle if it names one.
+// the driver config of the request's vehicle if it names one and the flow
+// resolved as for Validate if it has one.
 func (s *Service) ServeBuild(w http.ResponseWriter, r *http.Request) {
 	if s.ready503(w, r) == nil {
 		return
@@ -394,12 +410,20 @@ func (s *Service) ServeBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "arch must be amd64 or arm64")
 		return
 	}
-	target := BuildTarget{Key: req.Arch, Arch: req.Arch}
+	target := BuildTarget{Key: req.Arch, Arch: req.Arch, Engines: map[string]string{}}
 	if req.Vehicle != "" {
 		var ok bool
 		if target.Plugin, ok = s.vehiclePlugin(w, r, req.Vehicle); !ok {
 			return
 		}
+	}
+	flowErr, ok := s.addFlow(w, r, req, &target)
+	if !ok {
+		return
+	}
+	if flowErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("Build failed for %s: %s", req.Arch, flowErr))
+		return
 	}
 	bins, errs, err := s.CompileGraph(r.Context(), req.Graph, []BuildTarget{target})
 	if err != nil {

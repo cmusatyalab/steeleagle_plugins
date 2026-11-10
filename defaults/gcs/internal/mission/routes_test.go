@@ -650,15 +650,54 @@ func TestCompileEngineReferenceWithoutFlow(t *testing.T) {
 	}
 }
 
-func TestBuildAndRenderKeepEngineNamesVerbatim(t *testing.T) {
+func TestBuildEngineReferenceWithoutFlow(t *testing.T) {
 	f := engineFake(t)
 	s := newService(t, f)
 	body := trackBody(t, "yolo", nil, func(m map[string]any) { m["arch"] = "arm64" })
-	if rec := do(s.ServeBuild, "POST", "/api/build", body); rec.Code != 200 {
-		t.Fatalf("build status %d: %s", rec.Code, rec.Body)
+	rec := do(s.ServeBuild, "POST", "/api/build", body)
+	want := "Build failed for arm64: mission uses engine yolo in trk.Engine, but the flow has no such engine"
+	if rec.Code != 422 || decodeMap(t, rec)["detail"] != want {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
-	eq(t, engineIdent(t, f.builds[0].Ast), "DetectionEngine_yolo")
-	if rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", body); rec.Code != 200 {
+	if len(f.builds) != 0 {
+		t.Error("compiler was called")
+	}
+}
+
+func TestRenderKeepsEngineNamesVerbatim(t *testing.T) {
+	s := newService(t, engineFake(t))
+	rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", trackBody(t, "yolo", nil, nil))
+	if rec.Code != 200 || !strings.Contains(decodeMap(t, rec)["dsl"].(string), "yolo") {
 		t.Fatalf("render status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestBuildWithFlow(t *testing.T) {
+	f := engineFake(t)
+	s := newFlowService(t, f, flowCatalog("100.64.0.1", "100.64.0.2"))
+	body := trackBody(t, "100.64.0.1.yolo", localYolo(), func(m map[string]any) { m["arch"] = "arm64" })
+	if rec := do(s.ServeBuild, "POST", "/api/build", body); rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	b := f.builds[0]
+	if b.Arch != "arm64" || !strings.Contains(string(b.Flow), "100.64.0.1.yolo") {
+		t.Errorf("arch %q flow %s", b.Arch, b.Flow)
+	}
+	if got := manifestEngines(t, b.Manifest); !reflect.DeepEqual(got, []string{"100.64.0.1.yolo"}) {
+		t.Errorf("manifest engines %v", got)
+	}
+	eq(t, engineIdent(t, b.Ast), "DetectionEngine_100_64_0_1_yolo")
+}
+
+func TestBuildFlowCheckFailureIs422(t *testing.T) {
+	f := engineFake(t)
+	s := newFlowService(t, f, flowCatalog())
+	body := trackBody(t, "100.64.0.1.det", remoteDet(), func(m map[string]any) { m["arch"] = "amd64" })
+	rec := do(s.ServeBuild, "POST", "/api/build", body)
+	if rec.Code != 422 || decodeMap(t, rec)["detail"] != "Build failed for amd64: flow engine 100.64.0.1.det is not on 100.64.0.1" {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if len(f.builds) != 0 {
+		t.Error("compiler was called")
 	}
 }

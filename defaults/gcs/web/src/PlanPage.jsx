@@ -495,7 +495,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     // Engine fields offer the flow's engines of the field's engine type.
     const engines = useCallback((engineType) => engineChoices(flow, catalog, engineType), [flow, catalog]);
 
-    // The flow to ship with Validate and Deploy: {flow: template} when the
+    // The flow to ship with Validate, Download and Deploy: {flow: template} when the
     // flow has nodes and is valid, {} when it has none, and null (after a
     // toast) when it's broken -- a broken flow is never sent.
     function flowRequestPart() {
@@ -573,9 +573,11 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
 
     async function handleDownloadBinary(arch) {
         if (!missionCompiled) return;
+        const flowPart = flowRequestPart();
+        if (!flowPart) return;
         setBuilding(arch);
         try {
-            const body = { ...buildMissionRequestBody(), ...vehiclePart, arch, geojson: features };
+            const body = { ...buildMissionRequestBody(), ...flowPart, ...vehiclePart, arch, geojson: features };
             const resp = await fetch(getApiUrl('/api/build'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
