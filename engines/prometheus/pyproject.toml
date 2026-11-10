@@ -1,0 +1,49 @@
+[project]
+name = "prometheus-launcher"
+version = "0.1.0"
+description = "Runs Prometheus as an eagled service, scraping every daemon the GCS knows"
+requires-python = ">=3.12"
+dependencies = [
+    "grpcio",
+    "grpcio-health-checking",
+    "pyyaml",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["launcher*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+
+[tool.pixi.dependencies]
+python = "3.12.*"
+curl = "*"
+
+[tool.pixi.pypi-dependencies]
+prometheus-launcher = { path = ".", editable = true }
+
+[tool.pixi.feature.test.pypi-dependencies]
+pytest = "*"
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+test = { features = ["test"], solve-group = "default" }
+
+[tool.pixi.tasks]
+build = "tools/fetch-prometheus.sh"
+start = { cmd = "python -m launcher.main", depends-on = ["build"] }
+
+[tool.pixi.feature.test.tasks]
+test = "pytest"
