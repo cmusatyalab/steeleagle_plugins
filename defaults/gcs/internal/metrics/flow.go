@@ -18,10 +18,15 @@ const (
 	StatePrometheusUnreachable = "prometheus_unreachable"
 )
 
-// BottleneckBusyFraction is how busy the busiest engine on a path must be,
-// as the fraction of the window it spent processing, to be marked the
-// bottleneck when it skips no inputs.
-const BottleneckBusyFraction = 0.8
+// The busiest engine on a path is marked the bottleneck when it is busy at
+// least BottleneckBusyFraction of the window, or skips at least
+// BottleneckSkippedShare of its inputs. A few skips don't count: an idle
+// engine with several inputs still skips one now and then, when a burst
+// replaces an input before the engine takes it.
+const (
+	BottleneckBusyFraction = 0.8
+	BottleneckSkippedShare = 0.05
+)
 
 // EngineMetrics are an engine's numbers over a window. Each is null when
 // Prometheus has no sample for it in the window.
@@ -127,7 +132,8 @@ func BuildView(flowTOML []byte, vehicle string, hostnames map[string]string) (Vi
 
 // MarkBottlenecks marks, on every path from a producer to the end of the
 // flow, the engine that is busiest, if it is busy at least
-// BottleneckBusyFraction of the time or skips inputs. Busy time, not latency,
+// BottleneckBusyFraction of the time or skips at least BottleneckSkippedShare
+// of its inputs. Busy time, not latency,
 // decides: a slow engine that is rarely fed holds nothing up.
 func MarkBottlenecks(v *View) {
 	index := make(map[string]int, len(v.Nodes))
@@ -181,6 +187,6 @@ func holdsUp(n Node) bool {
 	if busyOf(n) == noBusy {
 		return false
 	}
-	skips := n.Metrics.Skipped != nil && *n.Metrics.Skipped > 0
+	skips := n.Metrics.Skipped != nil && *n.Metrics.Skipped >= BottleneckSkippedShare
 	return *n.Metrics.Busy >= BottleneckBusyFraction || skips
 }

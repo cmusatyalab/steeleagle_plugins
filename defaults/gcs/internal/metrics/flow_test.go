@@ -157,6 +157,21 @@ func TestIdleSlowEngineIsNotABottleneck(t *testing.T) {
 	}
 }
 
+// The GCS on lambda: almost always idle, but now and then a burst of
+// telemetry replaces an input before the engine takes it.
+func TestIdleEngineThatRarelySkipsIsNotABottleneck(t *testing.T) {
+	v, _ := BuildView([]byte(gcsFlow), fakeDrone, testHostnames)
+	rarelySkips := busy(0.004)
+	rarelySkips.Skipped = ptr(0.004)
+	setMetrics(&v, map[string]*EngineMetrics{encoder: busy(0.33), gcs: rarelySkips})
+
+	MarkBottlenecks(&v)
+
+	if got := bottlenecks(v); got != nil {
+		t.Errorf("bottlenecks = %v, want none", got)
+	}
+}
+
 func TestEngineThatSkipsIsMarkedBelowTheBusyThreshold(t *testing.T) {
 	v, _ := BuildView([]byte(gcsFlow), fakeDrone, testHostnames)
 	skipping := busy(0.5)

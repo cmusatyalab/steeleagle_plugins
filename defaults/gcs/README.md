@@ -161,7 +161,7 @@ graph, with each engine's numbers over the last 1, 5 or 15 minutes or hour:
 time per input (p50, p95 on hover), wait before the engine, inputs per second,
 and the share of inputs skipped. On each path from a producer, the busiest
 engine is marked as the bottleneck when it is busy at least 80% of the time or
-skips inputs. Above the graph is the end-to-end time from capture to the GCS;
+skips at least 5% of its inputs. Above the graph is the end-to-end time from capture to the GCS;
 engine times don't add up to it, since capture, transfer and queueing aren't
 engine time.
 
