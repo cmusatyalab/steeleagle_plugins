@@ -51,6 +51,12 @@ description = "Directory to record every H.264 frame received to, as Uriel deliv
 default = ""
 
 [[args]]
+name = "prometheus_url"
+type = "string"
+description = "URL of the Prometheus server (the engines/prometheus plugin) the Metrics page queries; the page shows flows without numbers while it can't be reached"
+default = "http://localhost:9090"
+
+[[args]]
 name = "mapbox"
 type = "string"
 description = "Mapbox access token for the web UI's maps; empty shows no basemap"

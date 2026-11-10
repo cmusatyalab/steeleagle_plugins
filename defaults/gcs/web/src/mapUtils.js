@@ -1,3 +1,4 @@
+import { displayName } from './vehicleNames.js';
 import tokml from 'tokml';
 import { kml as kmlToGeoJson } from '@tmcw/togeojson';
 import ColorHash from 'color-hash';
@@ -187,4 +188,105 @@ export function bboxFromFeature(feature) {
         if (lat > maxLat) maxLat = lat;
     }
     return [minLng, minLat, maxLng, maxLat];
+}
+
+// How many altitudes vehicleTracksGeoJSON samples along each track, evenly
+// spaced, for the map's line-z-offset.
+export const TRACK_ELEVATION_SAMPLES = 64;
+
+const EARTH_RADIUS_M = 6371000;
+
+// The ground distance in meters between [long, lat, ...] points a and b, by
+// the equirectangular approximation (fine at a track's scale).
+function groundDistance(a, b) {
+    const rad = Math.PI / 180;
+    const x = (b[0] - a[0]) * rad * Math.cos(((a[1] + b[1]) / 2) * rad);
+    const y = (b[1] - a[1]) * rad;
+    return Math.hypot(x, y) * EARTH_RADIUS_M;
+}
+
+// The point `at` meters along the ground from the start of the path
+// `coords` ([long, lat, alt] points, with `cum` their cumulative ground
+// distances), interpolating long, lat and alt within its leg.
+function pointAlong(coords, cum, at) {
+    let i = 1;
+    while (i < coords.length - 1 && cum[i] < at) i++;
+    const leg = cum[i] - cum[i - 1];
+    const f = leg > 0 ? Math.min(1, Math.max(0, (at - cum[i - 1]) / leg)) : 1;
+    const a = coords[i - 1], b = coords[i];
+    return [0, 1, 2].map(k => (a[k] ?? 0) + ((b[k] ?? 0) - (a[k] ?? 0)) * f);
+}
+
+// The cumulative ground distance to each point of coords.
+function cumulative(coords) {
+    const cum = [0];
+    for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1] + groundDistance(coords[i - 1], coords[i]));
+    return cum;
+}
+
+// The vehicle's track ([long, lat, alt] points, oldest first) ending at its
+// current position, or null if it has none.
+function trackPath(v) {
+    if (!v.track?.length) return null;
+    const coords = v.track.slice();
+    const here = [v.current.long, v.current.lat, v.current.alt];
+    const last = coords[coords.length - 1];
+    if (last[0] !== here[0] || last[1] !== here[1] || last[2] !== here[2]) coords.push(here);
+    return coords.length < 2 ? null : coords;
+}
+
+function trackStatus(v, squadList) {
+    return vehicleStatus(isVehicleDisconnected(v), !!squadList?.includes(v.name));
+}
+
+// Where each vehicle has been, as a GeoJSON FeatureCollection of
+// LineStrings for a map line layer: the GCS's track of the vehicle
+// ([long, lat, alt], oldest first), ending at its current position so the
+// line meets its marker. Each feature's status (see vehicleStatus) colors it
+// like the marker, and its elevation is the altitude at
+// TRACK_ELEVATION_SAMPLES points evenly spaced along it, which the map
+// indexes by line-progress to draw the line at the altitude flown. Vehicles
+// without a track are left out.
+export function vehicleTracksGeoJSON(vehicles, squadList) {
+    const features = [];
+    for (const v of vehicles) {
+        const coordinates = trackPath(v);
+        if (!coordinates) continue;
+        const cum = cumulative(coordinates);
+        const total = cum[cum.length - 1];
+        const elevation = [];
+        for (let k = 0; k < TRACK_ELEVATION_SAMPLES; k++) {
+            elevation.push(pointAlong(coordinates, cum, (total * k) / (TRACK_ELEVATION_SAMPLES - 1))[2]);
+        }
+        features.push({
+            type: 'Feature',
+            geometry: { type: 'LineString', coordinates },
+            properties: { name: v.name, status: trackStatus(v, squadList), elevation },
+        });
+    }
+    return { type: 'FeatureCollection', features };
+}
+
+// Labels for the tracks of vehicleTracksGeoJSON: a Point every `spacing`
+// meters along each track, back from the vehicle (whose marker labels it
+// where it is), with the vehicle's display name, its status, and the
+// altitude there.
+export function vehicleTrackLabelsGeoJSON(vehicles, squadList, spacing) {
+    const features = [];
+    for (const v of vehicles) {
+        const coordinates = trackPath(v);
+        if (!coordinates) continue;
+        const cum = cumulative(coordinates);
+        const total = cum[cum.length - 1];
+        const status = trackStatus(v, squadList);
+        for (let back = spacing; back <= total; back += spacing) {
+            const [long, lat, alt] = pointAlong(coordinates, cum, total - back);
+            features.push({
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: [long, lat] },
+                properties: { label: displayName(v.name), status, alt },
+            });
+        }
+    }
+    return { type: 'FeatureCollection', features };
 }

@@ -1,0 +1,32 @@
+[project]
+name = "metrics"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "uriel>=0.2.0",
+    "protobuf",
+    "numpy",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.setuptools]
+py-modules = ["main", "metrics", "window"]
+
+[tool.setuptools.packages.find]
+include = ["steeleagle_protocol*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+
+[tool.pixi.pypi-dependencies]
+metrics = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+start = "uv run main.py"

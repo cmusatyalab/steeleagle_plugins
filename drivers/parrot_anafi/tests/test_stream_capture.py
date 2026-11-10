@@ -31,6 +31,7 @@ class FakeCapture:
         self._opened = opened
         self._reads = list(reads)
         self.released = False
+        self.metadata = None
 
     def isOpened(self):
         return self._opened
@@ -53,7 +54,7 @@ class FakePublisher:
         self.closed = False
         FakePublisher.created.append(self)
 
-    def publish(self, frame):
+    def publish(self, frame, metadata=None):
         self.published.append(frame)
 
     def close(self):
@@ -241,3 +242,35 @@ def test_telemetry_needs_a_uri():
     with pytest.raises(grpc.RpcError):
         s.StreamTelemetry(stream_proto.StreamTelemetryRequest(), context)
     assert context.code == grpc.StatusCode.INVALID_ARGUMENT
+
+
+class FakeDrone:
+    """Gives Olympe states as a drone without a GPS fix does."""
+
+    setpoint = None
+
+    def __init__(self, home=True):
+        self._states = {
+            stream.GpsLocationChanged: {'latitude': 500.0, 'longitude': 500.0, 'altitude': 500.0},
+            stream.AttitudeChanged: {'yaw': 0.5, 'pitch': 0.0, 'roll': 0.0},
+            stream.SpeedChanged: {'speedX': 1.0, 'speedY': 2.0, 'speedZ': 0.5},
+            stream.AltitudeChanged: {'altitude': 10.0},
+            stream.GPSFixStateChanged: {'fixed': 0},
+        }
+        if home:
+            self._states[stream.HomeChanged] = {'latitude': 40.4, 'longitude': -79.9, 'altitude': 290.0}
+
+    def get_state(self, message):
+        return self._states[message]
+
+
+@pytest.mark.parametrize('home', [True, False])
+def test_telemetry_leaves_an_unknown_position_unset(home):
+    position = Stream(drone=FakeDrone(home), ip='192.0.2.1').get_position_info()
+
+    assert not position.HasField('home')
+    assert not position.HasField('global_position')
+    rel = position.relative_position
+    assert not rel.HasField('x') and not rel.HasField('y')
+    assert rel.z == 10.0
+    assert position.velocity_neu.z_vel == -0.5

@@ -52,6 +52,9 @@ type VehicleJSON struct {
 	// commanded even if its data isn't reaching the GCS. A vehicle on a
 	// daemon that is unavailable is not.
 	Reachable bool `json:"reachable"`
+	// Track is where the vehicle has been, as [long, lat, alt], oldest
+	// first; omitted if the GCS received no position of it.
+	Track [][3]float64 `json:"track,omitempty"`
 }
 
 // ToVehicleJSON maps a vehicle and its latest telemetry to the UI's shape.
@@ -150,6 +153,9 @@ func (h *Vehicles) ServeVehicles(w http.ResponseWriter, r *http.Request) {
 		}
 		out[i] = ToVehicleJSON(v, tels[i], status, now)
 		out[i].Reachable = true
+		if h.flows != nil {
+			out[i].Track = h.flows.Track(v.Name)
+		}
 	}
 	for _, s := range h.remember(snap) {
 		out = append(out, ToVehicleJSON(s.vehicle, nil,

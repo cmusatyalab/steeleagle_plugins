@@ -1,0 +1,32 @@
+[plugin]
+name = "Metrics"
+type = "engine"
+description = "Measures end-to-end latency, throughput and frame drops of the frames reaching it, from the timestamp the device stamped on each frame"
+
+[[args]]
+name = "report_interval_seconds"
+type = "number"
+description = "Seconds between summary log lines (latency percentiles, throughput, drops)"
+default = 5
+
+[[args]]
+name = "csv_path"
+type = "string"
+description = "File to write one row per frame to (frame_id, send_ts, recv_ts, latency_ms, bytes); empty disables it"
+default = ""
+
+[[args]]
+name = "forward_frames"
+type = "boolean"
+description = "Forward each received frame on unchanged; off by default since this engine is normally a terminal sink"
+default = false
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest EncodedFrame this engine will forward, in bytes (matches the H.264 encoder's own max_output_size)"
+default = 6237184
+
+[engine]
+type = "detection"
+inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]

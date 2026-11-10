@@ -33,9 +33,14 @@ import (
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/feed"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/metrics"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/presence"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/rtc"
+	promapi "github.com/prometheus/client_golang/api"
+	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -60,8 +65,9 @@ const (
 // default to their zero values (no ICE servers, any WebRTC port, and the
 // compiler's own defaults).
 const (
-	defaultHTTPAddr     = ":8002"
-	defaultMaxInputSize = 4 << 20
+	defaultHTTPAddr      = ":8002"
+	defaultMaxInputSize  = 4 << 20
+	defaultPrometheusURL = "http://localhost:9090"
 )
 
 // args are the plugin's args.
@@ -77,12 +83,14 @@ type args struct {
 	// DumpDir is where the H.264 frames that arrive are recorded, as they
 	// came from Uriel; empty to record none. See package dump.
 	DumpDir string `json:"dump_dir"`
+	// PrometheusURL is where the Metrics page's numbers are queried.
+	PrometheusURL string `json:"prometheus_url"`
 }
 
 // parseArgs reads the plugin's args from JSON, defaulting the ones it leaves
 // out as gcs.plugin.toml does.
 func parseArgs(content string) (args, error) {
-	a := args{HTTPAddr: defaultHTTPAddr, MaxInputSize: defaultMaxInputSize}
+	a := args{HTTPAddr: defaultHTTPAddr, MaxInputSize: defaultMaxInputSize, PrometheusURL: defaultPrometheusURL}
 	if content != "" {
 		if err := json.Unmarshal([]byte(content), &a); err != nil {
 			return args{}, fmt.Errorf("invalid plugin args: %w", err)
@@ -217,11 +225,27 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	}
 
 	daemonsRoutes := noDaemonRoutes()
+	var daemonConfigs metrics.DaemonConfigs = noDaemonConfigs{}
 	if conn != nil {
 		h := daemons.NewHandler(daemonClient, daemons.Self{IP: gcsIP, Hostname: gcsHostname, Arch: runtime.GOARCH, OS: runtime.GOOS, Engine: engine}, log).
 			WithTransfers(daemons.NewTransfers(daemonpb.NewTransferServiceClient(conn), daemons.TransferChunkSize, log))
 		daemonsRoutes = h.Routes()
+		daemonConfigs = h
 	}
+
+	reg := prometheus.NewRegistry()
+	frameAge := metrics.NewFrameAge(reg)
+	metricsRoutes := newMetricsRoutes(reg)
+	metricsRoutes["GET /api/metrics/targets"] = metrics.NewTargetsHandler(daemonConfigs, log)
+	prom, err := promapi.NewClient(promapi.Config{Address: a.PrometheusURL})
+	if err != nil {
+		return fmt.Errorf("invalid prometheus_url %q: %w", a.PrometheusURL, err)
+	}
+	flowOf := func(context.Context, string) ([]byte, error) { return nil, errNoDaemon }
+	if conn != nil {
+		flowOf = func(ctx context.Context, vehicle string) ([]byte, error) { return fleet.GetFlow(ctx, conn, vehicle) }
+	}
+	metricsRoutes["GET /api/metrics/flow"] = metrics.NewFlowHandler(flowOf, daemonConfigs, promv1.NewAPI(prom), log)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -230,7 +254,7 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: newHandler(hub, controller, vehicles, missions, daemonsRoutes, uiConfig{Mapbox: a.Mapbox}, web, log), ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{Handler: newHandler(hub, controller, vehicles, missions, daemonsRoutes, metricsRoutes, uiConfig{Mapbox: a.Mapbox}, web, log), ReadHeaderTimeout: 10 * time.Second}
 	errs := make(chan error, 2)
 	go func() {
 		log.Info().Str("addr", ln.Addr().String()).Msg("serving web UI")
@@ -251,6 +275,15 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 					fleetFlows.ReceivedFrame(msg.Vehicle)
 				}
 				hub.Publish(msg)
+			}
+		}
+		{
+			next := publish
+			publish = func(msg feed.Message) {
+				if msg.Frame != nil {
+					frameAge.Observe(msg.Vehicle, msg.Frame, time.Now())
+				}
+				next(msg)
 			}
 		}
 		if a.DumpDir != "" {
@@ -391,6 +424,30 @@ func noDaemonRoutes() daemonRoutes {
 	return routes
 }
 
+// newMetricsRoutes are the Metrics page's routes and the GCS's own metrics,
+// which Prometheus scrapes from reg.
+func newMetricsRoutes(reg *prometheus.Registry) map[string]http.Handler {
+	return map[string]http.Handler{
+		"GET /metrics": promhttp.HandlerFor(reg, promhttp.HandlerOpts{}),
+	}
+}
+
+// errNoDaemon is what calls to the daemon fail with when the GCS has no
+// daemon socket.
+var errNoDaemon = errors.New("the GCS has no connection to the daemon")
+
+// noDaemonConfigs stands in for the daemons without a daemon socket: it can
+// list none, so Prometheus is given no daemons to scrape.
+type noDaemonConfigs struct{}
+
+func (noDaemonConfigs) List(context.Context) ([]daemons.Daemon, error) {
+	return nil, errNoDaemon
+}
+
+func (noDaemonConfigs) ReadConfig(context.Context, string) ([]byte, error) {
+	return nil, errNoDaemon
+}
+
 // uiConfig is the web UI's settings from the plugin's args, served at
 // /api/config.
 type uiConfig struct {
@@ -399,8 +456,9 @@ type uiConfig struct {
 
 // newHandler serves the API, and the web UI from the directory web. vehicles
 // serves the vehicle list, missions the mission routes, orchestration the
-// daemon routes, and ui the web UI's settings.
-func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Handler, missions missionRoutes, orchestration daemonRoutes, ui uiConfig, web string, log zerolog.Logger) http.Handler {
+// daemon routes, metricsRoutes the Metrics page's routes and /metrics, and ui
+// the web UI's settings.
+func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Handler, missions missionRoutes, orchestration daemonRoutes, metricsRoutes map[string]http.Handler, ui uiConfig, web string, log zerolog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -425,6 +483,9 @@ func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Hand
 	mux.HandleFunc("POST /api/flows/from_toml", flows.ServeFromTOML)
 	mux.Handle("GET /ws/presence", presence.New(log))
 	for pattern, h := range orchestration {
+		mux.Handle(pattern, h)
+	}
+	for pattern, h := range metricsRoutes {
 		mux.Handle(pattern, h)
 	}
 	mux.HandleFunc("/api/", http.NotFound)

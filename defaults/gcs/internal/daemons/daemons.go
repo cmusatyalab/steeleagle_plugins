@@ -229,15 +229,24 @@ func (h *Handler) Routes() map[string]http.Handler {
 // ServeList serves GET /api/daemons: {"daemons": [...]}. It responds 502
 // with a detail if the daemon can't be listed.
 func (h *Handler) ServeList(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), listTimeout)
-	defer cancel()
-	resp, err := h.daemon.ListServices(ctx, &daemonpb.ListServicesRequest{})
+	list, err := h.List(r.Context())
 	if err != nil {
 		h.log.Warn().Err(err).Msg("list services for the daemons page")
 		writeJSON(w, http.StatusBadGateway, map[string]string{"detail": status.Convert(err).Message()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"daemons": Build(resp, h.self)})
+	writeJSON(w, http.StatusOK, map[string]any{"daemons": list})
+}
+
+// List lists every daemon the GCS's daemon knows of, with its services.
+func (h *Handler) List(ctx context.Context) ([]Daemon, error) {
+	ctx, cancel := context.WithTimeout(ctx, listTimeout)
+	defer cancel()
+	resp, err := h.daemon.ListServices(ctx, &daemonpb.ListServicesRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return Build(resp, h.self), nil
 }
 
 // ServeRestart serves POST /api/daemons/restart_service {"name": full service

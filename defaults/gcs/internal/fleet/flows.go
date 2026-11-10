@@ -56,6 +56,8 @@ type vehicleState struct {
 	// vehicle's telemetry and frames, and telemetry is the last it received.
 	lastTelemetry, lastFrame time.Time
 	telemetry                *telemetrypb.Telemetry
+	// track is where the vehicle has been, from its telemetry.
+	track track
 }
 
 // Flows pushes the GCS dataflow to vehicles, and tracks how each push went.
@@ -101,6 +103,7 @@ func (f *Flows) ReceivedTelemetry(vehicle string, t *telemetrypb.Telemetry) {
 	defer f.mu.Unlock()
 	st := f.state(vehicle)
 	st.lastTelemetry, st.telemetry = f.now(), t
+	st.track.add(t)
 }
 
 // ReceivedFrame records that the GCS received a frame of the vehicle.
@@ -117,6 +120,17 @@ func (f *Flows) Telemetry(vehicle string) *telemetrypb.Telemetry {
 	defer f.mu.Unlock()
 	if st := f.vehicles[vehicle]; st != nil {
 		return st.telemetry
+	}
+	return nil
+}
+
+// Track returns where the vehicle has been, as [long, lat, alt], oldest
+// first, or nil if the GCS received no position of it.
+func (f *Flows) Track(vehicle string) [][3]float64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if st := f.vehicles[vehicle]; st != nil {
+		return st.track.points()
 	}
 	return nil
 }
@@ -425,6 +439,18 @@ func (f *Flows) Status(vehicle string) string {
 
 // Wait waits for every background check and push to finish. It is for tests.
 func (f *Flows) Wait() { f.pending.Wait() }
+
+// GetFlow reads the TOML of the flow vehicle runs, empty if it runs none,
+// from the daemon at conn, which routes the call to the vehicle's daemon.
+func GetFlow(ctx context.Context, conn grpc.ClientConnInterface, vehicle string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, pushTimeout)
+	defer cancel()
+	resp, err := vehiclepb.NewDataServiceClient(conn).GetFlow(route(ctx, vehicle), &vehiclepb.GetFlowRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetToml(), nil
+}
 
 // route returns ctx with calls routed to the named vehicle.
 func route(ctx context.Context, vehicle string) context.Context {
