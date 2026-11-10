@@ -64,7 +64,7 @@ Run it on the daemon whose camera takes the frames, between the camera and the `
 
 Stores every `EncodedFrame` it gets and forwards it on unchanged. It runs on the vehicle's daemon, right after the JPEG encoder, and subscribes to the `swiftmap` engine on the remote daemon. For each request, it sends the stored frames numbered in the range, of the producer and session the request is about, to the remote daemon as files named `reachback-<number>.frame`, each the `EncodedFrame` as it was stored. A frame not stored is not sent; `swiftmap` gives up on it after `gap_timeout`.
 
-The files go outside the flow: through the local daemon's `TransferService` (`STEELEAGLE_CLIENT_SOCKET`), routed by the remote daemon's IP (`STEELEAGLE_REMOTE_QUALIFIER`), in 1 MiB chunks, one file at a time. The remote daemon saves them in its files directory. A transfer that fails is logged, and the request repeated by `swiftmap` sends it again. Frames are kept in a temporary SQLite database, removed when the engine stops.
+The files go outside the flow: through the local daemon's `TransferService` (`STEELEAGLE_CLIENT_SOCKET`), routed by the remote daemon's IP (`STEELEAGLE_REMOTE_QUALIFIER`), in 1 MiB chunks, one file at a time. The remote daemon saves them in its files directory. A transfer that fails is logged, and the request repeated by `swiftmap` sends it again. The newest 1000 frames are kept in a SQLite database, `swiftmap-reachback-<service>.sqlite3` in the temporary directory, which each start of the service replaces; `swiftmap` never asks for older ones.
 
 | Arg | Default | Description |
 | --- | --- | --- |

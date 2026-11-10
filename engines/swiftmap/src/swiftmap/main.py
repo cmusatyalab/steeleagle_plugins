@@ -95,13 +95,16 @@ def run_reachback(name, args, stop):
     if not socket_path or not remote_ip:
         sys.exit("reachback needs STEELEAGLE_CLIENT_SOCKET and STEELEAGLE_REMOTE_QUALIFIER")
     remote = f"{remote_ip}.{args['remote']}"
-    with tempfile.TemporaryDirectory(prefix="swiftmap-reachback-") as scratch:
-        store = FrameStore(str(Path(scratch) / "frames.sqlite3"))
-        try:
-            with Transfer(socket_path, remote_ip) as transfer:
-                reachback.run(name, Reachback(store, transfer.send), remote, stop=stop)
-        finally:
-            store.close()
+    # One database per service: a restart replaces it, however the last run ended
+    path = Path(tempfile.gettempdir()) / f"swiftmap-reachback-{name}.sqlite3"
+    path.unlink(missing_ok=True)
+    store = FrameStore(str(path))
+    try:
+        with Transfer(socket_path, remote_ip) as transfer:
+            reachback.run(name, Reachback(store, transfer.send), remote, stop=stop)
+    finally:
+        store.close()
+        path.unlink(missing_ok=True)
 
 
 def run_swiftmap(name, args, stop):

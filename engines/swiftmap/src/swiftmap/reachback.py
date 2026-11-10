@@ -24,15 +24,20 @@ MAX_OUTPUT_SIZE = 4096  # it only forwards, but Uriel needs a bound
 CHUNK_SIZE = 1 << 20  # as eagle sends files
 ROUTE_HEADER = "x-route-key"
 TRANSFER_TIMEOUT_S = 120.0
+# swiftmap never asks for older frames: it gives up after gap_timeout or 300 held
+KEEP_FRAMES = 1000
 
 
 class FrameStore:
-    """EncodedFrames by producer, session and frame number, in SQLite."""
+    """The newest `keep` EncodedFrames, by producer, session and frame number,
+    in SQLite."""
 
-    def __init__(self, path=":memory:"):
+    def __init__(self, path=":memory:", keep=KEEP_FRAMES):
+        self.keep = keep
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.executescript(
             """
+            PRAGMA journal_mode = OFF;
             PRAGMA synchronous = OFF;
             CREATE TABLE IF NOT EXISTS frames (
                 producer TEXT NOT NULL, session TEXT NOT NULL,
@@ -47,9 +52,10 @@ class FrameStore:
 
     def add(self, producer, session, number, data):
         with self._db:
-            self._db.execute(
+            row = self._db.execute(
                 "INSERT INTO frames VALUES (?, ?, ?, ?)", (producer, str(session), number, data)
-            )
+            ).lastrowid
+            self._db.execute("DELETE FROM frames WHERE rowid <= ?", (row - self.keep,))
 
     def frames(self, producer, session, first, last):
         """(number, data) of the frames numbered first to last, in order; the

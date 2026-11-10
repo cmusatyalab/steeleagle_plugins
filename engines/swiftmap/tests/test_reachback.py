@@ -40,6 +40,21 @@ def test_the_store_gives_a_range_of_frames_in_order(store):
     assert store.frames("camera", 1, 6, 8) == []
 
 
+def test_only_the_newest_frames_are_kept():
+    store = FrameStore(keep=3)
+    for number in range(5):
+        store.add("camera", 1, number, f"f{number}".encode())
+    assert [n for n, _ in store.frames("camera", 1, 0, 9)] == [2, 3, 4]
+    store.close()
+
+
+def test_the_database_has_no_journal_file(tmp_path):
+    store = FrameStore(str(tmp_path / "frames.sqlite3"))
+    store.add("camera", 1, 0, b"f0")
+    assert [p.name for p in tmp_path.iterdir()] == ["frames.sqlite3"]
+    store.close()
+
+
 def test_sessions_above_2_to_the_63_are_stored(store):
     store.add("camera", 1 << 63, 1, b"f1")
     assert store.frames("camera", 1 << 63, 1, 1) == [(1, b"f1")]
