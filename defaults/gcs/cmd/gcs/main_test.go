@@ -14,16 +14,20 @@ import (
 	"testing"
 	"time"
 
+	framepb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/frame"
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/control"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/daemons"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/metrics"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/presence"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/rtc"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestServesUIConfig(t *testing.T) {
@@ -32,7 +36,7 @@ func TestServesUIConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), uiConfig{Mapbox: "pk.test"}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, uiConfig{Mapbox: "pk.test"}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/config")
 	if err != nil {
@@ -53,7 +57,7 @@ func TestParseArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.HTTPAddr != ":8002" || a.MaxInputSize != 4<<20 || a.ICEServers != nil || a.WebRTCPorts != "" || a.DumpDir != "" {
+	if a.HTTPAddr != ":8002" || a.MaxInputSize != 4<<20 || a.ICEServers != nil || a.WebRTCPorts != "" || a.DumpDir != "" || a.PrometheusURL != "http://localhost:9090" {
 		t.Errorf("parseArgs(\"\") = %+v, want the defaults of gcs.plugin.toml", a)
 	}
 	// The daemon passes only the args the config sets
@@ -105,7 +109,7 @@ func TestServesPresence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), uiConfig{}, web, zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, uiConfig{}, web, zerolog.Nop()))
 	defer server.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -136,7 +140,7 @@ func TestHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), uiConfig{}, web, zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), nil, uiConfig{}, web, zerolog.Nop()))
 	defer server.Close()
 
 	for path, want := range map[string]string{
@@ -185,7 +189,7 @@ func TestHandlerWithoutWeb(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), nil, uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/streams")
 	if err != nil {
@@ -205,7 +209,7 @@ func TestHandlerWithoutDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/remote/vehicles")
 	if err != nil {
@@ -245,7 +249,7 @@ func TestNoDaemonMissionRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	for _, path := range []string{"/api/upload", "/api/deploy", "/api/flows/push"} {
 		resp, err := http.Post(server.URL+path, "application/json", strings.NewReader("{}"))
@@ -281,7 +285,7 @@ func TestCompilerRoutesRegistered(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/schema")
 	if err != nil {
@@ -312,7 +316,7 @@ func TestCatalogRoute503WithoutDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/flows/catalog")
 	if err != nil {
@@ -393,4 +397,48 @@ func TestDaemonHostname(t *testing.T) {
 
 func testDaemons() daemonRoutes {
 	return noDaemonRoutes()
+}
+
+func TestServesMetrics(t *testing.T) {
+	hub, err := rtc.NewHub(rtc.Options{}, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	reg := prometheus.NewRegistry()
+	metrics.NewFrameAge(reg).Observe("drone", framepb.EncodedFrame_builder{Timestamp: timestamppb.Now()}.Build(), time.Now())
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), newMetricsRoutes(reg), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "gcs_frame_age_seconds") {
+		t.Errorf("GET /metrics = %d %q, want 200 with gcs_frame_age_seconds", resp.StatusCode, body)
+	}
+}
+
+func TestServesNoTargetsWithoutADaemon(t *testing.T) {
+	hub, err := rtc.NewHub(rtc.Options{}, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	routes := newMetricsRoutes(prometheus.NewRegistry())
+	routes["GET /api/metrics/targets"] = metrics.NewTargetsHandler(noDaemonConfigs{}, zerolog.Nop())
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), routes, uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/metrics/targets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != "[]" {
+		t.Errorf("GET /api/metrics/targets = %d %q, want 200 []", resp.StatusCode, body)
+	}
 }

@@ -61,8 +61,8 @@ func hashConfig(raw []byte) string {
 
 func (h *Handler) own(ip string) bool { return ip == h.self.IP }
 
-// readConfig reads the config of the daemon at ip.
-func (h *Handler) readConfig(ctx context.Context, ip string) ([]byte, error) {
+// ReadConfig reads the config of the daemon at ip.
+func (h *Handler) ReadConfig(ctx context.Context, ip string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(routed(ctx, ip), readTimeout)
 	defer cancel()
 	resp, err := h.daemon.GetConfiguration(ctx, &daemonpb.GetConfigurationRequest{})
@@ -81,7 +81,7 @@ func (h *Handler) serveGetConfig(w http.ResponseWriter, r *http.Request) {
 		writeDetail(w, http.StatusBadRequest, "a daemon ip is required")
 		return
 	}
-	raw, err := h.readConfig(r.Context(), ip)
+	raw, err := h.ReadConfig(r.Context(), ip)
 	if err != nil {
 		h.log.Warn().Err(err).Str("daemon", ip).Msg("get daemon config")
 		writeRPCError(w, err)
@@ -216,7 +216,7 @@ func (h *Handler) serveApply(w http.ResponseWriter, r *http.Request) {
 	}
 	// Applying runs to the end even if the page goes away
 	ctx := context.WithoutCancel(r.Context())
-	current, err := h.readConfig(ctx, p.IP)
+	current, err := h.ReadConfig(ctx, p.IP)
 	if err != nil {
 		h.log.Warn().Err(err).Str("daemon", p.IP).Msg("re-read daemon config")
 		writeRPCError(w, err)

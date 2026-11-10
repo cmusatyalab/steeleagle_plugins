@@ -19,6 +19,7 @@ import GameControls from './GameControls.jsx'
 import Cli from './Cli.jsx';
 import ControlPage from './ControlPage.jsx';
 import OrchestrationPage from './OrchestrationPage.jsx';
+import MetricsPage from './MetricsPage.jsx';
 import PlanPage from './PlanPage.jsx';
 import MissionUploadProgress from './MissionUploadProgress.jsx';
 import VehicleSidebar, { VEHICLE_SIDEBAR_COLLAPSED_WIDTH, VEHICLE_SIDEBAR_EXPANDED_WIDTH } from './VehicleSidebar.jsx';
@@ -396,6 +397,13 @@ function App() {
         setSeletectedMenu('Orchestration');
       },
     },
+    {
+      label: 'Metrics',
+      icon: 'pi pi-chart-bar',
+      command: () => {
+        setSeletectedMenu('Metrics');
+      },
+    },
 
   ], []);
 
@@ -475,6 +483,11 @@ function App() {
             stream survive switching pages. */}
         <div style={{ display: selectedMenu === 'Orchestration' ? '' : 'none' }}>
           <OrchestrationPage toast={toast} />
+        </div>
+        {/* Kept mounted so the chosen vehicle and window survive switching
+            pages; it polls only while shown. */}
+        <div style={{ display: selectedMenu === 'Metrics' ? '' : 'none' }}>
+          <MetricsPage vehicles={vehicles} theme={theme} active={selectedMenu === 'Metrics'} />
         </div>
         <div style={{ display: selectedMenu === 'Plan' ? '' : 'none' }}>
           {planMounted && <PlanPage vehicles={vehicles} squadList={squadList} theme={theme} visible={selectedMenu === 'Plan'}
