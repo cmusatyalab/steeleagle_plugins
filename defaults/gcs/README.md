@@ -143,6 +143,11 @@ For the selected daemon:
   then only be fixed with `eagle configure` on the host. Removing or renaming
   the GCS's own service needs an extra confirmation.
 - **Restart Daemon** restarts the daemon and every service on it.
+- **Services** lists the daemon's services, each of which can be restarted or
+  stopped. A stopped service shows as "Stopped by request" and stays stopped,
+  even when its daemon restarts, until **Start** starts it again; one that
+  exited shows as "Stopped". The GCS can't stop its own service, since nothing
+  could start it again from the page.
 - **Packages** lists the installed packages and their plugins, and installs (by
   URI, `repo[//subdir][@version]`) or removes them. Changes take effect when the
   daemon next restarts.

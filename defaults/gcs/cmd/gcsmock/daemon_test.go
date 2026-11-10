@@ -541,3 +541,41 @@ func TestRestartService(t *testing.T) {
 		t.Errorf("restart nope: %v", err)
 	}
 }
+
+// TestStopService checks that a stopped service is listed as stopped and not
+// running until it is restarted, and that an unknown one can't be stopped.
+func TestStopService(t *testing.T) {
+	d := NewDaemon(Topology{GCSIP: "100.64.0.9", Detector: "100.64.0.9.detector"}, nil, nil, zerolog.Nop())
+	ctx := context.Background()
+	const detector = "100.64.0.9.detector"
+	listed := func() *daemonpb.Service {
+		t.Helper()
+		resp, err := d.ListServices(ctx, &daemonpb.ListServicesRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range resp.GetServices() {
+			if s.GetName() == detector {
+				return s
+			}
+		}
+		t.Fatalf("%s isn't listed", detector)
+		return nil
+	}
+
+	if _, err := d.StopService(ctx, daemonpb.StopServiceRequest_builder{ServiceName: detector}.Build()); err != nil {
+		t.Fatal(err)
+	}
+	if s := listed(); s.GetRunning() || !s.GetStopped() {
+		t.Errorf("stopped detector: running %v, stopped %v", s.GetRunning(), s.GetStopped())
+	}
+	if _, err := d.RestartService(ctx, daemonpb.RestartServiceRequest_builder{ServiceNames: detector}.Build()); err != nil {
+		t.Fatal(err)
+	}
+	if s := listed(); !s.GetRunning() || s.GetStopped() {
+		t.Errorf("restarted detector: running %v, stopped %v", s.GetRunning(), s.GetStopped())
+	}
+	if _, err := d.StopService(ctx, daemonpb.StopServiceRequest_builder{ServiceName: "nope"}.Build()); status.Code(err) != codes.NotFound {
+		t.Errorf("stop nope: %v", err)
+	}
+}

@@ -179,7 +179,8 @@ func driverConfig() ([]byte, error) {
 }
 
 // ListServices lists the vehicles, the encoders, the detector and the GCS engine, and the
-// remote daemons with their architectures. A daemon that is restarting, or
+// remote daemons with their architectures. A service stopped by request is
+// listed as stopped and not running. A daemon that is restarting, or
 // whose config names a package it doesn't have, lists no services: the
 // GCS's own fails the call, a remote is listed with the reason as its error.
 func (d *Daemon) ListServices(
@@ -204,6 +205,10 @@ func (d *Daemon) ListServices(
 	var services []*daemonpb.Service
 	for _, s := range resp.GetServices() {
 		if ip, _ := fleet.SplitName(s.GetName()); down[ip] == "" {
+			if d.store.isStopped(s.GetName()) {
+				s.SetRunning(false)
+				s.SetStopped(true)
+			}
 			services = append(services, s)
 		}
 	}
@@ -292,21 +297,48 @@ func (d *Daemon) listAll(
 }
 
 // RestartService pretends to restart one of the services ListServices lists,
-// and is NotFound for any other name, as the daemon is.
+// starting it if it was stopped, and is NotFound for any other name, as the
+// daemon is.
 func (d *Daemon) RestartService(
 	ctx context.Context, req *daemonpb.RestartServiceRequest,
 ) (*daemonpb.RestartServiceResponse, error) {
-	resp, err := d.ListServices(ctx, &daemonpb.ListServicesRequest{})
-	if err != nil {
+	name := req.GetServiceNames()
+	if err := d.findService(ctx, name); err != nil {
 		return nil, err
 	}
+	d.store.setStopped(name, false)
+	d.log.Info().Str("service", name).Msg("restarted service")
+	return &daemonpb.RestartServiceResponse{}, nil
+}
+
+// StopService pretends to stop one of the services ListServices lists, which
+// it then lists as stopped until it is restarted, and is NotFound for any
+// other name, as the daemon is.
+func (d *Daemon) StopService(
+	ctx context.Context, req *daemonpb.StopServiceRequest,
+) (*daemonpb.StopServiceResponse, error) {
+	name := req.GetServiceName()
+	if err := d.findService(ctx, name); err != nil {
+		return nil, err
+	}
+	d.store.setStopped(name, true)
+	d.log.Info().Str("service", name).Msg("stopped service")
+	return &daemonpb.StopServiceResponse{}, nil
+}
+
+// findService is nil if ListServices lists the service name, and otherwise
+// why not: NotFound, or why the listing failed.
+func (d *Daemon) findService(ctx context.Context, name string) error {
+	resp, err := d.ListServices(ctx, &daemonpb.ListServicesRequest{})
+	if err != nil {
+		return err
+	}
 	for _, s := range resp.GetServices() {
-		if s.GetName() == req.GetServiceNames() {
-			d.log.Info().Str("service", s.GetName()).Msg("restarted service")
-			return &daemonpb.RestartServiceResponse{}, nil
+		if s.GetName() == name {
+			return nil
 		}
 	}
-	return nil, status.Errorf(codes.NotFound, "no service %q", req.GetServiceNames())
+	return status.Errorf(codes.NotFound, "no service %q", name)
 }
 
 // GetTelemetry returns the vehicle's current telemetry.

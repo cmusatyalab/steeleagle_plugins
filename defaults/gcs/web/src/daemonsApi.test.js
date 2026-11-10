@@ -11,6 +11,7 @@ import {
     removePackage,
     restartDaemon,
     restartService,
+    stopService,
 } from './daemonsApi.js';
 
 afterEach(() => {
@@ -48,6 +49,21 @@ describe('restartService', () => {
     it("returns the daemon's reason on failure", async () => {
         stubFetch(502, { detail: 'rpc error: code = NotFound desc = no service "x"' });
         expect(await restartService('x')).toBe('rpc error: code = NotFound desc = no service "x"');
+    });
+});
+
+describe('stopService', () => {
+    it('posts the full service name', async () => {
+        const fetch = stubFetch(200, { ok: true });
+        expect(await stopService('100.64.0.2.yolo')).toBeNull();
+        const [url, init] = fetch.mock.calls[0];
+        expect(url).toBe('http://gcs:8002/api/daemons/stop_service');
+        expect(JSON.parse(init.body)).toEqual({ name: '100.64.0.2.yolo' });
+    });
+
+    it("returns the server's reason on failure", async () => {
+        stubFetch(409, { detail: "the GCS can't stop itself: nothing could start it again from here" });
+        expect(await stopService('100.64.0.1.gcs')).toBe("the GCS can't stop itself: nothing could start it again from here");
     });
 });
 

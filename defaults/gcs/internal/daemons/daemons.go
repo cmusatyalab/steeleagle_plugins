@@ -1,6 +1,7 @@
 // Package daemons serves the Orchestrate page: every daemon the GCS's own
-// daemon knows of, with the services each runs; restarting a service or a
-// whole daemon; a daemon's config and packages; uploading files and models
+// daemon knows of, with the services each runs; stopping, starting or
+// restarting a service, or restarting a whole daemon; a daemon's config and
+// packages; uploading files and models
 // to a daemon. Everything goes through the GCS's daemon: a call for a
 // particular daemon carries that daemon's IP as its route key, which the
 // GCS's daemon routes to it (or to itself).
@@ -27,10 +28,10 @@ import (
 const (
 	// listTimeout bounds the ListServices call.
 	listTimeout = 10 * time.Second
-	// restartTimeout bounds the RestartService call, which waits for the
-	// service to start again.
+	// restartTimeout bounds the RestartService and StopService calls, which
+	// wait for the service to start again, or to stop.
 	restartTimeout = 30 * time.Second
-	// maxBody bounds the body of a restart request.
+	// maxBody bounds the body of a restart or stop request.
 	maxBody = 4 << 10
 	// readTimeout bounds the config and package reads.
 	readTimeout = 10 * time.Second
@@ -60,6 +61,7 @@ const (
 var Patterns = []string{
 	"GET /api/daemons",
 	"POST /api/daemons/restart_service",
+	"POST /api/daemons/stop_service",
 	"POST /api/daemons/restart",
 	"GET /api/daemons/packages",
 	"POST /api/daemons/packages/install",
@@ -79,7 +81,10 @@ type Service struct {
 	Plugin   string `json:"plugin"`
 	Category string `json:"category"`
 	Running  bool   `json:"running"`
-	Auth     string `json:"auth"`
+	// Stopped is whether the service was stopped by request, so that it stays
+	// stopped, even across its daemon's restarts, until it is restarted.
+	Stopped bool   `json:"stopped"`
+	Auth    string `json:"auth"`
 	// Self is whether the service is this GCS, whose restart disconnects it.
 	Self bool `json:"self"`
 }
@@ -109,6 +114,7 @@ type Self struct {
 type client interface {
 	ListServices(ctx context.Context, in *daemonpb.ListServicesRequest, opts ...grpc.CallOption) (*daemonpb.ListServicesResponse, error)
 	RestartService(ctx context.Context, in *daemonpb.RestartServiceRequest, opts ...grpc.CallOption) (*daemonpb.RestartServiceResponse, error)
+	StopService(ctx context.Context, in *daemonpb.StopServiceRequest, opts ...grpc.CallOption) (*daemonpb.StopServiceResponse, error)
 	GetConfiguration(ctx context.Context, in *daemonpb.GetConfigurationRequest, opts ...grpc.CallOption) (*daemonpb.GetConfigurationResponse, error)
 	Configure(ctx context.Context, in *daemonpb.ConfigureRequest, opts ...grpc.CallOption) (*daemonpb.ConfigureResponse, error)
 	Restart(ctx context.Context, in *daemonpb.RestartRequest, opts ...grpc.CallOption) (*daemonpb.RestartResponse, error)
@@ -158,7 +164,7 @@ func Build(resp *daemonpb.ListServicesResponse, self Self) []Daemon {
 		}
 		d.Services = append(d.Services, Service{
 			Name: s.GetName(), Bare: bare, Plugin: s.GetPlugin(), Category: category(s.GetCategory()),
-			Running: s.GetRunning(), Auth: s.GetAuth(), Self: s.GetName() == self.Engine,
+			Running: s.GetRunning(), Stopped: s.GetStopped(), Auth: s.GetAuth(), Self: s.GetName() == self.Engine,
 		})
 	}
 	out := make([]Daemon, 0, len(byIP))
@@ -214,6 +220,7 @@ func (h *Handler) Routes() map[string]http.Handler {
 	return map[string]http.Handler{
 		"GET /api/daemons":                   http.HandlerFunc(h.ServeList),
 		"POST /api/daemons/restart_service":  http.HandlerFunc(h.ServeRestart),
+		"POST /api/daemons/stop_service":     http.HandlerFunc(h.serveStop),
 		"POST /api/daemons/restart":          http.HandlerFunc(h.serveRestartDaemon),
 		"GET /api/daemons/packages":          http.HandlerFunc(h.servePackages),
 		"POST /api/daemons/packages/install": http.HandlerFunc(h.serveInstallPackage),
@@ -277,6 +284,38 @@ func (h *Handler) ServeRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.log.Info().Str("service", req.Name).Msg("restarted service")
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// serveStop serves POST /api/daemons/stop_service {"name": full service
+// name}: {"ok": true} once the service has stopped. It stays stopped, even
+// across its daemon's restarts, until restart_service starts it again. The
+// GCS doesn't stop itself (409), since nothing on this page could start it
+// again.
+func (h *Handler) serveStop(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !readJSON(w, r, maxBody, &req) {
+		return
+	}
+	if req.Name == "" {
+		writeDetail(w, http.StatusBadRequest, "a service name is required")
+		return
+	}
+	if req.Name == h.self.Engine {
+		writeDetail(w, http.StatusConflict, "the GCS can't stop itself: nothing could start it again from here")
+		return
+	}
+	// Like a restart, a stop runs to the end even if the page goes away
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), restartTimeout)
+	defer cancel()
+	if _, err := h.daemon.StopService(ctx, daemonpb.StopServiceRequest_builder{ServiceName: req.Name}.Build()); err != nil {
+		h.log.Warn().Err(err).Str("service", req.Name).Msg("stop service")
+		writeRPCError(w, err)
+		return
+	}
+	h.log.Info().Str("service", req.Name).Msg("stopped service")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

@@ -36,6 +36,9 @@ type daemonStore struct {
 	gcsIP   string
 	deny    map[string]bool
 	daemons map[string]*storedDaemon
+	// stopped holds the services stopped by request, by full name, which
+	// stay stopped until they are restarted.
+	stopped map[string]bool
 }
 
 type storedDaemon struct {
@@ -56,7 +59,7 @@ type storedPackage struct {
 // newDaemonStore seeds a config and packages for every daemon in top: its
 // vehicles, encoder and yolo engine, and the GCS on the GCS's daemon.
 func newDaemonStore(top Topology) (*daemonStore, error) {
-	s := &daemonStore{now: time.Now, gcsIP: top.GCSIP, deny: top.DenyConfig, daemons: map[string]*storedDaemon{}}
+	s := &daemonStore{now: time.Now, gcsIP: top.GCSIP, deny: top.DenyConfig, daemons: map[string]*storedDaemon{}, stopped: map[string]bool{}}
 	driver, err := driverConfig()
 	if err != nil {
 		return nil, err
@@ -149,6 +152,24 @@ func (s *daemonStore) writableIn(ctx context.Context, service, method string) (*
 			"command external/steeleagle_protocol.v1.services.daemon.%s/%s is not allowed in state LOCKED", service, method)
 	}
 	return d, nil
+}
+
+// setStopped marks the service name stopped by request, or not.
+func (s *daemonStore) setStopped(name string, stopped bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if stopped {
+		s.stopped[name] = true
+	} else {
+		delete(s.stopped, name)
+	}
+}
+
+// isStopped says whether the service name was stopped by request.
+func (s *daemonStore) isStopped(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopped[name]
 }
 
 // down says why the daemon at ip lists no services, or "" if it is up:
