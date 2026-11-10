@@ -85,11 +85,11 @@ class KeyframePolicy:
 class EncodeStream:
     """The H.264 stream of one producer, at one resolution."""
 
-    def __init__(self, encoder, fps, width, height):
+    def __init__(self, encoder, converter, fps, width, height):
         uses_iframe_action = "qtic2venc" in encoder
         encoder_desc = encoder if " name=" in encoder else f"{encoder} name=enc"
         # Browsers decode 4:2:0 only, which x264enc makes only from I420
-        convert = "videoconvert" if uses_iframe_action else "videoconvert ! video/x-raw,format=I420"
+        convert = converter if uses_iframe_action else f"{converter} ! video/x-raw,format=I420"
         self.width = width
         self.height = height
         self.pipeline = Pipeline(
@@ -142,7 +142,9 @@ def _encode_frame(engine, streams, input, args):
         if stream is not None:
             stream.pipeline.stop()
         logger.info("encoding %s at %dx%d", producer, width, height)
-        stream = streams[producer] = EncodeStream(args["encoder"], args["fps"], width, height)
+        stream = streams[producer] = EncodeStream(
+            args["encoder"], args["converter"], args["fps"], width, height
+        )
     pipeline, policy = stream.pipeline, stream.policy
 
     pts_ns = int((time.monotonic() - stream.start) * 1e9)

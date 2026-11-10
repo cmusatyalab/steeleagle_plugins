@@ -16,6 +16,12 @@ description = "H.264 encoder, in gst-launch syntax"
 default = "x264enc tune=zerolatency speed-preset=ultrafast pass=quant quantizer=18 key-int-max=300"
 
 [[args]]
+name = "converter"
+type = "string"
+description = "Converts the RGB frames to a format the encoder takes, in gst-launch syntax: e.g. \"videoconvert n-threads=4\" in software, or \"qtivtransform ! video/x-raw(memory:GBM),format=NV12\" in Qualcomm hardware for qtic2venc. For encoders other than qtic2venc, its output is constrained to I420."
+default = "videoconvert n-threads=4"
+
+[[args]]
 name = "fps"
 type = "number"
 description = "Frame rate the encoder is told the frames come at"
