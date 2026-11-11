@@ -1,12 +1,15 @@
+from pathlib import Path
+
+import cv2
 import numpy as np
 import pytest
 from conftest import (
     BACKGROUND,
     LEFT_MARKER,
-    RIGHT_MARKER_ROW,
+    RIGHT_MARKER,
     YELLOW,
+    bit_x,
     make_image,
-    row_x,
     to_gray,
 )
 
@@ -17,6 +20,8 @@ from led_clock.decode import (
     find_markers,
     gray_to_binary,
     led_positions,
+    patch_radius,
+    sample_leds,
 )
 
 TICK_NS = 5_000_000
@@ -39,7 +44,7 @@ def test_gray_to_binary_inverts_gray_code():
 def test_markers_are_found_left_to_right():
     left, right = find_markers(make_image(0))
     assert np.allclose(left, LEFT_MARKER, atol=MARKER_TOLERANCE_PX)
-    assert np.allclose(right, (row_x(RIGHT_MARKER_ROW), LEFT_MARKER[1]), atol=MARKER_TOLERANCE_PX)
+    assert np.allclose(right, RIGHT_MARKER, atol=MARKER_TOLERANCE_PX)
 
 
 def test_no_markers_are_found_without_yellow():
@@ -53,13 +58,11 @@ def test_lit_red_leds_are_not_markers():
     assert np.allclose(left, LEFT_MARKER, atol=MARKER_TOLERANCE_PX)
 
 
-def test_leds_lie_at_their_breadboard_rows_between_the_markers():
-    left = np.array(LEFT_MARKER, dtype=float)
-    right = np.array((row_x(RIGHT_MARKER_ROW), LEFT_MARKER[1]), dtype=float)
-    positions = led_positions(left, right)
+def test_leds_lie_at_their_breadboard_rows_with_bit_0_leftmost():
+    positions = led_positions(np.array(LEFT_MARKER, float), np.array(RIGHT_MARKER, float))
     assert positions.shape == (BITS, 2)
-    assert positions[0] == pytest.approx((row_x(54), LEFT_MARKER[1]))
-    assert positions[9] == pytest.approx((row_x(9), LEFT_MARKER[1]))
+    for bit in range(BITS):
+        assert positions[bit] == pytest.approx((bit_x(bit), LEFT_MARKER[1]))
 
 
 def test_nothing_is_decoded_before_each_led_is_seen_on_and_off():
@@ -98,3 +101,19 @@ def test_the_display_time_is_the_middle_of_the_latest_matching_tick():
     code = (1_000_000 + 1) % 1024
     expected_tick = 1_000_000 + 1 - 1024
     assert display_time_ns(code, recv_ns, TICK_NS) == expected_tick * TICK_NS + TICK_NS // 2
+
+
+# A snapshot from the Anafi's live stream, as received on lambda2 (the
+# engine's rings and labels are drawn on it, away from the LEDs' centers)
+ANAFI_SNAPSHOT = Path(__file__).parent / "data" / "anafi_snapshot.jpeg"
+# Which LEDs are lit in it, bit 0 (the leftmost) first, as seen by eye
+ANAFI_SNAPSHOT_LIT = np.array([1, 1, 1, 0, 1, 0, 1, 1, 0, 1], dtype=bool)
+# Least gap between the dimmest lit LED and the brightest unlit one
+MIN_SEPARATION = 50
+
+
+def test_lit_and_unlit_leds_separate_in_a_real_frame():
+    rgb = cv2.cvtColor(cv2.imread(str(ANAFI_SNAPSHOT)), cv2.COLOR_BGR2RGB)
+    left, right = find_markers(rgb)
+    levels = sample_leds(rgb, led_positions(left, right), patch_radius(left, right))
+    assert levels[ANAFI_SNAPSHOT_LIT].min() - levels[~ANAFI_SNAPSHOT_LIT].max() >= MIN_SEPARATION

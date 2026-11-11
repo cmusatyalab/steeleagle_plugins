@@ -2,9 +2,10 @@
 
 The clock (ledclock.py on the Pi) shows `tick = floor(CLOCK_REALTIME / tick)
 mod 2**BITS` as Gray code on a row of red LEDs, between two yellow markers that
-are always on. The LEDs sit on breadboard rows; the camera faces the board, so
-the marker on the left of the image is the one at row LEFT_MARKER_ROW, and bit
-0 is the leftmost data LED.
+are always on. The LEDs sit on breadboard rows. In the camera's image, bit 0 is
+the leftmost data LED, LEFT_GAP_ROWS rows from the left marker, and the right
+marker is RIGHT_GAP_ROWS rows past bit 9. The gaps are as measured on the
+Anafi's frames.
 
 Each frame, the markers are found again (stabilization moves the image), the
 LEDs are sampled at their rows' places between them, and each LED is read as
@@ -18,14 +19,17 @@ import cv2
 import numpy as np
 
 BITS = 10
-# Breadboard rows, as numbered on the board, of the markers and of bits 0 to 9
-LEFT_MARKER_ROW = 59
-RIGHT_MARKER_ROW = 3
-BIT_ROWS = np.array([54, 49, 44, 39, 34, 29, 24, 19, 14, 9])
-# Where each LED lies on the line from the left marker to the right one
-BIT_FRACTIONS = (LEFT_MARKER_ROW - BIT_ROWS) / (LEFT_MARKER_ROW - RIGHT_MARKER_ROW)
+# The LED row, in breadboard rows: from the left marker to bit 0, between
+# adjacent data LEDs, and from bit 9 to the right marker
+LEFT_GAP_ROWS = 6
+BIT_SPACING_ROWS = 5
+RIGHT_GAP_ROWS = 5
+MARKER_SPAN_ROWS = LEFT_GAP_ROWS + (BITS - 1) * BIT_SPACING_ROWS + RIGHT_GAP_ROWS
+# Where each LED lies on the line from the left marker to the right one, bit 0
+# first
+BIT_FRACTIONS = (LEFT_GAP_ROWS + BIT_SPACING_ROWS * np.arange(BITS)) / MARKER_SPAN_ROWS
 # Spacing of adjacent data LEDs, as a fraction of the distance between markers
-BIT_SPACING_FRACTION = (BIT_ROWS[0] - BIT_ROWS[1]) / (LEFT_MARKER_ROW - RIGHT_MARKER_ROW)
+BIT_SPACING_FRACTION = BIT_SPACING_ROWS / MARKER_SPAN_ROWS
 # Radius of the square patch an LED is sampled over, as a fraction of the LED
 # spacing; it stays inside the LED's glow without reaching its neighbors
 PATCH_FRACTION = 0.2
@@ -98,10 +102,19 @@ def led_positions(left, right):
     return left + BIT_FRACTIONS[:, None] * (right - left)
 
 
+def patch_radius(left, right):
+    """The radius, in pixels, of the patch each LED is sampled over, given
+    the markers' centers."""
+    spacing = np.linalg.norm(np.asarray(right) - np.asarray(left)) * BIT_SPACING_FRACTION
+    return max(MIN_PATCH_RADIUS_PX, round(spacing * PATCH_FRACTION))
+
+
 def sample_leds(rgb, positions, radius):
-    """The brightness of each LED: the mean, over a square patch around it, of
-    each pixel's brightest channel."""
-    value = rgb.max(axis=2)
+    """The brightness of each LED: the mean luma over a square patch around
+    it. Luma, not the brightest channel: an unlit LED takes on the red glow of
+    its lit neighbors, which is bright in red alone, while a lit LED's core is
+    bright in every channel."""
+    value = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     height, width = value.shape
     levels = np.empty(len(positions))
     for i, (x, y) in enumerate(np.rint(positions).astype(int)):
@@ -135,8 +148,7 @@ class LedReader:
             return reading
         left, right = reading.markers
         reading.positions = led_positions(left, right)
-        spacing = np.linalg.norm(right - left) * BIT_SPACING_FRACTION
-        reading.patch_radius = max(MIN_PATCH_RADIUS_PX, round(spacing * PATCH_FRACTION))
+        reading.patch_radius = patch_radius(left, right)
         reading.levels = sample_leds(rgb, reading.positions, reading.patch_radius)
         if np.isnan(reading.levels).any():
             return reading

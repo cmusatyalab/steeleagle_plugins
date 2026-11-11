@@ -60,10 +60,11 @@ class JpegSaver:
     def __init__(self, directory, quality=JPEG_QUALITY):
         self.directory = directory
         self.quality = quality
-        directory.mkdir(parents=True, exist_ok=True)
         logger.info("saving snapshots to %s", directory)
 
     def save(self, name, rgb):
+        # Made on each save, in case it was removed while the engine runs
+        self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / name
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         if not cv2.imwrite(str(path), bgr, [cv2.IMWRITE_JPEG_QUALITY, self.quality]):

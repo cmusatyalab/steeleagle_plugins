@@ -16,7 +16,7 @@ Both latencies assume the Pi's clock, the driver host's clock and this host's cl
 
 As a check that needs no clocks, each tick is compared with the last one read. Frames come `1/fps` apart, so ticks should step by about a whole number of frames' worth (6.67 at 30 fps), within 2 ticks.
 
-The breadboard layout is fixed in `decode.py`: markers at rows 59 and 3, bit 0 at row 54 up to bit 9 at row 9, with bit 0 on the left as seen facing the board.
+The breadboard layout is fixed in `decode.py`: markers at rows 3 and 59, and bit 0 at row 54 down to bit 9 at row 9. In the camera's image, row 3 is on the left, so bit 9 is the leftmost data LED. Each LED's brightness is its mean luma over a small patch. Luma works better than the brightest channel because unlit LEDs pick up red glow from their lit neighbours.
 
 ## Output
 
