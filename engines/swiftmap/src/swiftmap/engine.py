@@ -30,8 +30,6 @@ RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
 ENCODED_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
 GENERIC_RESULT_TYPE = "steeleagle_protocol/v1/messages/result/GenericResult"
 REQUEST_TYPE = "swiftmap/ReachbackRequest"
-# A derived result must name a flow; reachback ignores it
-REQUEST_FLOW = "swiftmap-reachback"
 RGB_CHANNELS = 3
 POLL_INTERVAL_S = 0.1
 FILE_SCAN_INTERVAL_S = 0.5
@@ -281,12 +279,17 @@ def run(name, swiftmap, *, max_output_size, stop, on_ready=None):
     with uriel.Engine(
         name, result_type=GENERIC_RESULT_TYPE, max_output_size=max_output_size
     ) as engine:
+        engine.subscribe(name)
+        flow = None
         client = swiftmap.sender.client
         logger.info("engine %s ready; mapping on %s:%s", name, client.server, client.port)
         if on_ready is not None:
             on_ready()
         while not stop.is_set():
-            input = engine.next(POLL_INTERVAL_S)
+            engine.wait(POLL_INTERVAL_S)
+            while (event := engine.poll_event()) is not None:
+                flow = event.flow or flow
+            input = engine.poll()
             now = time.monotonic()
             if input is not None:
                 try:
@@ -301,6 +304,9 @@ def run(name, swiftmap, *, max_output_size, stop, on_ready=None):
                 engine.forward(result=result)
             try:
                 for id, payload in swiftmap.poll(now):
-                    engine.publish_derived(id, REQUEST_FLOW, payload, result_type=REQUEST_TYPE)
+                    if flow is None:
+                        logger.warning("no flow known yet to ask reachback in; asking later")
+                        continue
+                    engine.publish_derived(id, flow, payload, result_type=REQUEST_TYPE)
             except Exception:
                 logger.exception("failed to handle the frames sent back")
