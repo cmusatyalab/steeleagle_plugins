@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	common "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/common"
 	telemetrypb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/telemetry"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 )
@@ -183,6 +184,34 @@ func TestMissionSquare(t *testing.T) {
 	}
 	if v.StopMission() {
 		t.Error("second StopMission = true, want false")
+	}
+}
+
+func TestTelemetryMissionSetpoint(t *testing.T) {
+	v, c := flying(10)
+	v.StartMission()
+	c.run(time.Second)
+	a := v.Telemetry(c.now).GetPositionInfo().GetSetpoint()
+	if a == nil {
+		t.Fatal("no setpoint on a mission")
+	}
+	var sp common.GlobalPosition
+	if err := a.UnmarshalTo(&sp); err != nil {
+		t.Fatalf("setpoint is not a GlobalPosition: %v", err)
+	}
+	n, e := metersBetween(v.pos, LatLon{Lat: sp.GetLatitude(), Lon: sp.GetLongitude()})
+	if d := math.Hypot(n, e); math.Abs(d-45) > 0.5 {
+		t.Errorf("setpoint %v m ahead, want 45", d)
+	}
+	if b := wrap360(math.Atan2(e, n) * 180 / math.Pi); math.Abs(b-v.heading) > 0.5 {
+		t.Errorf("setpoint bearing %v, want heading %v", b, v.heading)
+	}
+	if sp.GetAltitude() != 310 {
+		t.Errorf("setpoint altitude %v, want 310", sp.GetAltitude())
+	}
+	v.Hold()
+	if a := v.Telemetry(c.now).GetPositionInfo().GetSetpoint(); a != nil {
+		t.Errorf("setpoint after Hold = %v", a)
 	}
 }
 

@@ -104,6 +104,36 @@ func TestTrackKeepsOnlyTrackLength(t *testing.T) {
 	}
 }
 
+func TestTrackStartCountsDroppedPath(t *testing.T) {
+	var tr track
+	if tr.start != 0 {
+		t.Fatalf("start of a new track = %v", tr.start)
+	}
+	step := 7.0
+	n := int(2 * trackLength / step)
+	for i := range n {
+		tr.add(at(40+float64(i)*step*metersLat, -79.8))
+	}
+	dropped := n - len(tr.points())
+	if want := float64(dropped) * step; math.Abs(tr.start-want) > 0.01 {
+		t.Errorf("start = %v, want %v: the path of the %d points dropped", tr.start, want, dropped)
+	}
+}
+
+func TestTrackStartIsOverTheGround(t *testing.T) {
+	var tr track
+	// Climbing a meter for every meter flown
+	step := 7.0
+	n := int(2 * trackLength / step)
+	for i := range n {
+		tr.add(atAlt(40+float64(i)*step*metersLat, -79.8, float32(float64(i)*step)))
+	}
+	dropped := n - len(tr.points())
+	if want := float64(dropped) * step; math.Abs(tr.start-want) > 0.01 {
+		t.Errorf("start = %v, want %v: the ground distance only", tr.start, want)
+	}
+}
+
 func TestTrackKeepsLengthWithSparsePoints(t *testing.T) {
 	var tr track
 	// Points further apart than trackLength, as when telemetry stalls: the
@@ -138,13 +168,13 @@ func TestTrackPointsIsACopy(t *testing.T) {
 
 func TestFlowsTrack(t *testing.T) {
 	_, f, _ := flowsFixture(t)
-	if got := f.Track(v1); got != nil {
-		t.Fatalf("Track before telemetry = %v, want nil", got)
+	if got, start := f.Track(v1); got != nil || start != 0 {
+		t.Fatalf("Track before telemetry = %v, %v, want nil, 0", got, start)
 	}
 	f.ReceivedTelemetry(v1, at(40.2, -79.8))
 	f.ReceivedTelemetry(v1, at(40.2+2*trackSpacing*metersLat, -79.8))
-	if got := f.Track(v1); len(got) != 2 {
-		t.Fatalf("Track = %v, want 2 points", got)
+	if got, start := f.Track(v1); len(got) != 2 || start != 0 {
+		t.Fatalf("Track = %v, %v, want 2 points from the start", got, start)
 	}
 }
 

@@ -125,14 +125,15 @@ func (f *Flows) Telemetry(vehicle string) *telemetrypb.Telemetry {
 }
 
 // Track returns where the vehicle has been, as [long, lat, alt], oldest
-// first, or nil if the GCS received no position of it.
-func (f *Flows) Track(vehicle string) [][3]float64 {
+// first, or nil if the GCS received no position of it, and how far over the
+// ground it had flown before the first of those points (see track.start).
+func (f *Flows) Track(vehicle string) (points [][3]float64, start float64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if st := f.vehicles[vehicle]; st != nil {
-		return st.track.points()
+		return st.track.points(), st.track.start
 	}
-	return nil
+	return nil, 0
 }
 
 // Observe records the latest snapshot, and checks in the background each

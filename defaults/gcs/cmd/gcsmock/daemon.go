@@ -500,14 +500,22 @@ func (d *Daemon) SetGimbalAngleTarget(
 	return &driverpb.SetGimbalAngleTargetResponse{}, nil
 }
 
-// missionFlow is the flow of a started mission: telemetry only, to a sink.
-func missionFlow(vehicle string) []byte {
+// missionFlow is the flow of a started mission: telemetry only, to a sink
+// and to gcsEngine, so the GCS still sees the vehicle while it flies the
+// mission. Being a mission's flow, the GCS leaves it as it is.
+func missionFlow(vehicle, gcsEngine string) []byte {
 	ip, _ := fleet.SplitName(vehicle)
 	sink := ip + ".mission_sink"
 	b, _ := (&config.FlowConfig{
 		Producers: []config.Producer{{Name: "telemetry"}},
-		Engines:   []config.Engine{{Name: sink, Location: config.LocationLocal}},
-		Edges:     []config.Edge{{From: "telemetry", To: sink, Timeout: "2s"}},
+		Engines: []config.Engine{
+			{Name: sink, Location: config.LocationLocal},
+			{Name: gcsEngine, Location: config.LocationRemote},
+		},
+		Edges: []config.Edge{
+			{From: "telemetry", To: sink, Timeout: "2s"},
+			{From: "telemetry", To: gcsEngine, Timeout: "2s"},
+		},
 	}).ToBytes()
 	return b
 }
@@ -520,7 +528,7 @@ func (d *Daemon) StartMission(
 	if err != nil {
 		return nil, err
 	}
-	if err := d.setFlow(st, name, missionFlow(name)); err != nil {
+	if err := d.setFlow(st, name, missionFlow(name, d.top.GCSIP+".gcs")); err != nil {
 		return nil, err
 	}
 	st.v.StartMission()

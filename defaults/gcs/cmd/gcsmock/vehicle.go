@@ -8,6 +8,7 @@ import (
 	common "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/common"
 	telemetrypb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/telemetry"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -354,6 +355,31 @@ func (v *Vehicle) stepMission(dt time.Duration) {
 	v.curVx = MissionSpeed
 }
 
+// missionCorner is the corner of the square the current leg flies to.
+func (v *Vehicle) missionCorner() LatLon {
+	ahead := MissionSide - v.legElapsed.Seconds()*MissionSpeed
+	h := v.heading * math.Pi / 180
+	return offsetFrom(v.pos, ahead*math.Cos(h), ahead*math.Sin(h))
+}
+
+// setpoint is the driver's setpoint: on a mission, the corner it flies to,
+// as a GlobalPosition at the mission's altitude above sea level; nil
+// otherwise, as the Anafi clears it on Hold, Land and return to home.
+func (v *Vehicle) setpoint() *anypb.Any {
+	if v.mode != Mission {
+		return nil
+	}
+	c := v.missionCorner()
+	a, err := anypb.New(common.GlobalPosition_builder{
+		Latitude: proto.Float64(c.Lat), Longitude: proto.Float64(c.Lon),
+		Altitude: proto.Float32(float32(groundAltitude + missionAltitude)),
+	}.Build())
+	if err != nil {
+		return nil
+	}
+	return a
+}
+
 func (v *Vehicle) telemetryMode() telemetrypb.Mode {
 	switch v.mode {
 	case TakingOff:
@@ -404,6 +430,7 @@ func (v *Vehicle) Telemetry(now time.Time) *telemetrypb.Telemetry {
 				XVel: proto.Float32(float32(v.curVx)), YVel: proto.Float32(float32(v.curVy)),
 				ZVel: proto.Float32(float32(v.curVz)), AngularVel: proto.Float32(float32(v.curYr)),
 			}.Build(),
+			Setpoint: v.setpoint(),
 		}.Build(),
 		GimbalInfo: telemetrypb.GimbalInfo_builder{
 			PoseBody: common.Pose_builder{Pitch: proto.Float32(float32(v.gimbalPitch))}.Build(),

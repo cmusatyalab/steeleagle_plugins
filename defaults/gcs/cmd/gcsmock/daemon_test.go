@@ -273,14 +273,19 @@ func TestStartMissionReplacesFlow(t *testing.T) {
 		t.Fatalf("calls = %d", len(calls))
 	}
 	f := calls[1].flow
+	// Telemetry goes to the mission's sink and on to the GCS, so the GCS
+	// still sees the vehicle during the mission
+	gcs := "100.64.0.9.gcs"
 	if len(f.Producers) != 1 || f.Producers[0].Name != alphaName+".telemetry" ||
-		len(f.Engines) != 1 || f.Engines[0].Name != "100.64.0.1.mission_sink" ||
-		len(f.Edges) != 1 || f.Edges[0].From != alphaName+".telemetry" || f.Edges[0].To != "100.64.0.1.mission_sink" {
+		len(f.Engines) != 2 || f.Engines[0].Name != "100.64.0.1.mission_sink" || f.Engines[1].Name != gcs ||
+		len(f.Edges) != 2 ||
+		f.Edges[0].From != alphaName+".telemetry" || f.Edges[0].To != "100.64.0.1.mission_sink" ||
+		f.Edges[1].From != alphaName+".telemetry" || f.Edges[1].To != gcs {
 		t.Errorf("mission flow = %+v", f)
 	}
 	g, _ := dc.GetFlow(routed(alphaName), &vehiclepb.GetFlowRequest{})
 	parsed, err := config.ParseFlowConfigFromBytes(g.GetToml())
-	if err != nil || len(parsed.Engines) != 1 || parsed.Engines[0].Name != "100.64.0.1.mission_sink" {
+	if err != nil || len(parsed.Engines) != 2 || parsed.Engines[0].Name != "100.64.0.1.mission_sink" {
 		t.Errorf("GetFlow = %q, %v", g.GetToml(), err)
 	}
 }

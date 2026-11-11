@@ -23,6 +23,10 @@ const (
 // above where the vehicle took off, as in VehicleJSON.Current.
 type track struct {
 	pts [][3]float64
+	// start is how far over the ground, in meters, the vehicle had flown from
+	// its first recorded point to pts[0]: the path dropped from the track.
+	// Distances along the track from it stay put as the track moves on.
+	start float64
 }
 
 // add appends the vehicle's position in t, unless t has no position fix or
@@ -56,6 +60,9 @@ func (tr *track) trim() {
 	for i := len(tr.pts) - 1; i > 0; i-- {
 		length += distance(tr.pts[i-1], tr.pts[i])
 		if length >= trackLength {
+			for j := 1; j < i; j++ {
+				tr.start += groundDistance(tr.pts[j-1], tr.pts[j])
+			}
 			tr.pts = append(tr.pts[:0], tr.pts[i-1:]...)
 			return
 		}
@@ -68,6 +75,13 @@ func (tr *track) points() [][3]float64 {
 		return nil
 	}
 	return append([][3]float64(nil), tr.pts...)
+}
+
+// groundDistance is the distance, in meters, between [long, lat, alt] points
+// a and b over the ground, ignoring their altitudes, as the map measures the
+// track.
+func groundDistance(a, b [3]float64) float64 {
+	return distance([3]float64{a[0], a[1]}, [3]float64{b[0], b[1]})
 }
 
 // distance is the distance, in meters, between [long, lat, alt] points a and

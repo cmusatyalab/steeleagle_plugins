@@ -6,6 +6,7 @@ import { vehicleControlGroupDigits } from './squadUtils.js'
 import { STYLE_URLS, applyBasemapConfig, applySatelliteLayerVisibility } from './mapStyles.js'
 import { displayName } from './vehicleNames.js'
 import MapUnavailable from './MapUnavailable.jsx'
+import { cameraRay, setpointPath, cameraLabel, setpointLabel, vehicleCameraGeoJSON, vehicleSetpointGeoJSON, vehicleFootprintGeoJSON } from './mapOverlays.js'
 import { hasMapboxToken } from './mapboxToken.js'
 
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -68,6 +69,72 @@ function createVehicleShadowElement(opacity = 1) {
   el.appendChild(circle);
   return el;
 }
+
+// A small label chip beside a map overlay marker, with one line per entry of
+// lines ([text, color]).
+function overlayLabel(lines) {
+  const label = document.createElement('div');
+  Object.assign(label.style, {
+    position: 'absolute', left: '100%', top: '50%', transform: 'translate(6px, -50%)',
+    padding: '2px 6px', borderRadius: '4px', background: 'rgba(17,24,39,0.85)',
+    fontFamily: 'monospace', fontSize: '11px', whiteSpace: 'nowrap', pointerEvents: 'none',
+  });
+  for (const [text, color] of lines) {
+    const line = document.createElement('div');
+    line.textContent = text;
+    line.style.color = color;
+    label.appendChild(line);
+  }
+  return label;
+}
+
+// An overlay marker: a ring of radius r in color with a black halo, plus
+// marks (extra SVG elements, e.g. ticks or a centre dot) and a label chip.
+function createOverlayMarkerElement(color, r, marks, lines) {
+  const size = 2 * r + 10;
+  const el = document.createElement('div');
+  Object.assign(el.style, { width: `${size}px`, height: `${size}px`, pointerEvents: 'none' });
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('width', String(size));
+  svg.setAttribute('height', String(size));
+  svg.setAttribute('viewBox', `${-size / 2} ${-size / 2} ${size} ${size}`);
+  svg.setAttribute('aria-hidden', 'true');
+  const add = (tag, attrs) => {
+    const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+    svg.appendChild(node);
+  };
+  add('circle', { r, fill: 'none', stroke: '#000', 'stroke-width': 4, opacity: 0.5 });
+  add('circle', { r, fill: 'none', stroke: color, 'stroke-width': 2 });
+  for (const [tag, attrs] of marks) add(tag, attrs);
+  el.appendChild(svg);
+  el.appendChild(overlayLabel(lines));
+  return el;
+}
+
+// Where the camera's centre meets the ground: a crosshair with its label.
+function createCameraHitElement(color, label) {
+  const tick = (x1, y1, x2, y2) => ['line', { x1, y1, x2, y2, stroke: color, 'stroke-width': 2 }];
+  return createOverlayMarkerElement(color, 6,
+    [tick(-10, 0, -7, 0), tick(7, 0, 10, 0), tick(0, -10, 0, -7), tick(0, 7, 0, 10)],
+    [[label, '#fcd34d']]);
+}
+
+// The setpoint: a ring with a centre dot in the vehicle's color, labelled.
+function createSetpointElement(color, label) {
+  return createOverlayMarkerElement(color, 11,
+    [['circle', { r: 3, fill: color, stroke: '#fff', 'stroke-width': 1 }]],
+    [['SETPOINT', '#86efac'], [label, '#f3f4f6']]);
+}
+
+// The line layers from each vehicle to where its camera points (see
+// vehicleCameraGeoJSON) and to its setpoint (see vehicleSetpointGeoJSON).
+const CAMERA_LINES = 'vehicle-camera-lines';
+// The patch of ground each camera sees (see vehicleFootprintGeoJSON), as a
+// fill and its outline, draped on the terrain
+const CAMERA_FOOTPRINTS = 'vehicle-camera-footprints';
+const CAMERA_FOOTPRINT_OUTLINES = 'vehicle-camera-footprint-outlines';
+const SETPOINT_LINES = 'vehicle-setpoint-lines';
 
 // The line layer of where each vehicle has been (see vehicleTracksGeoJSON),
 // and the layer of its name along it (see vehicleTrackLabelsGeoJSON).
@@ -145,6 +212,47 @@ function addTrackLayers(map, tracks, labels) {
   });
 }
 
+// Adds the camera and setpoint lines' sources and layers to map, which
+// setStyle removes, so this runs on every style.load. Like the tracks, both
+// are drawn in the air: each feature's elevation is its altitude at its two
+// ends, indexed by line-progress.
+function addOverlayLayers(map, cameraLines, setpointLines, footprints) {
+  if (map.getSource(CAMERA_LINES)) return;
+  // First, so the lines draw over it
+  map.addSource(CAMERA_FOOTPRINTS, { type: 'geojson', data: footprints });
+  map.addLayer({
+    id: CAMERA_FOOTPRINTS, type: 'fill', source: CAMERA_FOOTPRINTS,
+    paint: { 'fill-color': cameraColor(), 'fill-opacity': 0.15, 'fill-emissive-strength': 1 },
+  });
+  map.addLayer({
+    id: CAMERA_FOOTPRINT_OUTLINES, type: 'line', source: CAMERA_FOOTPRINTS,
+    layout: { 'line-join': 'round' },
+    paint: { 'line-color': cameraColor(), 'line-width': 1.5, 'line-opacity': 0.7, 'line-emissive-strength': 1 },
+  });
+  const layout = {
+    'line-join': 'round',
+    'line-cap': 'round',
+    'line-elevation-reference': 'ground',
+    'line-z-offset': ['at-interpolated', ['*', ['line-progress'], 1], ['get', 'elevation']],
+  };
+  const paint = { 'line-occlusion-opacity': 0.35, 'line-emissive-strength': 1 };
+  map.addSource(CAMERA_LINES, { type: 'geojson', data: cameraLines, lineMetrics: true });
+  map.addLayer({
+    id: CAMERA_LINES, type: 'line', source: CAMERA_LINES, layout,
+    paint: { ...paint, 'line-color': cameraColor(), 'line-width': 2.5 },
+  });
+  map.addSource(SETPOINT_LINES, { type: 'geojson', data: setpointLines, lineMetrics: true });
+  map.addLayer({
+    id: SETPOINT_LINES, type: 'line', source: SETPOINT_LINES, layout,
+    paint: { ...paint, 'line-color': statusColor(), 'line-width': 3, 'line-dasharray': [0, 2] },
+  });
+}
+
+// The camera line's color: the theme's accent.
+function cameraColor() {
+  return themeColor('--primary-color', '#f59e0b');
+}
+
 function MapboxMap({ selectedVehicle, vehicles, mapPanelSize, tracking, detectedObjects, mapHeight, squadList, onToggleVehicle, controlGroups, mapStyle }) {
   const mapRef = useRef()
   const mapContainerRef = useRef()
@@ -154,6 +262,10 @@ function MapboxMap({ selectedVehicle, vehicles, mapPanelSize, tracking, detected
   // style change
   const tracksRef = useRef(NO_FEATURES);
   const trackLabelsRef = useRef(NO_FEATURES);
+  // The latest camera and setpoint lines, likewise
+  const cameraLinesRef = useRef(NO_FEATURES);
+  const setpointLinesRef = useRef(NO_FEATURES);
+  const footprintsRef = useRef(NO_FEATURES);
   useEffect(() => {
     mapRef.current = new mapboxgl.Map({
       container: mapContainerRef.current,
@@ -188,6 +300,7 @@ function MapboxMap({ selectedVehicle, vehicles, mapPanelSize, tracking, detected
       mapRef.current.setConfigProperty('basemap', 'font', 'Montserrat');
       applySatelliteLayerVisibility(mapRef.current);
       addTrackLayers(mapRef.current, tracksRef.current, trackLabelsRef.current);
+      addOverlayLayers(mapRef.current, cameraLinesRef.current, setpointLinesRef.current, footprintsRef.current);
     });
 
     // Add a small delay to ensure container is fully rendered
@@ -243,12 +356,32 @@ function MapboxMap({ selectedVehicle, vehicles, mapPanelSize, tracking, detected
     trackLabelsRef.current = vehicleTrackLabelsGeoJSON(vehicles, squadList, TRACK_LABEL_SPACING_M);
     mapRef.current.getSource(TRACKS)?.setData(tracksRef.current);
     mapRef.current.getSource(TRACK_LABELS)?.setData(trackLabelsRef.current);
+    cameraLinesRef.current = vehicleCameraGeoJSON(vehicles, squadList);
+    setpointLinesRef.current = vehicleSetpointGeoJSON(vehicles, squadList);
+    mapRef.current.getSource(CAMERA_LINES)?.setData(cameraLinesRef.current);
+    mapRef.current.getSource(SETPOINT_LINES)?.setData(setpointLinesRef.current);
+    footprintsRef.current = vehicleFootprintGeoJSON(vehicles);
+    mapRef.current.getSource(CAMERA_FOOTPRINTS)?.setData(footprintsRef.current);
     vehicles.forEach(v => {
       const isSelected = !!(squadList && squadList.includes(v.name));
       const status = vehicleStatus(isVehicleDisconnected(v), isSelected);
       const groupDigits = vehicleControlGroupDigits(controlGroups ?? {}, v.name);
       const chipsHtml = groupDigits.map((d) => `<span class="squad-chip">${d}</span>`).join('');
       const offline = status === 'offline';
+      // The overlays' markers first, so the vehicle's draws over them
+      const ray = cameraRay(v);
+      if (ray && !ray.clamped) {
+        markerRefs.current.push(new mapboxgl.Marker({ element: createCameraHitElement(cameraColor(), cameraLabel(ray, v.camera.pitch)) })
+          .setLngLat(ray.end)
+          .addTo(mapRef.current));
+      }
+      // Only a selected vehicle's, as with its line (vehicleSetpointGeoJSON)
+      const path = isSelected ? setpointPath(v) : null;
+      if (path) {
+        markerRefs.current.push(new mapboxgl.Marker({ element: createSetpointElement(vehicleStatusMapColor(status), setpointLabel(path, v.setpoint.alt)), altitude: v.setpoint.alt })
+          .setLngLat([v.setpoint.long, v.setpoint.lat])
+          .addTo(mapRef.current));
+      }
       // Shadow first, so the marker draws over it when they meet on the ground
       if (v.current.alt > 0) {
         markerRefs.current.push(new mapboxgl.Marker({ element: createVehicleShadowElement(offline ? 0.6 : 1), pitchAlignment: 'map' })
