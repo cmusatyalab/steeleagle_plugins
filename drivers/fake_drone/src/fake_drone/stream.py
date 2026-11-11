@@ -1,4 +1,5 @@
-"""Stream Service of the fake drone: replays a looping .mp4 file as its camera.
+"""Stream Service of the fake drone: replays an .mp4 file as its camera,
+looping it, or, with no_loop, playing it once and then stopping the plugin.
 
 As in parrot_anafi, the camera is read from the first StreamCameras call on,
 for good, and each frame is published to the producer the vehicle last asked
@@ -40,13 +41,16 @@ RESOLUTION_DIMENSIONS = {
 
 class Stream(StreamServiceServicer):
     """Stream Service implementation. `telemetry` is the vmeta.Telemetry
-    recorded in the video, which goes with each frame, or None."""
+    recorded in the video, which goes with each frame, or None. Unless
+    `loop`, the video plays once, and then `on_end` is called."""
 
-    def __init__(self, video_path, decoder, telemetry=None):
+    def __init__(self, video_path, decoder, telemetry=None, loop=True, on_end=None):
         self.video_path = video_path
         # H.264 decoder of the video, in gst-launch syntax
         self.decoder = decoder
         self.telemetry = telemetry
+        self.loop = loop
+        self.on_end = on_end
         self._capture_lock = threading.Lock()
         self._grabber_thread = None
         # The camera stream the vehicle asked for, as (uri, dimensions), or
@@ -65,13 +69,17 @@ class Stream(StreamServiceServicer):
 
     def _grab_frames(self):
         """Reads the video for good, reopening it whenever it fails to open or
-        stops giving frames. The publisher is used only here, on this thread.
+        stops giving frames, or, unless looping, until it ends, and then
+        calls on_end. The publisher is used only here, on this thread.
         """
         try:
             while True:
-                cap = GstCapture(self.video_path, self.decoder)
+                cap = GstCapture(self.video_path, self.decoder, loop=self.loop)
                 if cap.isOpened():
                     self._read_frames(cap)
+                    if cap.ended:
+                        cap.release()
+                        break
                     logger.warning(f'video stopped; reopening it in {CAPTURE_RETRY_DELAY} s')
                 else:
                     logger.warning(f'video could not be opened; retrying in {CAPTURE_RETRY_DELAY} s')
@@ -80,6 +88,10 @@ class Stream(StreamServiceServicer):
         finally:
             if self._raw_frames is not None:
                 self._raw_frames.close()
+                self._raw_frames = None
+        logger.info('video ended')
+        if self.on_end is not None:
+            self.on_end()
 
     def _update_publisher(self):
         """Replaces the publisher if the vehicle asked for another camera
@@ -106,6 +118,8 @@ class Stream(StreamServiceServicer):
         while failed_reads < MAX_FAILED_READS:
             ret, frame, pts = cap.read()
             if not ret:
+                if cap.ended:
+                    return
                 failed_reads += 1
                 continue
             failed_reads = 0

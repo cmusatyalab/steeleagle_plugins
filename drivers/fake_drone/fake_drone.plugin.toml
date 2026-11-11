@@ -1,12 +1,18 @@
 [plugin]
 name = "Fake Drone"
 type = "driver"
-description = "Replays a looping .mp4 file as a drone's live camera, for testing the pipeline without hardware"
+description = "Replays an .mp4 file, looping by default, as a drone's live camera, for testing the pipeline without hardware"
 
 [[args]]
-name = "video_path"
+name = "video"
 type = "string"
-description = "H.264 .mp4 file to replay, looping forever, at its own framerate"
+description = "H.264 .mp4 file to replay at its own framerate: a file name in the daemon's files directory (STEELEAGLE_FILES, where `eagle transfer-file` saves files), or else a path"
+
+[[args]]
+name = "no_loop"
+type = "boolean"
+description = "Play the video once, then stop the plugin, instead of looping it forever"
+default = false
 
 [[args]]
 name = "decoder"
@@ -26,7 +32,7 @@ type = "copter"
 [[driver.cameras]]
 name = "rgb"
 type = "steeleagle_protocol/v1/messages/frame/RawFrame"
-description = "Simulated RGB camera, replaying a looping .mp4 file"
+description = "Simulated RGB camera, replaying an .mp4 file"
 hres = 1280
 vres = 720
 fps = 30

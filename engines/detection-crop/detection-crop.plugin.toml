@@ -1,0 +1,41 @@
+[plugin]
+name = "Detection Crop"
+type = "engine"
+description = "Crops each camera frame to the highest-scoring detection of a class that a local detection engine found in it, and sends the crop on; drops the frames with no such detection"
+
+[[args]]
+name = "detector"
+type = "string"
+description = "Service name of the detection engine on this daemon whose results the frames are cropped by; required"
+default = ""
+
+[[args]]
+name = "class"
+type = "string"
+description = "Class of the detection to crop to, as the detector names it (e.g. \"person\"), ignoring case; required"
+default = ""
+
+[[args]]
+name = "timeout"
+type = "number"
+description = "The longest to wait for the detector's result on a frame before dropping it, in milliseconds"
+default = 2000
+
+[[args]]
+name = "max_width"
+type = "number"
+description = "Widest crop sent, in pixels; a wider one is dropped"
+default = 1920
+
+[[args]]
+name = "max_height"
+type = "number"
+description = "Tallest crop sent, in pixels; a taller one is dropped"
+default = 1080
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# No result: each frame is replaced with its crop, an RGB RawFrame with the
+# id, timestamp and pose of the frame, or dropped if the detector skipped it,
+# timed out, or found nothing of the class in it
