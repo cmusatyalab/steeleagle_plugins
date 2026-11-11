@@ -293,7 +293,8 @@ class Stream(StreamServiceServicer):
             gps_warning = telemetry_proto.AlertInfo.GpsWarning.GPS_WARNING_WEAK_SIGNAL
 
         magnetometer_warning = telemetry_proto.AlertInfo.MagnetometerWarning.MAGNETOMETER_WARNING_UNSPECIFIED
-        if alert_state in (AlertStateChanged_State.magneto_perturbation, AlertStateChanged_State.magneto_low_earth_field):
+        # "pertubation" is Parrot's spelling in the SDK enum (ardrone3.xml); do not "fix" it.
+        if alert_state in (AlertStateChanged_State.magneto_pertubation,AlertStateChanged_State.magneto_low_earth_field):
             magnetometer_warning = telemetry_proto.AlertInfo.MagnetometerWarning.MAGNETOMETER_WARNING_PERTURBATIONS
 
         connection_warning = telemetry_proto.AlertInfo.ConnectionWarning.CONNECTION_WARNING_UNSPECIFIED
