@@ -15,6 +15,7 @@ from parrot_anafi.control import Control
 from parrot_anafi.stream import Stream
 from parrot_anafi.capture import DEFAULT_DECODER
 from parrot_anafi.calibrate import Calibrate
+from parrot_anafi.camera import configure_camera
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -76,6 +77,7 @@ def main():
     drone = DroneWrapper(ip)
     if not drone.connect():
         raise ConnectionError('cannot connect to device!')
+    configure_camera(drone, shutter_speed=args.get('shutter_speed'), hdr=args.get('hdr'))
 
     server = grpc.server(
         thread_pool=futures.ThreadPoolExecutor(max_workers=10)
