@@ -65,7 +65,7 @@ def frame(height=HEIGHT, width=WIDTH):
 
 
 def publisher(dimensions=None):
-    return raw_frames.RawFramePublisher(URI, dimensions, lambda metadata: (POSITION, GIMBAL))
+    return raw_frames.RawFramePublisher(URI, dimensions, lambda: (POSITION, GIMBAL))
 
 
 def unique(name):
@@ -137,7 +137,7 @@ def test_close_closes_the_producer(producer):
 def test_raw_frames_round_trip_through_uriel():
     uri = unique('harpy.rgb')
     reader = uriel.Reader(uri)
-    raw = raw_frames.RawFramePublisher(uri, None, lambda metadata: (POSITION, GIMBAL))
+    raw = raw_frames.RawFramePublisher(uri, None, lambda: (POSITION, GIMBAL))
     try:
         raw.publish(frame())
         read = reader.next(timeout=READ_WAIT_S)
@@ -174,47 +174,3 @@ def test_telemetry_round_trips_through_uriel(monkeypatch):
     finally:
         s._telemetry_publisher.stop()
         reader.close()
-
-
-class FakeClock:
-    """A monotonic clock in nanoseconds that moves only when told to."""
-
-    def __init__(self):
-        self.ns = 0
-
-    def __call__(self):
-        return self.ns
-
-
-def test_publishes_at_most_max_fps(producer):
-    """At 30 fps in, a publisher capped at 10 fps publishes 10 frames a
-    second, and does no work on the rest: it doesn't even read their pose."""
-    clock, poses = FakeClock(), []
-    raw = raw_frames.RawFramePublisher(
-        URI, None, lambda metadata: poses.append(metadata) or (POSITION, GIMBAL), max_fps=10, now_ns=clock)
-    frame_interval_ns = 30_000_000  # a little over 30 fps
-
-    for i in range(34):  # 0 to 990 ms
-        clock.ns = i * frame_interval_ns
-        raw.publish(frame(), metadata=i)
-
-    [p] = FakeProducer.created
-    assert len(p.sent) == 10
-    assert len(poses) == 10
-    # Frame ids count published frames, as before
-    assert [sent.id for sent in p.sent] == list(range(10))
-
-
-def test_publishes_every_frame_without_max_fps(producer):
-    raw = publisher()
-    for _ in range(5):
-        raw.publish(frame())
-
-    [p] = FakeProducer.created
-    assert len(p.sent) == 5
-
-
-@pytest.mark.parametrize('max_fps', [0, -1])
-def test_max_fps_must_be_positive(max_fps):
-    with pytest.raises(ValueError):
-        raw_frames.RawFramePublisher(URI, None, lambda metadata: (None, None), max_fps=max_fps)

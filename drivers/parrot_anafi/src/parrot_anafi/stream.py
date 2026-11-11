@@ -26,14 +26,15 @@ from olympe.messages.ardrone3.GPSState import NumberOfSatelliteChanged
 from olympe.messages.common.CommonState import BatteryStateChanged, LinkSignalQuality
 from olympe.messages.gimbal import attitude
 # Driver imports
-from parrot_anafi.capture import DEFAULT_DECODER, DEFAULT_RTSPSRC_PROPERTIES, GstCapture, rtsp_source
+from parrot_anafi.capture import DEFAULT_DECODER, GstCapture, rtsp_source
 from parrot_anafi.raw_frames import RawFramePublisher
 from parrot_anafi.publisher import Publisher
-from parrot_anafi import vmeta
 
 logger = logging.getLogger('parrot-anafi/stream')
 
-METERS_PER_DEGREE_LATITUDE = vmeta.METERS_PER_DEGREE_LATITUDE
+# Approximate meters per degree of latitude, used to convert GPS deltas
+# into a local ENU frame for relative_position (equirectangular approximation).
+METERS_PER_DEGREE_LATITUDE = 111320.0
 DEFAULT_GIMBAL_ID = 0
 # Seconds to wait before reopening the drone's video stream, after it failed
 # to open or stopped giving frames.
@@ -61,16 +62,11 @@ RESOLUTION_DIMENSIONS = {
 
 class Stream(StreamServiceServicer):
     """Stream Service implementation."""
-    def __init__(self, drone, ip, decoder=DEFAULT_DECODER, max_fps=None,
-                 rtspsrc_properties=DEFAULT_RTSPSRC_PROPERTIES):
+    def __init__(self, drone, ip, decoder=DEFAULT_DECODER):
         self.drone = drone
         self.ip = ip
         # H.264 decoder of the video stream, in gst-launch syntax
         self.decoder = decoder
-        # Properties of the stream's rtspsrc, in gst-launch syntax
-        self.rtspsrc_properties = rtspsrc_properties
-        # Most frames published a second, or None to publish every frame
-        self.max_fps = max_fps
         self._capture_lock = threading.Lock()
         self._grabber_thread = None
         # The camera stream the vehicle asked for, as (uri, dimensions), or
@@ -78,8 +74,6 @@ class Stream(StreamServiceServicer):
         # stay on one thread, so it is only handed over here.
         self._camera_request = None
         self._raw_frames = None
-        # Whether a frame was published without metadata, which is warned of once
-        self._warned_no_metadata = False
         # Telemetry streams replace those started before them, under this lock
         self._telemetry_lock = threading.Lock()
         self._telemetry_publisher = None
@@ -96,7 +90,7 @@ class Stream(StreamServiceServicer):
 
     def _open_capture(self):
         """Opens the drone's video stream, decoding it with the decoder."""
-        return GstCapture(rtsp_source(self.ip, self.rtspsrc_properties), self.decoder)
+        return GstCapture(rtsp_source(self.ip), self.decoder)
 
     def _grab_frames(self):
         """Reads the drone's video stream for good, reopening it whenever it
@@ -131,7 +125,8 @@ class Stream(StreamServiceServicer):
             self._raw_frames = None
         if request is not None:
             uri, dimensions = request
-            self._raw_frames = RawFramePublisher(uri, dimensions, self.get_frame_pose, max_fps=self.max_fps)
+            self._raw_frames = RawFramePublisher(
+                uri, dimensions, lambda: (self.get_position_info(), self.get_gimbal_info()))
 
     def _read_frames(self, cap):
         """Reads frames from `cap`, and publishes each one to Uriel, if the
@@ -148,45 +143,16 @@ class Stream(StreamServiceServicer):
             self._update_publisher()
             if self._raw_frames is not None:
                 try:
-                    self._raw_frames.publish(frame, cap.metadata)
+                    self._raw_frames.publish(frame)
                 except Exception as e:
                     logger.warning(f'raw frame could not be published, reason: {e}')
 
-    def get_frame_pose(self, metadata):
-        """The PositionInfo and GimbalInfo of a frame, from `metadata`, its
-        video metadata, so that they are the drone's when the frame was
-        captured, not when it was decoded. The metadata has no home, and the
-        Anafi 4K's no altitude above take-off, so they come from Olympe, as
-        do the setpoints, which are the driver's. A frame without metadata
-        has neither."""
-        if not metadata:
-            if not self._warned_no_metadata:
-                logger.warning('a frame has no video metadata; publishing it without its pose')
-                self._warned_no_metadata = True
-            return None, None
-        try:
-            home = self.drone.get_state(HomeChanged)
-        except Exception:
-            home = None
-        try:
-            altitude = self.drone.get_state(AltitudeChanged)['altitude']
-        except Exception:
-            altitude = None
-        setpoint = Any()
-        if self.drone.setpoint:
-            setpoint.Pack(self.drone.setpoint)
-        return (vmeta.position_info(metadata, home, altitude, setpoint),
-                vmeta.gimbal_info(metadata, setpoint))
-
     def get_position_info(self) -> telemetry_proto.PositionInfo:
         """Get position info from the drone."""
-        # Fields of what is unknown, e.g. the position without a GPS fix,
-        # are left unset, not zero.
         try:
             home = self.drone.get_state(HomeChanged)
         except Exception:
-            home = None
-        home_valid = vmeta.valid_home(home)
+            home = {'latitude': 0.0, 'longitude': 0.0, 'altitude': 0.0}
         gps = self.drone.get_state(GpsLocationChanged)
         att = self.drone.get_state(AttitudeChanged)
         speed = self.drone.get_state(SpeedChanged)
@@ -194,12 +160,16 @@ class Stream(StreamServiceServicer):
 
         fix = self.drone.get_state(GPSFixStateChanged)
         gps_valid = fix['fixed'] and gps["latitude"] != 500.0 and gps["longitude"] != 500.0
+        if not gps_valid:
+            gps = {'latitude': 0.0, 'longitude': 0.0, 'altitude': 0.0}
 
         psi = att['yaw']
-        north = east = None
-        if gps_valid and home_valid:
+        if gps_valid:
             north = (gps['latitude'] - home['latitude']) * METERS_PER_DEGREE_LATITUDE
             east = (gps['longitude'] - home['longitude']) * METERS_PER_DEGREE_LATITUDE * cos(radians(home['latitude']))
+        else:
+            north = 0.0
+            east = 0.0
 
         vx = speed['speedX']
         vy = speed['speedY']
@@ -216,7 +186,7 @@ class Stream(StreamServiceServicer):
                 latitude=home['latitude'],
                 longitude=home['longitude'],
                 altitude=home['altitude'],
-            ) if gps_valid and home_valid else None,
+            ) if gps_valid else None,
             global_position=common_proto.GlobalPosition(
                 latitude=gps['latitude'],
                 longitude=gps['longitude'],
@@ -323,7 +293,7 @@ class Stream(StreamServiceServicer):
             gps_warning = telemetry_proto.AlertInfo.GpsWarning.GPS_WARNING_WEAK_SIGNAL
 
         magnetometer_warning = telemetry_proto.AlertInfo.MagnetometerWarning.MAGNETOMETER_WARNING_UNSPECIFIED
-        if alert_state in (AlertStateChanged_State.magneto_pertubation, AlertStateChanged_State.magneto_low_earth_field):
+        if alert_state in (AlertStateChanged_State.magneto_perturbation, AlertStateChanged_State.magneto_low_earth_field):
             magnetometer_warning = telemetry_proto.AlertInfo.MagnetometerWarning.MAGNETOMETER_WARNING_PERTURBATIONS
 
         connection_warning = telemetry_proto.AlertInfo.ConnectionWarning.CONNECTION_WARNING_UNSPECIFIED

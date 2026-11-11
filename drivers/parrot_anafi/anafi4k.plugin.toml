@@ -22,17 +22,6 @@ type = "string"
 description = "H.264 decoder of the video stream, in gst-launch syntax; its output must be NV12, I420 or RGB, and is converted to RGB on the CPU after it (e.g. \"qtic2vdec\" with the native environment)"
 default = "avdec_h264 max-threads=1"
 
-[[args]]
-name = "max_fps"
-type = "number"
-description = "Most camera frames published a second (optional; every frame, up to the stream's 30 fps, if unset). Frames beyond it are skipped before they are converted, which keeps the driver from falling behind the stream when its frames take too long to publish"
-
-[[args]]
-name = "rtspsrc_properties"
-type = "string"
-description = "Properties of the rtspsrc that receives the video stream, in gst-launch syntax (e.g. \"latency=200 drop-on-latency=false\"); they are set after the driver's own location, protocols=udp and force-non-compliant-url, and so can override them. latency is the most milliseconds of the stream held for missing packets and, with drop-on-latency, the furthest the video can fall behind the drone"
-default = "latency=500 drop-on-latency=true"
-
 [driver]
 # Driver type: (copter, legged, wheeled, boat)
 type = "copter"

@@ -13,7 +13,7 @@ from steeleagle_protocol.v1.services.driver.calibrate_pb2_grpc import add_Calibr
 # Service imports
 from parrot_anafi.control import Control
 from parrot_anafi.stream import Stream
-from parrot_anafi.capture import DEFAULT_DECODER, DEFAULT_RTSPSRC_PROPERTIES
+from parrot_anafi.capture import DEFAULT_DECODER
 from parrot_anafi.calibrate import Calibrate
 
 logging.basicConfig(
@@ -62,10 +62,6 @@ def main():
     decoder = args.get('decoder')
     if decoder is None:
         decoder = DEFAULT_DECODER
-    max_fps = args.get('max_fps')
-    rtspsrc_properties = args.get('rtspsrc_properties')
-    if rtspsrc_properties is None:
-        rtspsrc_properties = DEFAULT_RTSPSRC_PROPERTIES
 
     listen_address = os.getenv('STEELEAGLE_LISTEN_SOCKET')
     if not listen_address:
@@ -85,7 +81,7 @@ def main():
         thread_pool=futures.ThreadPoolExecutor(max_workers=10)
     )
     add_ControlServiceServicer_to_server(Control(drone), server)
-    add_StreamServiceServicer_to_server(Stream(drone, ip, decoder, max_fps, rtspsrc_properties), server)
+    add_StreamServiceServicer_to_server(Stream(drone, ip, decoder), server)
     add_CalibrateServiceServicer_to_server(Calibrate(drone), server)
     server.add_insecure_port(f'unix://{listen_address}')
     server.start()

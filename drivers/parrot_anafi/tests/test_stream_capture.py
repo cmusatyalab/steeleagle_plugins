@@ -31,7 +31,6 @@ class FakeCapture:
         self._opened = opened
         self._reads = list(reads)
         self.released = False
-        self.metadata = None
 
     def isOpened(self):
         return self._opened
@@ -47,15 +46,14 @@ class FakeCapture:
 class FakePublisher:
     created = []
 
-    def __init__(self, uri, dimensions, pose, max_fps=None):
+    def __init__(self, uri, dimensions, pose):
         self.uri = uri
         self.dimensions = dimensions
-        self.max_fps = max_fps
         self.published = []
         self.closed = False
         FakePublisher.created.append(self)
 
-    def publish(self, frame, metadata=None):
+    def publish(self, frame):
         self.published.append(frame)
 
     def close(self):
@@ -100,10 +98,10 @@ def camera_request(uri=URI, camera=stream.CAMERA_NAME, resolution=None):
     return stream_proto.StreamCamerasRequest(primary=request)
 
 
-def streaming(uri=URI, resolution=None, max_fps=None):
+def streaming(uri=URI, resolution=None):
     """A Stream that the vehicle asked to stream its camera as `uri`, without
     starting its reading thread, so that a test can run it."""
-    s = Stream(drone=None, ip='192.0.2.1', max_fps=max_fps)
+    s = Stream(drone=None, ip='192.0.2.1')
     s._start_capture = lambda: None
     s.StreamCameras(camera_request(uri, resolution=resolution), FakeContext())
     return s
@@ -128,18 +126,6 @@ def test_streaming_cameras_does_not_wait_for_the_video_stream(monkeypatch):
     assert opened.wait(THREAD_WAIT_S)
     stream_ready.set()
     s._grabber_thread.join(THREAD_WAIT_S)
-
-
-def test_the_video_stream_is_opened_with_the_rtspsrc_properties(monkeypatch):
-    opened = []
-    monkeypatch.setattr(stream, 'GstCapture', lambda source, decoder: opened.append(source))
-    s = Stream(drone=None, ip='192.0.2.1', rtspsrc_properties='latency=123')
-
-    s._open_capture()
-
-    [source] = opened
-    assert source.startswith('rtspsrc location=rtsp://192.0.2.1/')
-    assert 'latency=123' in source
 
 
 def test_the_video_stream_is_read_only_once_asked_for():
@@ -190,7 +176,7 @@ def test_a_few_failed_reads_keep_the_stream(monkeypatch):
 
 def test_frames_are_published_where_and_how_the_vehicle_asks(monkeypatch):
     opening(monkeypatch, FakeCapture(reads=[FRAME]))
-    s = streaming(resolution=stream_proto.RESOLUTION_480P, max_fps=10)
+    s = streaming(resolution=stream_proto.RESOLUTION_480P)
 
     with pytest.raises(StopReading):
         s._grab_frames()
@@ -198,7 +184,6 @@ def test_frames_are_published_where_and_how_the_vehicle_asks(monkeypatch):
     [publisher] = FakePublisher.created
     assert publisher.uri == URI
     assert publisher.dimensions == (854, 480)
-    assert publisher.max_fps == 10
 
 
 class AskingCapture(FakeCapture):
@@ -256,35 +241,3 @@ def test_telemetry_needs_a_uri():
     with pytest.raises(grpc.RpcError):
         s.StreamTelemetry(stream_proto.StreamTelemetryRequest(), context)
     assert context.code == grpc.StatusCode.INVALID_ARGUMENT
-
-
-class FakeDrone:
-    """Gives Olympe states as a drone without a GPS fix does."""
-
-    setpoint = None
-
-    def __init__(self, home=True):
-        self._states = {
-            stream.GpsLocationChanged: {'latitude': 500.0, 'longitude': 500.0, 'altitude': 500.0},
-            stream.AttitudeChanged: {'yaw': 0.5, 'pitch': 0.0, 'roll': 0.0},
-            stream.SpeedChanged: {'speedX': 1.0, 'speedY': 2.0, 'speedZ': 0.5},
-            stream.AltitudeChanged: {'altitude': 10.0},
-            stream.GPSFixStateChanged: {'fixed': 0},
-        }
-        if home:
-            self._states[stream.HomeChanged] = {'latitude': 40.4, 'longitude': -79.9, 'altitude': 290.0}
-
-    def get_state(self, message):
-        return self._states[message]
-
-
-@pytest.mark.parametrize('home', [True, False])
-def test_telemetry_leaves_an_unknown_position_unset(home):
-    position = Stream(drone=FakeDrone(home), ip='192.0.2.1').get_position_info()
-
-    assert not position.HasField('home')
-    assert not position.HasField('global_position')
-    rel = position.relative_position
-    assert not rel.HasField('x') and not rel.HasField('y')
-    assert rel.z == 10.0
-    assert position.velocity_neu.z_vel == -0.5
