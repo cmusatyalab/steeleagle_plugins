@@ -1,15 +1,16 @@
 """Stream Service of the fake drone: replays an .mp4 file as its camera,
 looping it, or, with no_loop, playing it once and then stopping the plugin.
 
-As in parrot_anafi, the camera is read from the first StreamCameras call on,
-for good, and each frame is published to the producer the vehicle last asked
-for, if any. With telemetry on, each frame carries the position and gimbal
+The vehicle calls StreamCameras when a flow is pushed, so the video plays
+from its start each time the camera is asked for, as an experiment's trial
+expects, and stops when it is no longer asked for (e.g. after a push fails
+with no flow set). Each frame is published to the producer the vehicle asked
+for. With telemetry on, each frame carries the position and gimbal
 pose a Parrot drone recorded with it (see vmeta.py). There's no vehicle, so
 there's no telemetry stream: StreamTelemetry starts nothing.
 """
 import logging
 import threading
-import time
 
 import grpc
 
@@ -53,42 +54,63 @@ class Stream(StreamServiceServicer):
         self.on_end = on_end
         self._capture_lock = threading.Lock()
         self._grabber_thread = None
+        # Set to stop the current playback
+        self._stop = threading.Event()
         # The camera stream the vehicle asked for, as (uri, dimensions), or
         # None. The reading thread publishes it, since the publisher must
         # stay on one thread, so it is only handed over here.
         self._camera_request = None
         self._raw_frames = None
 
-    def _start_capture(self):
-        """Starts reading the video, once."""
+    def _stop_capture(self):
+        """Stops the current playback, if any, and waits for it to end. The
+        caller must hold _capture_lock."""
+        if self._grabber_thread is None:
+            return
+        self._stop.set()
+        self._grabber_thread.join()
+        self._grabber_thread = None
+
+    def _restart_capture(self):
+        """Plays the video from its start, stopping the current playback."""
         with self._capture_lock:
-            if self._grabber_thread is not None:
-                return
-            self._grabber_thread = threading.Thread(target=self._grab_frames, daemon=True)
+            self._stop_capture()
+            self._stop = threading.Event()
+            self._grabber_thread = threading.Thread(
+                target=self._grab_frames, args=(self._stop,), daemon=True)
             self._grabber_thread.start()
 
-    def _grab_frames(self):
-        """Reads the video for good, reopening it whenever it fails to open or
-        stops giving frames, or, unless looping, until it ends, and then
-        calls on_end. The publisher is used only here, on this thread.
+    def _grab_frames(self, stop):
+        """Reads the video until `stop` is set, reopening it whenever it fails
+        to open or stops giving frames, or, unless looping, until it ends, and
+        then calls on_end. The publisher is used only here, on this thread.
         """
+        ended = False
         try:
-            while True:
+            while not stop.is_set():
                 cap = GstCapture(self.video_path, self.decoder, loop=self.loop)
                 if cap.isOpened():
-                    self._read_frames(cap)
+                    logger.info('playing the video from its start')
+                    self._read_frames(cap, stop)
                     if cap.ended:
+                        ended = True
+                        cap.release()
+                        break
+                    if stop.is_set():
                         cap.release()
                         break
                     logger.warning(f'video stopped; reopening it in {CAPTURE_RETRY_DELAY} s')
                 else:
                     logger.warning(f'video could not be opened; retrying in {CAPTURE_RETRY_DELAY} s')
                 cap.release()
-                time.sleep(CAPTURE_RETRY_DELAY)
+                stop.wait(CAPTURE_RETRY_DELAY)
         finally:
             if self._raw_frames is not None:
                 self._raw_frames.close()
                 self._raw_frames = None
+        if not ended:
+            logger.info('video stopped')
+            return
         logger.info('video ended')
         if self.on_end is not None:
             self.on_end()
@@ -109,13 +131,13 @@ class Stream(StreamServiceServicer):
             uri, dimensions = request
             self._raw_frames = RawFramePublisher(uri, dimensions)
 
-    def _read_frames(self, cap):
+    def _read_frames(self, cap, stop):
         """Reads frames from `cap`, and publishes each one to Uriel, if the
         vehicle asked for the camera. Returns once MAX_FAILED_READS reads in
-        a row fail.
+        a row fail, or `stop` is set.
         """
         failed_reads = 0
-        while failed_reads < MAX_FAILED_READS:
+        while failed_reads < MAX_FAILED_READS and not stop.is_set():
             ret, frame, pts = cap.read()
             if not ret:
                 if cap.ended:
@@ -148,13 +170,15 @@ class Stream(StreamServiceServicer):
             )
         if not requests:
             self._camera_request = None
+            with self._capture_lock:
+                self._stop_capture()
             return stream_proto.StreamCamerasResponse()
         camera = requests[0]
         dimensions = None
         if camera.HasField('target_resolution'):
             dimensions = RESOLUTION_DIMENSIONS.get(camera.target_resolution)
         self._camera_request = (camera.uri, dimensions)
-        self._start_capture()
+        self._restart_capture()
         return stream_proto.StreamCamerasResponse()
 
     def StreamTelemetry(self, request, context):
