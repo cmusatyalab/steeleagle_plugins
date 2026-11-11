@@ -26,7 +26,7 @@ from olympe.messages.ardrone3.GPSState import NumberOfSatelliteChanged
 from olympe.messages.common.CommonState import BatteryStateChanged, LinkSignalQuality
 from olympe.messages.gimbal import attitude
 # Driver imports
-from parrot_anafi.capture import DEFAULT_DECODER, GstCapture, rtsp_source
+from parrot_anafi.capture import DEFAULT_DECODER, DEFAULT_RTSPSRC_PROPERTIES, GstCapture, rtsp_source
 from parrot_anafi.raw_frames import RawFramePublisher
 from parrot_anafi.publisher import Publisher
 from parrot_anafi import vmeta
@@ -61,11 +61,14 @@ RESOLUTION_DIMENSIONS = {
 
 class Stream(StreamServiceServicer):
     """Stream Service implementation."""
-    def __init__(self, drone, ip, decoder=DEFAULT_DECODER, max_fps=None):
+    def __init__(self, drone, ip, decoder=DEFAULT_DECODER, max_fps=None,
+                 rtspsrc_properties=DEFAULT_RTSPSRC_PROPERTIES):
         self.drone = drone
         self.ip = ip
         # H.264 decoder of the video stream, in gst-launch syntax
         self.decoder = decoder
+        # Properties of the stream's rtspsrc, in gst-launch syntax
+        self.rtspsrc_properties = rtspsrc_properties
         # Most frames published a second, or None to publish every frame
         self.max_fps = max_fps
         self._capture_lock = threading.Lock()
@@ -93,7 +96,7 @@ class Stream(StreamServiceServicer):
 
     def _open_capture(self):
         """Opens the drone's video stream, decoding it with the decoder."""
-        return GstCapture(rtsp_source(self.ip), self.decoder)
+        return GstCapture(rtsp_source(self.ip, self.rtspsrc_properties), self.decoder)
 
     def _grab_frames(self):
         """Reads the drone's video stream for good, reopening it whenever it

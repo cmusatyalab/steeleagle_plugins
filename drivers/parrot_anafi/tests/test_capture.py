@@ -1,10 +1,14 @@
 """Tests of the conversion of decoded frames to RGB, and of the stream's
 source."""
+import gi
 import numpy as np
 import pytest
 
 from parrot_anafi import capture
 from parrot_anafi.capture import Gst, to_rgb
+
+gi.require_version('GstRtsp', '1.0')
+from gi.repository import GstRtsp  # noqa: E402
 
 WIDTH, HEIGHT = 8, 6
 # Limited-range BT.601 Y, U and V of a mid gray and of a saturated red
@@ -70,13 +74,33 @@ def test_other_formats_are_refused():
         to_rgb(b'\0' * 1024, 'YUY2', WIDTH, HEIGHT, [0], [16])
 
 
-def test_the_stream_never_queues_more_than_its_latency():
-    """A pipeline that falls behind the drone drops late packets instead of
-    queueing them, so the video can't fall further and further behind."""
-    pipeline = Gst.parse_launch(f'{capture.rtsp_source("192.168.42.1")} ! fakesink')
+def rtspsrc_of(source):
+    """The rtspsrc element of the source `source`, in gst-launch syntax."""
+    pipeline = Gst.parse_launch(f'{source} ! fakesink')
     elements = []
     pipeline.iterate_elements().foreach(elements.append)
     [src] = [e for e in elements if e.get_factory().get_name() == 'rtspsrc']
+    return src
+
+
+def test_the_stream_never_queues_more_than_its_latency():
+    """A pipeline that falls behind the drone drops late packets instead of
+    queueing them, so the video can't fall further and further behind."""
+    src = rtspsrc_of(capture.rtsp_source('192.168.42.1'))
 
     assert src.get_property('drop-on-latency')
     assert src.get_property('latency') == capture.STREAM_LATENCY_MS
+
+
+def test_rtspsrc_properties_are_set_on_the_source():
+    src = rtspsrc_of(capture.rtsp_source('192.168.42.1', 'latency=200 drop-on-latency=false'))
+
+    assert src.get_property('latency') == 200
+    assert not src.get_property('drop-on-latency')
+
+
+def test_rtspsrc_properties_override_the_drivers_own():
+    """The driver's own properties, such as the transport, can be changed."""
+    src = rtspsrc_of(capture.rtsp_source('192.168.42.1', 'protocols=tcp'))
+
+    assert src.get_property('protocols') == GstRtsp.RTSPLowerTrans.TCP

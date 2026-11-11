@@ -61,6 +61,9 @@ READ_TIMEOUT = 1.0
 # the pipeline runs up to about 300 ms behind when the drone moves; packets
 # dropped past this damage the video until the next keyframe.
 STREAM_LATENCY_MS = 500
+# Default rtspsrc properties in gst-launch syntax, matching
+# anafi4k.plugin.toml; see rtsp_source.
+DEFAULT_RTSPSRC_PROPERTIES = f'latency={STREAM_LATENCY_MS} drop-on-latency=true'
 # Name of the source's RTP depayloader, whose packets carry frame metadata.
 DEPAYLOADER_NAME = 'depay'
 # Frames whose metadata is kept until they are decoded; decoding lags the
@@ -100,8 +103,11 @@ class LagLog:
         self._start, self._lags = self._now(), []
 
 
-def rtsp_source(ip):
+def rtsp_source(ip, rtspsrc_properties=DEFAULT_RTSPSRC_PROPERTIES):
     """The drone's H.264 stream, as GStreamer elements ending in H.264.
+
+    `rtspsrc_properties` are set on rtspsrc after the ones set here, in
+    gst-launch syntax, so they can override them.
 
     The drone's DESCRIBE answers with Content-Base rtsp://{ip}/live, with no
     trailing slash, and a=control:front. rtspsrc 1.28 resolves that as a URL,
@@ -114,9 +120,8 @@ def rtsp_source(ip):
     The depayloader is named DEPAYLOADER_NAME, so that GstCapture reads the
     frame metadata in its packets."""
     compat = 'force-non-compliant-url=true ' if _rtspsrc_has_non_compliant_url() else ''
-    return (f'rtspsrc location=rtsp://{ip}/live protocols=udp '
-            f'latency={STREAM_LATENCY_MS} drop-on-latency=true '
-            f'{compat}! rtph264depay name={DEPAYLOADER_NAME}')
+    return (f'rtspsrc location=rtsp://{ip}/live protocols=udp {compat}'
+            f'{rtspsrc_properties} ! rtph264depay name={DEPAYLOADER_NAME}')
 
 
 @functools.cache

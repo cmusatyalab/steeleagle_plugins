@@ -130,6 +130,18 @@ def test_streaming_cameras_does_not_wait_for_the_video_stream(monkeypatch):
     s._grabber_thread.join(THREAD_WAIT_S)
 
 
+def test_the_video_stream_is_opened_with_the_rtspsrc_properties(monkeypatch):
+    opened = []
+    monkeypatch.setattr(stream, 'GstCapture', lambda source, decoder: opened.append(source))
+    s = Stream(drone=None, ip='192.0.2.1', rtspsrc_properties='latency=123')
+
+    s._open_capture()
+
+    [source] = opened
+    assert source.startswith('rtspsrc location=rtsp://192.0.2.1/')
+    assert 'latency=123' in source
+
+
 def test_the_video_stream_is_read_only_once_asked_for():
     s = Stream(drone=None, ip='192.0.2.1')
     assert s._grabber_thread is None
