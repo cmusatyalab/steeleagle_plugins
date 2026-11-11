@@ -61,11 +61,13 @@ RESOLUTION_DIMENSIONS = {
 
 class Stream(StreamServiceServicer):
     """Stream Service implementation."""
-    def __init__(self, drone, ip, decoder=DEFAULT_DECODER):
+    def __init__(self, drone, ip, decoder=DEFAULT_DECODER, max_fps=None):
         self.drone = drone
         self.ip = ip
         # H.264 decoder of the video stream, in gst-launch syntax
         self.decoder = decoder
+        # Most frames published a second, or None to publish every frame
+        self.max_fps = max_fps
         self._capture_lock = threading.Lock()
         self._grabber_thread = None
         # The camera stream the vehicle asked for, as (uri, dimensions), or
@@ -126,7 +128,7 @@ class Stream(StreamServiceServicer):
             self._raw_frames = None
         if request is not None:
             uri, dimensions = request
-            self._raw_frames = RawFramePublisher(uri, dimensions, self.get_frame_pose)
+            self._raw_frames = RawFramePublisher(uri, dimensions, self.get_frame_pose, max_fps=self.max_fps)
 
     def _read_frames(self, cap):
         """Reads frames from `cap`, and publishes each one to Uriel, if the

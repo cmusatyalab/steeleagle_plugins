@@ -5,6 +5,7 @@ publish them as. Frames are published from the thread that reads the video
 stream, as soon as each is decoded.
 """
 import logging
+import time
 
 import cv2
 import uriel
@@ -21,6 +22,7 @@ RGB_CHANNELS = 3
 RAW_FRAME_HEADROOM = 16 << 10
 # Uriel payload type of the frames, as named in plugin configs.
 RAW_FRAME_TYPE = 'steeleagle_protocol/v1/messages/frame/RawFrame'
+NANOSECONDS_PER_SECOND = 1_000_000_000
 
 
 class RawFramePublisher:
@@ -31,20 +33,34 @@ class RawFramePublisher:
     None, from a frame's metadata, as GstCapture reads it, or None; they go
     with the frame. The producer is created on the first frame, large enough for it,
     so a publisher must be used, and closed, on one thread.
+
+    At most `max_fps` frames are published a second, if given; the rest are
+    skipped before any work is done on them, which frees the capture for the
+    frames that are published. `now_ns` is the monotonic clock, in
+    nanoseconds, that paces them.
     """
 
-    def __init__(self, uri, dimensions, pose):
+    def __init__(self, uri, dimensions, pose, max_fps=None, now_ns=time.monotonic_ns):
+        if max_fps is not None and max_fps <= 0:
+            raise ValueError(f'max_fps must be positive, not {max_fps}')
         self.uri = uri
         self.dimensions = dimensions
         self._pose = pose
         self._producer = None
         self._max_input_size = 0
         self._next_id = 0
+        self._now_ns = now_ns
+        self._interval_ns = None if max_fps is None else round(NANOSECONDS_PER_SECOND / max_fps)
+        # When the next frame may be published, or None if any may
+        self._next_due_ns = None
 
     def publish(self, rgb, metadata=None):
         """Publishes `rgb`, an RGB image as GstCapture decodes it, with the
         pose in `metadata`, its frame metadata. A frame that finds no free
-        input buffer is dropped: newer frames follow."""
+        input buffer is dropped, as is one that comes sooner than max_fps
+        allows: newer frames follow."""
+        if not self._due():
+            return
         if self.dimensions is not None and rgb.shape[1::-1] != self.dimensions:
             rgb = cv2.resize(rgb, self.dimensions, interpolation=cv2.INTER_AREA)
         timestamp = Timestamp()
@@ -68,6 +84,20 @@ class RawFramePublisher:
             self._producer.send(data)
         except uriel.AgainError:
             logger.debug('no free input buffer; dropping frame %d', frame.id)
+
+    def _due(self):
+        """Whether a frame may be published now, under max_fps. Frames are
+        due an interval apart, counted from when the last was due, not when
+        it came, so that they average max_fps however the stream's frames
+        fall; a stream that stopped for longer than an interval starts over."""
+        if self._interval_ns is None:
+            return True
+        now = self._now_ns()
+        if self._next_due_ns is not None and now < self._next_due_ns:
+            return False
+        due = (now if self._next_due_ns is None else self._next_due_ns) + self._interval_ns
+        self._next_due_ns = due if due > now else now + self._interval_ns
+        return True
 
     def close(self):
         """Closes the producer, if a frame created it."""

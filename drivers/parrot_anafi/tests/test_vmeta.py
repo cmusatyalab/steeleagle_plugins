@@ -70,11 +70,14 @@ def v3_metadata(location=True):
         od.vmeta_frame_unref(frame)
 
 
-def rtp_packet(pts, extension=None, sequence=0):
+def rtp_packet(pts, extension=None, sequence=0, rtp_timestamp=None):
     """An RTP packet of H.264, timestamped `pts`, with the header extension
-    `extension`, its profile and length included, if given."""
+    `extension`, its profile and length included, if given. Its RTP
+    timestamp is `rtp_timestamp`, or else `pts` in 90 kHz ticks."""
     first = 0x90 if extension is not None else 0x80
-    header = struct.pack('>BBHII', first, 96, sequence, pts // 11111, 0x1234)
+    if rtp_timestamp is None:
+        rtp_timestamp = pts // 11111
+    header = struct.pack('>BBHII', first, 96, sequence, rtp_timestamp, 0x1234)
     packet = Gst.Buffer.new_wrapped(header + (extension or b'') + b'\x65\x88\x84')
     packet.pts = pts
     return packet
@@ -214,3 +217,19 @@ def test_euler_inverts_quaternions():
     for angles in [(0, 0, 0), (45, -30, 10), (-120, 60, -5), (179, -89, 0)]:
         yaw, pitch, roll = vmeta.euler(quaternion(*angles))
         assert tuple(map(radians, angles)) == pytest.approx((yaw, pitch, roll), abs=1e-6)
+
+
+def test_a_frames_metadata_is_read_from_its_first_packet_only(cap, monkeypatch):
+    """Every packet of a frame may repeat its metadata; it is read once."""
+    reads = []
+    read = capture.read_rtp_extension
+    monkeypatch.setattr(capture, 'read_rtp_extension', lambda *a: reads.append(a) or read(*a))
+
+    # Packets of one frame share its RTP timestamp, though they arrive apart
+    for sequence, pts in enumerate((0, 1_000_000, 2_000_000)):
+        cap.add_packet(rtp_packet(pts, v3_metadata(), sequence=sequence, rtp_timestamp=0))
+    cap.add_packet(rtp_packet(FRAME_NS, v3_metadata(location=False), sequence=3))
+
+    assert len(reads) == 2
+    assert 'location' in cap._take_metadata(2_000_000)['drone']
+    assert 'location' not in cap._take_metadata(FRAME_NS)['drone']

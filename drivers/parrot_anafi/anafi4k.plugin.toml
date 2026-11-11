@@ -22,6 +22,11 @@ type = "string"
 description = "H.264 decoder of the video stream, in gst-launch syntax; its output must be NV12, I420 or RGB, and is converted to RGB on the CPU after it (e.g. \"qtic2vdec\" with the native environment)"
 default = "avdec_h264 max-threads=1"
 
+[[args]]
+name = "max_fps"
+type = "number"
+description = "Most camera frames published a second (optional; every frame, up to the stream's 30 fps, if unset). Frames beyond it are skipped before they are converted, which keeps the driver from falling behind the stream when its frames take too long to publish"
+
 [driver]
 # Driver type: (copter, legged, wheeled, boat)
 type = "copter"

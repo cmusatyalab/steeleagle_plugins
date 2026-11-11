@@ -47,9 +47,10 @@ class FakeCapture:
 class FakePublisher:
     created = []
 
-    def __init__(self, uri, dimensions, pose):
+    def __init__(self, uri, dimensions, pose, max_fps=None):
         self.uri = uri
         self.dimensions = dimensions
+        self.max_fps = max_fps
         self.published = []
         self.closed = False
         FakePublisher.created.append(self)
@@ -99,10 +100,10 @@ def camera_request(uri=URI, camera=stream.CAMERA_NAME, resolution=None):
     return stream_proto.StreamCamerasRequest(primary=request)
 
 
-def streaming(uri=URI, resolution=None):
+def streaming(uri=URI, resolution=None, max_fps=None):
     """A Stream that the vehicle asked to stream its camera as `uri`, without
     starting its reading thread, so that a test can run it."""
-    s = Stream(drone=None, ip='192.0.2.1')
+    s = Stream(drone=None, ip='192.0.2.1', max_fps=max_fps)
     s._start_capture = lambda: None
     s.StreamCameras(camera_request(uri, resolution=resolution), FakeContext())
     return s
@@ -177,7 +178,7 @@ def test_a_few_failed_reads_keep_the_stream(monkeypatch):
 
 def test_frames_are_published_where_and_how_the_vehicle_asks(monkeypatch):
     opening(monkeypatch, FakeCapture(reads=[FRAME]))
-    s = streaming(resolution=stream_proto.RESOLUTION_480P)
+    s = streaming(resolution=stream_proto.RESOLUTION_480P, max_fps=10)
 
     with pytest.raises(StopReading):
         s._grab_frames()
@@ -185,6 +186,7 @@ def test_frames_are_published_where_and_how_the_vehicle_asks(monkeypatch):
     [publisher] = FakePublisher.created
     assert publisher.uri == URI
     assert publisher.dimensions == (854, 480)
+    assert publisher.max_fps == 10
 
 
 class AskingCapture(FakeCapture):

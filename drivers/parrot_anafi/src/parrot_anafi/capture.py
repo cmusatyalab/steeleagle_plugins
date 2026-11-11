@@ -17,6 +17,7 @@ import collections
 import functools
 import logging
 import threading
+import time
 
 import cv2
 import gi
@@ -53,6 +54,13 @@ STREAM_CAPS = (
 OPEN_TIMEOUT = 10.0
 # Seconds a read waits for a frame before it fails.
 READ_TIMEOUT = 1.0
+# Milliseconds of the stream the RTP jitter buffer may hold: the longest it
+# waits for a missing packet, and, since late packets are dropped beyond it,
+# the furthest the pipeline can fall behind the drone. Packets in order pass
+# through at once. On a Qualcomm board decoding the drone's 720p30 stream,
+# the pipeline runs up to about 300 ms behind when the drone moves; packets
+# dropped past this damage the video until the next keyframe.
+STREAM_LATENCY_MS = 500
 # Name of the source's RTP depayloader, whose packets carry frame metadata.
 DEPAYLOADER_NAME = 'depay'
 # Frames whose metadata is kept until they are decoded; decoding lags the
@@ -61,6 +69,35 @@ MAX_PENDING_METADATA = 64
 # Nanoseconds by which a frame's metadata may precede it: its packets arrive
 # within a frame interval, and so are timestamped within one.
 MAX_METADATA_LEAD = 30 * Gst.MSECOND
+# Seconds between logs of how far behind live the decoded frames are.
+LAG_LOG_INTERVAL = 5.0
+MILLISECONDS_PER_SECOND = 1000
+
+
+class LagLog:
+    """Logs, every LAG_LOG_INTERVAL seconds, how far behind live the frames
+    read in that time were: their mean and largest lag, and how many there
+    were. A frame's lag is the time from when its first packet reached the
+    pipeline to when it was read, so it grows if the pipeline falls behind
+    the stream."""
+
+    def __init__(self, now=time.monotonic):
+        self._now = now
+        self._start = now()
+        self._lags = []
+
+    def add(self, lag):
+        """Notes the lag of a frame, in seconds, logging the window's if it
+        is over."""
+        self._lags.append(lag)
+        elapsed = self._now() - self._start
+        if elapsed < LAG_LOG_INTERVAL:
+            return
+        logger.info('capture lag: mean %.0f ms, max %.0f ms, over %d frames (%.1f fps)',
+                    MILLISECONDS_PER_SECOND * sum(self._lags) / len(self._lags),
+                    MILLISECONDS_PER_SECOND * max(self._lags),
+                    len(self._lags), len(self._lags) / elapsed)
+        self._start, self._lags = self._now(), []
 
 
 def rtsp_source(ip):
@@ -77,7 +114,8 @@ def rtsp_source(ip):
     The depayloader is named DEPAYLOADER_NAME, so that GstCapture reads the
     frame metadata in its packets."""
     compat = 'force-non-compliant-url=true ' if _rtspsrc_has_non_compliant_url() else ''
-    return (f'rtspsrc location=rtsp://{ip}/live protocols=udp latency=0 '
+    return (f'rtspsrc location=rtsp://{ip}/live protocols=udp '
+            f'latency={STREAM_LATENCY_MS} drop-on-latency=true '
             f'{compat}! rtph264depay name={DEPAYLOADER_NAME}')
 
 
@@ -153,6 +191,10 @@ class GstCapture:
         # depayloader's streaming thread adds to it, and reads take from it.
         self._pending_metadata = collections.OrderedDict()
         self._metadata_lock = threading.Lock()
+        # RTP timestamp of the last frame whose metadata was read, so that
+        # its later packets, which repeat it, aren't read again
+        self._metadata_rtp_timestamp = None
+        self._lag_log = LagLog()
         try:
             self._pipeline = Gst.parse_launch(description)
         except Exception as e:
@@ -188,6 +230,9 @@ class GstCapture:
         sample = self._sink.try_pull_sample(int(READ_TIMEOUT * Gst.SECOND))
         if sample is None:
             return False, None
+        lag = self._lag(sample)
+        if lag is not None:
+            self._lag_log.add(lag)
         self.metadata = self._take_metadata(sample.get_buffer().pts)
         caps = sample.get_caps().get_structure(0)
         _, width = caps.get_int('width')
@@ -211,6 +256,21 @@ class GstCapture:
             buf.unmap(mapinfo)
         return True, frame
 
+    def _lag(self, sample):
+        """How far behind live `sample` is, in seconds: the pipeline's running
+        time now, less the running time of the frame's timestamp, which the
+        live source set when its first packet arrived. None if either is
+        unknown."""
+        pts = sample.get_buffer().pts
+        clock = self._pipeline.get_clock()
+        if pts == Gst.CLOCK_TIME_NONE or clock is None:
+            return None
+        running = sample.get_segment().to_running_time(Gst.Format.TIME, pts)
+        if running == Gst.CLOCK_TIME_NONE:
+            return None
+        now = clock.get_time() - self._pipeline.get_base_time()
+        return (now - running) / Gst.SECOND
+
     def release(self):
         if self._pipeline is not None:
             self._pipeline.set_state(Gst.State.NULL)
@@ -231,14 +291,17 @@ class GstCapture:
         """Keeps the frame metadata in the header extension of `packet`, an
         RTP packet, if it has any, for the frame of its timestamp. A frame's
         packets share its RTP timestamp, so their buffers' timestamps are
-        within the frame's interval."""
+        within the frame's interval. Only the first packet with metadata of
+        each frame is read: its later packets repeat it, and reading every
+        packet's holds up the streaming thread."""
         if packet.pts == Gst.CLOCK_TIME_NONE:
             return
         ok, rtp = GstRtp.RTPBuffer.map(packet, Gst.MapFlags.READ)
         if not ok:
             return
         try:
-            if not rtp.get_extension():
+            rtp_timestamp = rtp.get_timestamp()
+            if rtp_timestamp == self._metadata_rtp_timestamp or not rtp.get_extension():
                 return
             data, profile = rtp.get_extension_data()
             if data is None:
@@ -248,6 +311,7 @@ class GstCapture:
             rtp.unmap()
         if meta is None:
             return
+        self._metadata_rtp_timestamp = rtp_timestamp
         with self._metadata_lock:
             # Later packets of a frame may repeat its metadata.
             self._pending_metadata[packet.pts] = meta
