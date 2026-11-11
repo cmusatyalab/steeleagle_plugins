@@ -40,6 +40,8 @@ test = { features = ["test"], solve-group = "default" }
 [tool.pixi.tasks]
 # Runs the plugin (see src/led_clock/main.py)
 start = "python -m led_clock.main"
+# Latency statistics of a run: `pixi run summarize <frames.csv> [--min-confidence C] [--start S] [--end S]`
+summarize = "python -m led_clock.summarize"
 
 [tool.pixi.feature.test.tasks]
 # Run with `pixi run -e test test`

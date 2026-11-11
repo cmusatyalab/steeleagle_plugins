@@ -5,6 +5,9 @@ eagled names the plugin to run in STEELEAGLE_PLUGIN, its args in
 STEELEAGLE_PLUGIN_ARGS (a JSON object), the name to serve the engine as in
 STEELEAGLE_ENGINE_ENDPOINT, and the directory transferred files are saved in in
 STEELEAGLE_FILES.
+
+Snapshots and frames.csv, a row per frame, go in a directory of the files
+directory named after the engine.
 """
 
 import json
@@ -18,6 +21,7 @@ from pathlib import Path
 
 from led_clock.decode import LedReader
 from led_clock.engine import run
+from led_clock.frames import CsvWriter
 from led_clock.latency import NANOS_PER_MILLI, NANOS_PER_SECOND, LatencyLog
 from led_clock.snapshot import JpegSaver
 
@@ -26,6 +30,8 @@ FILES_ENV = "STEELEAGLE_FILES"
 # Where eagled mounts the files directory in a sandbox, where the host path in
 # STEELEAGLE_FILES may not exist.
 SANDBOX_FILES_DIR = Path("/steeleagle/files")
+# Name of the file of a row per frame, in the engine's directory
+FRAMES_FILE = "frames.csv"
 # Defaults of the args, matching the plugin.toml. The daemon passes only the
 # args set in its config, so any arg left unset is defaulted here.
 DEFAULTS = {
@@ -101,6 +107,7 @@ def main():
         clock=time.monotonic_ns,
         report_interval_ns=round(args["report_interval_seconds"] * NANOS_PER_SECOND),
         snapshot_interval_ns=round(args["snapshot_interval_seconds"] * NANOS_PER_SECOND),
+        writer=CsvWriter(directory / FRAMES_FILE),
     )
     run(name, log, stop=stop)
 

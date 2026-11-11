@@ -16,15 +16,40 @@ Both latencies assume the Pi's clock, the driver host's clock and this host's cl
 
 As a check that needs no clocks, each tick is compared with the last one read. Frames come `1/fps` apart, so ticks should step by about a whole number of frames' worth (6.67 at 30 fps), within 2 ticks.
 
-The breadboard layout is fixed in `decode.py`: markers at rows 3 and 59, and bit 0 at row 54 down to bit 9 at row 9. In the camera's image, row 3 is on the left, so bit 9 is the leftmost data LED. Each LED's brightness is its mean luma over a small patch. Luma works better than the brightest channel because unlit LEDs pick up red glow from their lit neighbours.
+The LED row's layout is fixed in `decode.py`, as measured on the Anafi's frames. Bit 0 is the leftmost data LED, 6 breadboard rows from the left marker. The data LEDs are 5 rows apart, and the right marker is 5 rows past bit 9. Each LED's brightness is its mean luma over a small patch. Luma works better than the brightest channel because unlit LEDs pick up red glow from their lit neighbours.
 
 ## Output
 
-A log line every `report_interval_seconds`:
+A log line every `report_interval_seconds`, and one for the whole run when the engine stops:
 
 ```
-last 5 s: 150 frames, 148 decoded (99%), steps ok 147/147 | latency ms: p50 120.3 p95 131.0 p99 140.2 max 151.7 | to fermi ms: p50 70.1 ...
+last 5 s: 150 frames, 148 decoded (99%), steps ok 147/147 | latency ms: mean 121.0 std 4.1 min 112.3 p50 120.3 p95 131.0 p99 140.2 max 151.7 | to fermi ms: ...
+whole run, 600 s: 18000 frames, ...
 ```
+
+A row per frame in `<files>/<engine>/frames.csv` (paths as for the snapshots below). The rows are appended, so an engine restart keeps the earlier ones. Columns:
+
+| Column | Meaning |
+| --- | --- |
+| `seq` | Sequence number of the frame's input |
+| `recv_ns` | When the frame was received here (realtime clock) |
+| `fermi_ts_ns` | The frame's `timestamp`, set when the driver published it |
+| `tick` | The clock tick read off the frame |
+| `display_ns` | When the clock showed that tick: the middle of the tick |
+| `latency_ms` | `recv_ns - display_ns` |
+| `fermi_latency_ms` | `fermi_ts_ns - display_ns` |
+| `confidence` | How clearly the least clear LED was on or off, 0 to 1 |
+| `step_ok` | Whether the tick stepped by a whole number of frames from the last one read |
+
+A frame whose clock could not be read has empty fields after `recv_ns` (and `fermi_ts_ns`). To collect the file after each trial, list it in the experiment's `[results]`.
+
+### Statistics of a run
+
+```
+pixi run summarize path/to/frames.csv [--min-confidence 0.5] [--start 10] [--end 600]
+```
+
+This prints how many frames were used, then the mean, standard deviation, min, p50, p95, p99 and max of both latencies. `--start` and `--end` are seconds after the first frame; use `--start` to leave out the first ~5 s, before every LED has been seen on and off. The CSV also loads straight into pandas for plots.
 
 An annotated snapshot every `snapshot_interval_seconds`, saved as `<files>/<engine>/<seq>.jpeg`, where `<files>` is the daemon's files directory (`STEELEAGLE_FILES`, or `/steeleagle/files` in a sandbox) and `<engine>` is the qualified `STEELEAGLE_ENGINE_ENDPOINT`. It shows:
 

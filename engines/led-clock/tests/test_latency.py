@@ -41,7 +41,7 @@ def primed_reader():
     return copy.deepcopy(_primed_reader())
 
 
-def make_log(clock, saver, reader=None):
+def make_log(clock, saver, reader=None, writer=None):
     return LatencyLog(
         tick_ns=TICK_NS,
         fps=FPS,
@@ -50,6 +50,7 @@ def make_log(clock, saver, reader=None):
         clock=clock,
         report_interval_ns=REPORT_INTERVAL_NS,
         snapshot_interval_ns=SNAPSHOT_INTERVAL_NS,
+        writer=writer,
     )
 
 
@@ -94,8 +95,8 @@ def test_the_report_gives_the_latencies_seen():
     send_frames(log, clock, 60)
     end_interval(clock)
     report = log.report()
-    assert report.latency_ms[50] == pytest.approx(LATENCY_NS / 1e6, abs=HALF_TICK_MS)
-    assert report.fermi_latency_ms[50] == pytest.approx(FERMI_LATENCY_NS / 1e6, abs=HALF_TICK_MS)
+    assert report.latency_ms["p50"] == pytest.approx(LATENCY_NS / 1e6, abs=HALF_TICK_MS)
+    assert report.fermi_latency_ms["p50"] == pytest.approx(FERMI_LATENCY_NS / 1e6, abs=HALF_TICK_MS)
     assert (report.frames, report.decoded) == (60, 60)
     assert report.steps_ok == report.steps_checked == 59
 
@@ -161,3 +162,70 @@ def test_a_snapshot_has_the_reading_drawn_on_it():
     ((_, image),) = saver.saved
     assert image.shape == raw.shape
     assert not np.array_equal(image, raw)
+
+
+class FakeWriter:
+    def __init__(self):
+        self.rows = []
+        self.closed = False
+
+    def write(self, row):
+        self.rows.append(row)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+def test_the_report_gives_the_mean_and_min():
+    clock = Clock()
+    log = make_log(clock, FakeSaver())
+    send_frames(log, clock, 30)
+    end_interval(clock)
+    latency = log.report().latency_ms
+    assert latency["mean"] == pytest.approx(LATENCY_NS / 1e6, abs=HALF_TICK_MS)
+    assert latency["min"] <= latency["p50"] <= latency["max"]
+    assert latency["count"] == 30
+
+
+def test_each_frame_is_written_as_a_row():
+    clock = Clock()
+    writer = FakeWriter()
+    log = make_log(clock, FakeSaver(), writer=writer)
+    send_frames(log, clock, 3)
+    assert [row["seq"] for row in writer.rows] == [0, 1, 2]
+    first, second = writer.rows[:2]
+    assert first["latency_ms"] == pytest.approx(LATENCY_NS / 1e6, abs=HALF_TICK_MS)
+    assert first["fermi_latency_ms"] == pytest.approx(FERMI_LATENCY_NS / 1e6, abs=HALF_TICK_MS)
+    assert first["step_ok"] is None
+    assert second["step_ok"] is True
+    assert first["recv_ns"] == START_TICK * TICK_NS + LATENCY_NS
+    assert first["display_ns"] == first["tick"] * TICK_NS + TICK_NS // 2
+
+
+def test_an_undecoded_frame_is_written_without_latencies():
+    clock = Clock()
+    writer = FakeWriter()
+    log = make_log(clock, FakeSaver(), writer=writer)
+    log.on_frame(7, make_frame(np.zeros_like(make_image(0))), recv_ns=123)
+    log.on_frame(8, None, recv_ns=456)
+    assert [(r["seq"], r["recv_ns"], r["latency_ms"], r["tick"]) for r in writer.rows] == [
+        (7, 123, None, None),
+        (8, 456, None, None),
+    ]
+
+
+def test_closing_reports_the_whole_run_and_closes_the_writer():
+    clock = Clock()
+    writer = FakeWriter()
+    log = make_log(clock, FakeSaver(), writer=writer)
+    send_frames(log, clock, 20)
+    end_interval(clock)
+    log.report()
+    send_frames(log, clock, 10, first_seq=20)
+    total = log.close()
+    assert (total.frames, total.decoded) == (30, 30)
+    assert total.latency_ms["count"] == 30
+    assert writer.closed

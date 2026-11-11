@@ -30,7 +30,15 @@ def parse_frame(input):
 
 def run(name, log, *, stop, on_ready=None):
     """Serves the engine `name`, feeding the LatencyLog `log` the frames it
-    gets, until the threading.Event `stop` is set."""
+    gets, until the threading.Event `stop` is set; then closes the log, which
+    reports the whole run."""
+    try:
+        _serve(name, log, stop=stop, on_ready=on_ready)
+    finally:
+        log.close()
+
+
+def _serve(name, log, *, stop, on_ready):
     with uriel.Engine(name, max_output_size=MAX_OUTPUT_SIZE) as engine:
         logger.info("engine %s ready", name)
         if on_ready is not None:

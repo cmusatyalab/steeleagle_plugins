@@ -20,13 +20,14 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from led_clock.decode import BITS, display_time_ns
+from led_clock.frames import FIELDS
 from led_clock.snapshot import annotate
+from led_clock.stats import format_stats, latency_stats
 
 logger = logging.getLogger("led_clock")
 
 NANOS_PER_MILLI = 1_000_000
 NANOS_PER_SECOND = 1_000_000_000
-PERCENTILES = (50, 95, 99, 100)
 # How far a step may be from a whole number of frames, in ticks: each code is
 # up to a tick off from when its frame was taken, from rounding and from an
 # exposure that spans a tick change
@@ -40,13 +41,6 @@ def step_ok(step, frame_ticks, tolerance=STEP_TOLERANCE_TICKS):
     return frames >= 1 and abs(step - frames * frame_ticks) <= tolerance
 
 
-def percentiles(samples):
-    """{percentile: value} of `samples`, or None if there are none."""
-    if not samples:
-        return None
-    return dict(zip(PERCENTILES, np.percentile(samples, PERCENTILES).tolist()))
-
-
 @dataclass
 class Report:
     seconds: float
@@ -54,7 +48,7 @@ class Report:
     decoded: int = 0
     steps_checked: int = 0
     steps_ok: int = 0
-    # {percentile: milliseconds}, or None if no frame was decoded
+    # latency_stats, in milliseconds, or None if no frame was decoded
     latency_ms: dict | None = None
     fermi_latency_ms: dict | None = None
 
@@ -68,6 +62,17 @@ class _Window:
     latency_ms: list = field(default_factory=list)
     fermi_latency_ms: list = field(default_factory=list)
 
+    def report(self, seconds):
+        return Report(
+            seconds=seconds,
+            frames=self.frames,
+            decoded=self.decoded,
+            steps_checked=self.steps_checked,
+            steps_ok=self.steps_ok,
+            latency_ms=latency_stats(self.latency_ms),
+            fermi_latency_ms=latency_stats(self.fermi_latency_ms),
+        )
+
 
 class LatencyLog:
     def __init__(
@@ -80,6 +85,7 @@ class LatencyLog:
         clock,
         report_interval_ns,
         snapshot_interval_ns,
+        writer=None,
     ):
         self.tick_ns = tick_ns
         self.frame_ticks = NANOS_PER_SECOND / fps / tick_ns
@@ -88,35 +94,62 @@ class LatencyLog:
         self.clock = clock
         self.report_interval_ns = report_interval_ns
         self.snapshot_interval_ns = snapshot_interval_ns
+        # Writes a row per frame (frames.CsvWriter), if set
+        self.writer = writer
         self._window = _Window()
         self._window_started_ns = clock()
+        # Every frame since the engine started, for the whole run's report
+        self._total = _Window()
+        self._started_ns = self._window_started_ns
         self._snapshot_due_ns = None
         self._last_code = None
 
     def on_frame(self, seq, frame, recv_ns):
         """Takes the RawFrame `frame` of input `seq` (None if it could not be
         parsed), received at `recv_ns` on the realtime clock."""
-        window = self._window
-        window.frames += 1
-        if frame is None:
-            return
+        row = dict.fromkeys(FIELDS) | {"seq": seq, "recv_ns": recv_ns}
+        try:
+            if frame is not None:
+                self._read(seq, frame, recv_ns, row)
+        finally:
+            self._count(row)
+            if self.writer is not None:
+                self.writer.write(row)
+
+    def _read(self, seq, frame, recv_ns, row):
+        """Reads the clock off `frame`, filling in `row`."""
         rgb = np.frombuffer(frame.data, dtype=np.uint8).reshape(frame.v_res, frame.h_res, -1)
         reading = self.reader.read(rgb)
-        latency_ms = fermi_latency_ms = None
+        if frame.HasField("timestamp"):
+            row["fermi_ts_ns"] = frame.timestamp.ToNanoseconds()
         if reading.code is not None:
-            window.decoded += 1
             if self._last_code is not None:
-                window.steps_checked += 1
                 step = (reading.code - self._last_code) % (1 << BITS)
-                window.steps_ok += step_ok(step, self.frame_ticks)
+                row["step_ok"] = step_ok(step, self.frame_ticks)
             self._last_code = reading.code
             display_ns = display_time_ns(reading.code, recv_ns, self.tick_ns)
-            latency_ms = (recv_ns - display_ns) / NANOS_PER_MILLI
-            window.latency_ms.append(latency_ms)
-            if frame.HasField("timestamp"):
-                fermi_latency_ms = (frame.timestamp.ToNanoseconds() - display_ns) / NANOS_PER_MILLI
-                window.fermi_latency_ms.append(fermi_latency_ms)
-        self._snapshot(seq, rgb, reading, latency_ms, fermi_latency_ms)
+            row |= {
+                "tick": display_ns // self.tick_ns,
+                "display_ns": display_ns,
+                "latency_ms": (recv_ns - display_ns) / NANOS_PER_MILLI,
+                "confidence": reading.confidence,
+            }
+            if row["fermi_ts_ns"] is not None:
+                row["fermi_latency_ms"] = (row["fermi_ts_ns"] - display_ns) / NANOS_PER_MILLI
+        self._snapshot(seq, rgb, reading, row["latency_ms"], row["fermi_latency_ms"])
+
+    def _count(self, row):
+        for window in (self._window, self._total):
+            window.frames += 1
+            if row["latency_ms"] is None:
+                continue
+            window.decoded += 1
+            window.latency_ms.append(row["latency_ms"])
+            if row["fermi_latency_ms"] is not None:
+                window.fermi_latency_ms.append(row["fermi_latency_ms"])
+            if row["step_ok"] is not None:
+                window.steps_checked += 1
+                window.steps_ok += row["step_ok"]
 
     def report(self):
         """Logs and returns the Report of the frames since the last, if one is
@@ -124,19 +157,22 @@ class LatencyLog:
         now = self.clock()
         if now - self._window_started_ns < self.report_interval_ns:
             return None
-        window = self._window
-        report = Report(
-            seconds=(now - self._window_started_ns) / NANOS_PER_SECOND,
-            frames=window.frames,
-            decoded=window.decoded,
-            steps_checked=window.steps_checked,
-            steps_ok=window.steps_ok,
-            latency_ms=percentiles(window.latency_ms),
-            fermi_latency_ms=percentiles(window.fermi_latency_ms),
-        )
-        logger.info(format_report(report))
+        report = self._window.report((now - self._window_started_ns) / NANOS_PER_SECOND)
+        logger.info("last " + format_report(report))
         self._window = _Window()
         self._window_started_ns = now
+        if self.writer is not None:
+            self.writer.flush()
+        return report
+
+    def close(self):
+        """Logs and returns the Report of every frame since the engine
+        started, and closes the writer."""
+        seconds = (self.clock() - self._started_ns) / NANOS_PER_SECOND
+        report = self._total.report(seconds)
+        logger.info("whole run, " + format_report(report))
+        if self.writer is not None:
+            self.writer.close()
         return report
 
     def _snapshot(self, seq, rgb, reading, latency_ms, fermi_latency_ms):
@@ -162,19 +198,11 @@ class LatencyLog:
         self.saver.save(f"{seq}.jpeg", annotate(rgb, reading, lines))
 
 
-def _format_percentiles(name, values):
-    if values is None:
-        return f"{name}: none"
-    return f"{name} ms: " + " ".join(
-        f"{'max' if p == 100 else f'p{p}'} {v:.1f}" for p, v in values.items()
-    )
-
-
 def format_report(report):
     decoded_pct = 100 * report.decoded / report.frames if report.frames else 0.0
     return (
-        f"last {report.seconds:.0f} s: {report.frames} frames, {report.decoded} decoded"
+        f"{report.seconds:.0f} s: {report.frames} frames, {report.decoded} decoded"
         f" ({decoded_pct:.0f}%), steps ok {report.steps_ok}/{report.steps_checked}"
-        f" | {_format_percentiles('latency', report.latency_ms)}"
-        f" | {_format_percentiles('to fermi', report.fermi_latency_ms)}"
+        f" | {format_stats('latency', report.latency_ms)}"
+        f" | {format_stats('to fermi', report.fermi_latency_ms)}"
     )
