@@ -1,4 +1,5 @@
-"""Writes frames as JPEGs with their detections drawn on them.
+"""Writes each frame as two JPEGs: the raw frame, and the frame with its
+detections drawn on it.
 
 Frames are written on a thread of their own, so the engine never waits on the
 disk; if the disk cannot keep up, frames are skipped rather than queued
@@ -25,12 +26,15 @@ LABEL_COLOR = (255, 255, 255)
 # MIN_BOX_WIDTH pixels, so JPEG's halved color resolution does not wash it out
 BOX_WIDTH_FRACTION = 1 / 200
 MIN_BOX_WIDTH = 2
+# Subdirectories of the raw frames and of the frames with detections drawn
+RAW_DIR = "raw"
+OUT_DIR = "out"
 _STOP = object()
 
 
 def frame_file_name(seq):
-    """`<seq>.jpg`, for the sequence number of the frame's input."""
-    return f"{seq}.jpg"
+    """`<seq>.jpeg`, for the sequence number of the frame's input."""
+    return f"{seq}.jpeg"
 
 
 def draw_detections(image, result):
@@ -62,8 +66,8 @@ def draw_detections(image, result):
 
 
 class FrameSaver:
-    """Writes RawFrames, with their detections drawn, as JPEGs to
-    `directory/<seq>.jpg`."""
+    """Writes RawFrames as JPEGs, as is to `directory/raw/<seq>.jpeg` and with
+    their detections drawn to `directory/out/<seq>.jpeg`."""
 
     def __init__(self, directory, quality=JPEG_QUALITY, queue_size=QUEUE_SIZE):
         self.directory = directory
@@ -112,6 +116,12 @@ class FrameSaver:
                 f"{len(frame.data)} bytes is not a {width}x{height} RGB frame"
             )
         image = Image.frombytes("RGB", (width, height), frame.data)
-        draw_detections(image, result)
-        self.directory.mkdir(parents=True, exist_ok=True)
-        image.save(self.directory / frame_file_name(seq), "JPEG", quality=self.quality)
+        name = frame_file_name(seq)
+        # The raw frame first, as drawing changes the image
+        self._save(image, RAW_DIR, name)
+        self._save(draw_detections(image, result), OUT_DIR, name)
+
+    def _save(self, image, subdirectory, name):
+        directory = self.directory / subdirectory
+        directory.mkdir(parents=True, exist_ok=True)
+        image.save(directory / name, "JPEG", quality=self.quality)

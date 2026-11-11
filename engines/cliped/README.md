@@ -1,6 +1,11 @@
 # cliped
 
-SteelEagle engine plugin for text-guided edge filtering. Each camera frame (`RawFrame`) is cut into overlapping square tiles, every tile is scored against a text prompt with MobileCLIP2-S0, and the tiles worth sending wait in a prioritized send queue until the remote verifier has them.
+SteelEagle engine plugins for prompt-guided edge filtering:
+
+- `cliped.plugin.toml`, the edge filter: each camera frame (`RawFrame`) is cut into overlapping square tiles, every tile is scored against a text or image prompt with MobileCLIP2-S0, and the tiles worth sending wait in a prioritized send queue until the remote verifier has them.
+- `verifier.plugin.toml`, the verifier: asks a vision-language model on Ollama (Qwen2.5-VL 3B by default) whether each tile matches the prompt, and forwards it if so, dropping it if not.
+
+eagled picks one with `STEELEAGLE_PLUGIN`; unset runs the edge filter.
 
 A tile's score is `s = v·t − max_j v·b_j`: how much more its embedding `v` looks like the prompt `t` than like the closest background `b_j`. A tile is queued when `s > max(0, thr + margin · std(s))`, where `thr` is an EMA of each frame's `k`-th best score and `std(s)` is taken over the frame's tiles. At most `max_send` tiles of a frame are queued.
 
@@ -13,6 +18,8 @@ camera → rescale (720p) → cliped → webp encoder ══ link ══ webp de
 ```
 
 `tile_size` and `stride` are tuned for 720p frames, so rescale them first.
+
+With an `image` prompt, `t` is the reference image's embedding by the same image encoder as the tiles (the whole image, squeezed to a square). Image-to-image similarities run well above the image-to-text similarities of the backgrounds, so most tiles score `s > 0` and the adaptive threshold alone decides what is sent.
 
 ## The send queue
 
@@ -31,7 +38,8 @@ A tile sent again may reach the verifier twice; that is the price of never losin
 
 | Arg | Default | Description |
 | --- | --- | --- |
-| `prompt` | | Required: what to search for, as a noun phrase, e.g. `person lying down` |
+| `prompt` | | What to search for, as a noun phrase, e.g. `person lying down`; this or `image` is required |
+| `image` | | An image of what to search for, instead of `prompt`: a file in the daemon's files directory (`STEELEAGLE_FILES`). With both set, `image` is used |
 | `verifier` | | Required: the verifier's service name on the remote daemon, qualified with `STEELEAGLE_REMOTE_QUALIFIER` |
 | `quantized` | `true` | INT8 image encoder (`models/image_encoder_int8.tflite`); `false` runs the FP32 one (`models/distill_visual.pt`) in PyTorch |
 | `tile_size` | `200` | Side of the square tiles, in pixels |
@@ -45,7 +53,25 @@ A tile sent again may reach the verifier twice; that is the price of never losin
 | `resend_after_ms` | `5000` | Wait for a sent tile's `RESULT` before sending it again; keep it above the verifier's edge timeout plus its processing time |
 | `npu` | `true` | With `quantized`, run on the HTP through QNN (`libs/`); `false` runs it on the CPU |
 | `threads` | `4` | CPU threads for the text encoder, and for the image encoder off the HTP |
-| `log_tiles` | `false` | Log every frame's scores, not only frames that pick a tile |
+| `log_scores` | `false` | Log every frame's scores, not only frames that pick a tile |
+| `log_tiles` | `false` | Write each input frame to `STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg` and each tile sent to `STEELEAGLE_FILES/<engine>/out/<frame id>_<tile number>.jpeg` (JPEG, quality 75). `<engine>` is `STEELEAGLE_ENGINE_ENDPOINT`, the frame id is the `RawFrame`'s `id`, and the tile number is the tile's index in the frame's tiling, row by row. A tile sent again overwrites its file |
+
+## The verifier
+
+The verifier takes RGB `RawFrame`s (a tile from cliped, decoded) and asks the model, through Ollama's `/api/chat`, whether the frame shows the `prompt`; with an `image`, it shows the model the reference image first and asks whether the frame shows the same kind of thing. A yes forwards the frame unchanged; a no, any other answer, or a failure to reach Ollama drops it. Every input gets a `DetectionResult` (one detection covering the frame, of class `prompt` or the image's name, on a match; none otherwise), so cliped sees a `RESULT` for every tile it sent.
+
+It needs an Ollama server (`ollama serve`); at startup it pulls the model if the server does not have it. It does not load torch or the CLIP models.
+
+| Arg | Default | Description |
+| --- | --- | --- |
+| `prompt` | | What to look for, as a noun phrase; this or `image` is required |
+| `image` | | An image of what to look for, instead of `prompt`: a file in `STEELEAGLE_FILES`. With both set, `image` is used |
+| `model` | `qwen2.5vl:3b` | Ollama model to ask |
+| `host` | | Ollama server URL; blank uses `OLLAMA_HOST`, or `http://localhost:11434` |
+| `timeout_ms` | `30000` | Wait for the model's answer about one frame before dropping it |
+| `log_tiles` | `false` | Write each input to `STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg` and each frame forwarded to `STEELEAGLE_FILES/<engine>/out/<frame id>_0.jpeg` (JPEG, quality 75) |
+
+Keep cliped's `resend_after_ms` above the edge's timeout plus the model's time per tile.
 
 ## On the Tachyon
 

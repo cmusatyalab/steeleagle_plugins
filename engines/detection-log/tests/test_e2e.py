@@ -120,15 +120,17 @@ def test_frames_are_saved_named_by_seq_with_the_detectors_boxes(tmp_path):
                 seqs.append(producer.send(frame))
                 # One at a time, so the stand-in never skips one
                 time.sleep(0.3)
-            wait_for_files(directory, len(seqs))
+            wait_for_files(directory / "out", len(seqs))
     finally:
         stop.set()
         for thread in threads:
             thread.join(TIMEOUT_S)
 
-    assert sorted(p.name for p in directory.iterdir()) == sorted(f"{s}.jpg" for s in seqs)
+    expected = sorted(f"{s}.jpeg" for s in seqs)
+    for subdirectory in ("raw", "out"):
+        assert sorted(p.name for p in (directory / subdirectory).iterdir()) == expected
     for seq in seqs:
-        with Image.open(directory / f"{seq}.jpg") as image:
+        with Image.open(directory / "out" / f"{seq}.jpeg") as image:
             pixels = np.asarray(image.convert("RGB"), dtype=int)
         # The box's left side, at x = 50, is red only where it was found
         r, g, b = pixels[100, 51]

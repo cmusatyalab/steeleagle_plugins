@@ -90,7 +90,8 @@ class Cliped:
     picks them (clip.Selector), and `queue` holds them until the verifier
     has them."""
 
-    def __init__(self, encoder, selector, queue, *, prompt, verifier, tile_size, stride, log_tiles=False):
+    def __init__(self, encoder, selector, queue, *, prompt, verifier, tile_size, stride, log_scores=False,
+                 tile_log=None):
         self.encoder = encoder
         self.selector = selector
         self.queue = queue
@@ -98,7 +99,9 @@ class Cliped:
         self.verifier = verifier
         self.tile_size = tile_size
         self.stride = stride
-        self.log_tiles = log_tiles
+        self.log_scores = log_scores
+        # A files.TileLog, which gets each input and each tile sent, or None
+        self.tile_log = tile_log
         self._boxes = {}  # (width, height) -> tile boxes
         self.frames = 0
         self.picked = 0
@@ -120,6 +123,8 @@ class Cliped:
         picked. Raises FrameError if `input` is not an RGB RawFrame."""
         now = time.monotonic() if now is None else now
         frame, rgb = read_frame(bytes(input.data))
+        if self.tile_log is not None:
+            self.tile_log.input(frame.id, rgb)
         height, width = rgb.shape[:2]
         boxes = self.boxes(width, height)
         started = time.perf_counter()
@@ -131,7 +136,9 @@ class Cliped:
         for i in picked:
             box = boxes[i]
             score = float(s[i])
-            self.queue.push(Tile(score=score, payload=tile_frame(frame, rgb, box), frame_id=frame.id, box=box))
+            self.queue.push(
+                Tile(score=score, payload=tile_frame(frame, rgb, box), frame_id=frame.id, box=box, index=int(i))
+            )
             x0, y0, x1, y1 = box
             result.detections.add(
                 class_name=self.prompt,
@@ -141,7 +148,9 @@ class Cliped:
         self.picked += len(picked)
 
         tile = self.queue.next(input.id, now)
-        if self.log_tiles or len(picked):
+        if tile is not None and self.tile_log is not None:
+            self.tile_log.output(tile.frame_id, tile.index, read_frame(tile.payload)[1])
+        if self.log_scores or len(picked):
             logger.info(
                 "frame %d: %d tiles in %.0f ms, best s %.3f, thr %.3f, picked %d; queue %d (%d in flight)%s",
                 frame.id,

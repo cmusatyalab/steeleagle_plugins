@@ -1,13 +1,15 @@
 import json
 
+import cv2
 import numpy as np
 import pytest
 import uriel
 from conftest import VERIFIER, BrightnessEncoder, make_event, make_frame, make_input
 
 from cliped import main
-from cliped.clip import QUANTIZED_MODEL, NpuImageEncoder, Selector, tile_boxes
+from cliped.clip import QUANTIZED_MODEL, NpuImageEncoder, Selector, image_vector, tile_boxes
 from cliped.engine import Cliped, FrameError, max_output_size
+from cliped.files import TileLog
 from cliped.send_queue import SendQueue
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from steeleagle_protocol.v1.messages.result import result_pb2
@@ -98,9 +100,17 @@ def test_args_default_and_validate():
     )
     assert args["backgrounds"] == ["grass", "dirt", "rocks", "trees", "a road", "a roof"]
     assert args["npu"] is True
+    assert (args["log_scores"], args["log_tiles"], args["image"]) == (False, False, "")
+    # An image wins over a prompt
+    args = main.parse_args(json.dumps({"prompt": "a red tarp", "image": " tarp.jpg ", "verifier": "v"}))
+    assert (args["image"], args["prompt"]) == ("tarp.jpg", "")
+    assert main.parse_args(json.dumps({"image": "tarp.jpg", "verifier": "v"}))["image"] == "tarp.jpg"
     for bad in [
         {"verifier": "v"},
+        {"prompt": " ", "image": "", "verifier": "v"},
         {"prompt": "p"},
+        {"prompt": "p", "verifier": "v", "image": 3},
+        {"prompt": "p", "verifier": "v", "log_tiles": "yes"},
         {"prompt": "p", "verifier": "v", "tile_size": 0},
         {"prompt": "p", "verifier": "v", "stride": 1.5},
         {"prompt": "p", "verifier": "v", "backgrounds": []},
@@ -119,3 +129,33 @@ def test_the_quantized_model_runs_on_the_cpu():
     v = encoder.encode_tiles(tiles)
     assert v.shape == (2, 512)
     assert np.allclose(np.linalg.norm(v, axis=1), 1, atol=1e-5)
+
+
+def test_log_tiles_writes_each_input_and_each_tile_sent(tmp_path):
+    encoder = BrightnessEncoder()
+    cliped = Cliped(
+        encoder,
+        Selector(encoder.t, encoder.b, margin=0.25, max_send=1),
+        SendQueue(max_size=8, resend_after_s=5.0),
+        prompt="a white square",
+        verifier=VERIFIER,
+        tile_size=200,
+        stride=150,
+        tile_log=TileLog(tmp_path / "cliped"),
+    )
+    tile, _ = cliped.on_input(make_input(1, make_frame(bright=(150, 0, 350, 200), id=40)), now=0)
+    boxes = tile_boxes(400, 300, 200, 150)
+    assert tile.index == boxes.index((150, 0, 350, 200))
+    # An input that sends nothing is still written
+    cliped.on_input(make_input(2, make_frame(id=41)), now=1)
+    assert sorted(p.name for p in (tmp_path / "cliped" / "in").iterdir()) == ["40.jpeg", "41.jpeg"]
+    assert [p.name for p in (tmp_path / "cliped" / "out").iterdir()] == [f"40_{tile.index}.jpeg"]
+    out = cv2.imread(str(tmp_path / "cliped" / "out" / f"40_{tile.index}.jpeg"))
+    assert out.shape == (200, 200, 3) and out.mean() > 250
+    assert cv2.imread(str(tmp_path / "cliped" / "in" / "40.jpeg")).shape == (300, 400, 3)
+
+
+def test_an_image_prompt_is_embedded_by_the_tile_encoder():
+    encoder = BrightnessEncoder()
+    white = np.full((50, 80, 3), 255, dtype=np.uint8)
+    assert image_vector(encoder, white) == pytest.approx([1.0, 0.0])

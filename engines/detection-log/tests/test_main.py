@@ -44,12 +44,12 @@ def test_bad_args_are_refused(args):
         parse_args(json.dumps(args))
 
 
-def test_the_directory_is_the_last_part_of_the_engine_endpoint():
-    assert engine_dir_name("100.64.0.1.detection_log") == "detection_log"
+def test_the_directory_is_the_whole_engine_endpoint():
+    assert engine_dir_name("100.64.0.1.detection_log") == "100.64.0.1.detection_log"
     assert engine_dir_name("detection_log") == "detection_log"
 
 
-@pytest.mark.parametrize("endpoint", ["", "100.64.0.1.", "a/..", "a/b"])
+@pytest.mark.parametrize("endpoint", ["", ".", "..", "a/..", "a/b"])
 def test_an_endpoint_that_names_no_directory_is_refused(endpoint):
     with pytest.raises(ConfigError):
         engine_dir_name(endpoint)

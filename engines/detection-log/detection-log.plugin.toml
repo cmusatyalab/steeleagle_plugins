@@ -1,7 +1,7 @@
 [plugin]
 name = "Detection Log"
 type = "engine"
-description = "Saves each frame, with the boxes a local detection engine found in it drawn on, as a JPEG named by its sequence number in a directory of the daemon's files directory named after this engine"
+description = "Saves each frame as a JPEG named by its sequence number, both raw and with the boxes a local detection engine found in it drawn on, in a directory of the daemon's files directory named after this engine's qualified endpoint"
 
 [[args]]
 name = "detector"

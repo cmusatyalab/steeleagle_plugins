@@ -50,6 +50,8 @@ class Tile:
     # The id of the frame it was cut from, and its box in that frame
     frame_id: int
     box: tuple
+    # Its number among the tiles of that frame
+    index: int = 0
     order: int = 0
     # The ids of every input it went out in place of; the last is the latest
     carriers: list = field(default_factory=list)

@@ -133,11 +133,26 @@ class NpuImageEncoder:
 
 def text_vectors(encoder, prompt, backgrounds=BACKGROUNDS):
     """The text vector t of `prompt`, averaged over TEMPLATES, and a
-    background vector b_j for each of `backgrounds`."""
-    t = encoder.encode_text([template.format(prompt) for template in TEMPLATES]).mean(0)
-    t /= np.linalg.norm(t)
+    background vector b_j for each of `backgrounds`. With no `prompt` (an
+    image prompt), t is None."""
+    t = None
+    if prompt:
+        t = encoder.encode_text([template.format(prompt) for template in TEMPLATES]).mean(0)
+        t /= np.linalg.norm(t)
     b = encoder.encode_text([TEMPLATES[0].format(bg) for bg in backgrounds])
     return t, b
+
+
+def image_vector(image_encoder, rgb):
+    """The prompt vector t of the reference image `rgb` (uint8 RGB), embedded
+    whole, squeezed to a square, by the encoder that embeds the tiles.
+
+    Image-to-image similarities run well above the image-to-text ones of the
+    backgrounds, so s is above 0 for most tiles: the adaptive threshold, not
+    the 0 floor, decides what is sent."""
+    tile = cv2.resize(rgb, (image_encoder.size, image_encoder.size), interpolation=cv2.INTER_AREA)
+    t = image_encoder.encode_tiles([tile])[0].astype(np.float64)
+    return t / np.linalg.norm(t)
 
 
 def tile_boxes(width, height, tile, stride):

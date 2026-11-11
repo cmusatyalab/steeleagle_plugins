@@ -1,12 +1,18 @@
 [plugin]
 name = "CLIP Edge Filter"
 type = "engine"
-description = "Scores the tiles of each camera frame against a text prompt with MobileCLIP, and sends the remote verifier the best tiles, best first, keeping each until the verifier has it"
+description = "Scores the tiles of each camera frame against a text or image prompt with MobileCLIP, and sends the remote verifier the best tiles, best first, keeping each until the verifier has it"
 
 [[args]]
 name = "prompt"
 type = "string"
-description = "What to search for, as a noun phrase, e.g. \"a red tarp\" or \"person lying down\"; required"
+description = "What to search for, as a noun phrase, e.g. \"a red tarp\" or \"person lying down\"; this or image is required"
+default = ""
+
+[[args]]
+name = "image"
+type = "string"
+description = "An image of what to search for, instead of prompt: a file in the daemon's files directory (STEELEAGLE_FILES), e.g. \"target.jpg\". With both set, image is used"
 default = ""
 
 [[args]]
@@ -88,9 +94,15 @@ description = "CPU threads for the text encoder, and for the image encoder off t
 default = 4
 
 [[args]]
-name = "log_tiles"
+name = "log_scores"
 type = "boolean"
 description = "Log every frame's scores, not only the frames that pick a tile"
+default = false
+
+[[args]]
+name = "log_tiles"
+type = "boolean"
+description = "Write each input frame to STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg and each tile sent to STEELEAGLE_FILES/<engine>/out/<frame id>_<tile number>.jpeg, as JPEG at quality 75"
 default = false
 
 [engine]

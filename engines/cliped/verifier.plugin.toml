@@ -1,0 +1,49 @@
+[plugin]
+name = "CLIP Edge Filter Verifier"
+type = "engine"
+description = "Asks a vision-language model on Ollama (Qwen2.5-VL 3B by default) whether each frame, e.g. a tile from the CLIP edge filter, matches a text or image prompt; forwards the frames that do and drops the rest"
+
+[[args]]
+name = "prompt"
+type = "string"
+description = "What to look for, as a noun phrase, e.g. \"a red tarp\" or \"person lying down\"; this or image is required"
+default = ""
+
+[[args]]
+name = "image"
+type = "string"
+description = "An image of what to look for, instead of prompt: a file in the daemon's files directory (STEELEAGLE_FILES), e.g. \"target.jpg\". With both set, image is used"
+default = ""
+
+[[args]]
+name = "model"
+type = "string"
+description = "Ollama model to ask; pulled at startup if the server does not have it"
+default = "qwen2.5vl:3b"
+
+[[args]]
+name = "host"
+type = "string"
+description = "URL of the Ollama server; blank uses OLLAMA_HOST, or http://localhost:11434"
+default = ""
+
+[[args]]
+name = "timeout_ms"
+type = "number"
+description = "Milliseconds to wait for the model's answer about one frame before dropping it"
+default = 30000
+
+[[args]]
+name = "log_tiles"
+type = "boolean"
+description = "Write each input frame to STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg and each frame forwarded to STEELEAGLE_FILES/<engine>/out/<frame id>_0.jpeg, as JPEG at quality 75"
+default = false
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# Each RGB frame the model says matches is forwarded unchanged, and every other
+# frame is dropped. Either way the result is a DetectionResult: one detection
+# covering the frame, of class prompt (or the image's name), on a match, and
+# none otherwise, so cliped's send queue sees a RESULT for every tile it sent.
+result = "steeleagle_protocol/v1/messages/result/DetectionResult"

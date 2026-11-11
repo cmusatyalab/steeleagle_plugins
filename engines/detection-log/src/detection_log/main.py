@@ -66,13 +66,12 @@ def qualify(qualifier, name):
 
 
 def engine_dir_name(endpoint):
-    """The name the plugin runs as: the last '.'-separated part of its
+    """The directory frames are saved under: the plugin's whole qualified
     STEELEAGLE_ENGINE_ENDPOINT. It must name a directory inside the files
     directory, never the files directory itself, which refresh would empty."""
-    name = endpoint.rsplit(".", 1)[-1]
-    if not name or Path(name).name != name:
-        raise ConfigError(f"{endpoint!r} does not end in a name to save frames under")
-    return name
+    if not endpoint or endpoint in (".", "..") or Path(endpoint).name != endpoint:
+        raise ConfigError(f"{endpoint!r} is not a name to save frames under")
+    return endpoint
 
 
 def clear_directory(directory):
