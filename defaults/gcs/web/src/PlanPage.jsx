@@ -1,4 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import ChatPage from './chat/ChatPage.jsx';
+import InferredMissionPage from './inferred-mission/InferredMissionPage.jsx';
 import { TabView, TabPanel } from 'primereact/tabview';
 import { Button } from 'primereact/button';
 import { SplitButton } from 'primereact/splitbutton';
@@ -302,6 +304,8 @@ function FsmCanvas({ nodes, edges, setNodes, setEdges, eventInstances, setEventI
     );
 }
 
+const INFERRED_MISSION_TAB_INDEX = 5;
+
 function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState, visible = true }) {
     const [activeIndex, setActiveIndex] = useState(0);
     const draftNotice = useRef(null);
@@ -498,7 +502,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     // The flow to ship with Validate and Deploy: {flow: template} when the
     // flow has nodes and is valid, {} when it has none, and null (after a
     // toast) when it's broken -- a broken flow is never sent.
-    function flowRequestPart() {
+    function flowRequestPart(quiet = false) {
         if (flow.nodes.length === 0) return {};
         if (!catalog || (catalog.daemons.length === 0 && catalog.error)) {
             toast.current.show({
@@ -511,7 +515,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
             if (validateFlow(flow, catalog).errors.length > 0) throw new Error('invalid flow');
             return { flow: toTemplate(flow, catalog) };
         } catch {
-            toast.current.show({ severity: 'warn', summary: 'Flow has errors', detail: 'Fix the flow on the Flow Builder tab first' });
+            if (!quiet) toast.current.show({ severity: 'warn', summary: 'Flow has errors', detail: 'Fix the flow on the Flow Builder tab first' });
             return null;
         }
     }
@@ -737,6 +741,28 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
             throw new Error(detail);
         }
         return resp.json();
+    }
+
+    function getAIPlanningContext() {
+        return { ...vehiclePart, ...(flowRequestPart(true) ?? {}), geojson: features };
+    }
+
+    async function applyAIArtifact(target, artifact) {
+        try {
+            if (target !== 'fsm-builder' || !artifact?.payload?.normalized_dsl) {
+                throw new Error('This reply has no DSL draft to apply.');
+            }
+            const parsed = await parseDslText(artifact.payload.normalized_dsl);
+            if (!parsed.start_id || !parsed.nodes?.length) throw new Error('The draft has no valid starting action.');
+            loadFromParsed(parsed);
+            showParseWarnings(parsed);
+            setActiveIndex(0);
+            toast.current.show({ severity: 'success', summary: 'Applied to Mission Builder',
+                detail: `Loaded ${parsed.nodes.length} actions for review.` });
+        } catch (error) {
+            toast.current.show({ severity: 'error', summary: 'Could not apply draft', detail: error.message });
+            throw error;
+        }
     }
 
     async function handleLoadDsl(file) {
@@ -1039,6 +1065,13 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
                             onChange={e => { setDslEdited(true); setDslText(e.target.value); }}
                         />
                     </div>
+                </TabPanel>
+                <TabPanel header="Chat" leftIcon="pi pi-comments mr-2" headerClassName="mr-2">
+                    <ChatPage onApplyArtifact={applyAIArtifact} getPlanningContext={getAIPlanningContext} />
+                </TabPanel>
+                <TabPanel header="Inferred Mission" leftIcon="pi pi-video mr-2" headerClassName="mr-2">
+                    <InferredMissionPage activeTab={visible && activeIndex === INFERRED_MISSION_TAB_INDEX} onApplyArtifact={applyAIArtifact}
+                        getPlanningContext={getAIPlanningContext} />
                 </TabPanel>
             </TabView>
         </>

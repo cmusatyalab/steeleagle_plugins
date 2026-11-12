@@ -4,5 +4,9 @@ __pycache__/
 **aviary.toml
 *~
 config.toml
+
+# macOS Finder metadata
+.DS_Store
+
 # Visual brainstorming companion mockups
 .superpowers/

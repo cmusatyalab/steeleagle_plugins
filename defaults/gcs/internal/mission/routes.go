@@ -156,27 +156,32 @@ func (s *Service) scopedState(ctx context.Context, plugin []byte) (*State, error
 // vehiclePlugin returns the plugin config of the named running vehicle, or
 // writes an error and returns false.
 func (s *Service) vehiclePlugin(w http.ResponseWriter, r *http.Request, name string) ([]byte, bool) {
-	if s.vehicles == nil {
-		writeError(w, http.StatusServiceUnavailable, noDaemon)
+	plugin, status, err := s.lookupVehiclePlugin(r.Context(), name)
+	if err != nil {
+		writeError(w, status, err.Error())
 		return nil, false
 	}
-	vs, err := s.vehicles(r.Context())
+	return plugin, true
+}
+
+func (s *Service) lookupVehiclePlugin(ctx context.Context, name string) ([]byte, int, error) {
+	if s.vehicles == nil {
+		return nil, http.StatusServiceUnavailable, errors.New(noDaemon)
+	}
+	vs, err := s.vehicles(ctx)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "Cannot list vehicles: "+err.Error())
-		return nil, false
+		return nil, http.StatusServiceUnavailable, fmt.Errorf("Cannot list vehicles: %w", err)
 	}
 	for _, v := range vs {
 		if v.Name != name {
 			continue
 		}
 		if v.Driver == nil {
-			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("vehicle %s has no driver config: %v", name, v.DriverErr))
-			return nil, false
+			return nil, http.StatusUnprocessableEntity, fmt.Errorf("vehicle %s has no driver config: %v", name, v.DriverErr)
 		}
-		return v.Config, true
+		return v.Config, 0, nil
 	}
-	writeError(w, http.StatusNotFound, fmt.Sprintf("vehicle %s is not running", name))
-	return nil, false
+	return nil, http.StatusNotFound, fmt.Errorf("vehicle %s is not running", name)
 }
 
 // graphRequest is a mission graph as the frontend posts it; unknown fields
@@ -252,29 +257,15 @@ func (s *Service) ServeCompile(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &g) {
 		return
 	}
-	target := BuildTarget{Key: "amd64", Arch: "amd64", Engines: map[string]string{}}
-	if g.Vehicle != "" {
-		var ok bool
-		if target.Plugin, ok = s.vehiclePlugin(w, r, g.Vehicle); !ok {
-			return
+	plan := PlanningContext{Vehicle: g.Vehicle, Flow: g.Flow}
+	target, status, err := s.validationTarget(r.Context(), plan, g.Graph)
+	if err != nil {
+		if status == http.StatusOK {
+			writeJSON(w, status, map[string]any{"errors": []GraphError{{Message: err.Error()}}})
+		} else {
+			writeError(w, status, err.Error())
 		}
-	}
-	if !g.Flow.Empty() {
-		if s.catalog == nil {
-			writeError(w, http.StatusServiceUnavailable, noDaemon)
-			return
-		}
-		cat, err := s.catalog(r.Context())
-		if err != nil {
-			writeError(w, http.StatusServiceUnavailable, "Cannot list the flow catalog: "+err.Error())
-			return
-		}
-		res, err := s.resolveForValidate(cat, *g.Flow, g.Graph)
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"errors": []GraphError{{Message: err.Error()}}})
-			return
-		}
-		target.Flow, target.Manifest, target.Engines = res.Flow, res.Manifest, res.Engines
+		return
 	}
 	_, errs, err := s.CompileGraph(r.Context(), g.Graph, []BuildTarget{target})
 	if err != nil {
@@ -322,7 +313,7 @@ func (s *Service) ServeRenderDSL(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &g) {
 		return
 	}
-	ast, err := GraphToAst(g.Graph, st.Index, s.header, nil)
+	ast, err := graphToPortableAst(g.Graph, st.Index, s.header)
 	if err == nil {
 		var dsl string
 		if dsl, err = AstToDSL(ast); err == nil {

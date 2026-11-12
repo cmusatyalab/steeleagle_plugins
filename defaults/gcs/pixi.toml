@@ -22,7 +22,7 @@ nodejs = ">=22"
 pkg-config = "*"
 # Download liburiel (tools/uriel-install.sh)
 curl = "*"
-# Generates the mock harness's video clips (cmd/gcsmock)
+# Inferred Mission probing/decoding and the mock harness's video clips
 ffmpeg = "*"
 
 [activation.env]

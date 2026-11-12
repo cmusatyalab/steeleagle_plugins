@@ -1,0 +1,318 @@
+package inferredmission
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"math"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+const (
+	maxLiveBytes  = 16 << 20
+	maxLiveFrames = 4096
+)
+
+type EncodedFrame struct {
+	Producer, Vehicle      string
+	Data                   []byte
+	CapturedAt, ReceivedAt time.Time
+	ID                     uint64
+	Keyframe               bool
+	RelativeAltitude       *float64
+}
+
+type altitudeReading struct {
+	meters float64
+	at     time.Time
+}
+
+type liveInput struct {
+	vehicle  string
+	frames   chan EncodedFrame
+	stop     chan struct{}
+	stopOnce sync.Once
+	dropped  atomic.Uint64
+	altitude atomic.Pointer[altitudeReading]
+}
+
+func newLiveInput(vehicle string) *liveInput {
+	return &liveInput{vehicle: vehicle, frames: make(chan EncodedFrame, 16), stop: make(chan struct{})}
+}
+
+func (in *liveInput) stopCapture() { in.stopOnce.Do(func() { close(in.stop) }) }
+
+// Ingest enqueues an immutable frame from the GCS feed without blocking the
+// WebRTC publisher. Only producers with active observations allocate work.
+func (s *Service) Ingest(frame EncodedFrame) {
+	if !s.mu.TryRLock() {
+		return
+	}
+	in := s.live[frame.Producer]
+	s.mu.RUnlock()
+	if in == nil || in.vehicle != frame.Vehicle || len(frame.Data) == 0 || len(frame.Data) > maxLiveBytes/4 {
+		return
+	}
+	select {
+	case <-in.stop:
+	case in.frames <- frame:
+	default:
+		in.dropped.Add(1)
+	}
+}
+
+func (s *Service) Telemetry(vehicle string, altitude float64, at time.Time) {
+	if math.IsNaN(altitude) || math.IsInf(altitude, 0) {
+		return
+	}
+	if !s.mu.TryRLock() {
+		return
+	}
+	defer s.mu.RUnlock()
+	for _, in := range s.live {
+		if in.vehicle == vehicle {
+			in.altitude.Store(&altitudeReading{meters: altitude, at: at})
+		}
+	}
+}
+
+type livePacket struct {
+	data    []byte
+	at      time.Time
+	capture *float64
+	id      uint64
+	key     bool
+}
+
+type liveSection struct {
+	row     section
+	packets []livePacket
+	indices []int
+	origin  time.Time
+}
+
+func (s *Service) runLive(r *run, meta session) (string, string) {
+	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	jobs := make(chan liveSection, 2)
+	collected := make(chan error, 1)
+	go func() {
+		defer close(jobs)
+		collected <- collectLive(ctx, r, meta, jobs)
+	}()
+	for job := range jobs {
+		if ctx.Err() != nil {
+			break
+		}
+		load := func() ([]sample, error) { return decodeLive(ctx, r, meta, job) }
+		if err := s.process(r, meta, job.row, load); err != nil {
+			cancel()
+			<-collected
+			s.log.Warn().Err(err).Msg("could not save live analysis")
+			return "error", "Could not save the live section."
+		}
+	}
+	if err := <-collected; err != nil {
+		s.log.Warn().Err(err).Msg("could not archive live observation")
+		return "error", "Could not archive the live observation."
+	}
+	if s.ctx.Err() != nil {
+		return "stopped", "GCS stopped during observation."
+	}
+	return "stopped", ""
+}
+
+func collectLive(ctx context.Context, r *run, meta session, jobs chan<- liveSection) error {
+	in := r.live
+	cfg := meta.Settings
+	duration, interval := timeout(cfg.SectionSeconds), timeout(1/cfg.FrameFPS)
+	var anchor, last, picked time.Time
+	var packets []livePacket
+	var indices []int
+	var telemetry map[string]any
+	var partial bool
+	var bytesUsed, index int
+	var dropped uint64
+	var lastID uint64
+	var haveID, needKeyframe bool
+
+	offset := func() float64 {
+		if meta.Flight != nil {
+			return math.Max(0, seconds(anchor)-*meta.Flight)
+		}
+		return 0
+	}
+
+	publish := func(final bool) error {
+		if index == 0 {
+			return nil
+		}
+		start := float64(index-1)*cfg.SectionSeconds + offset()
+		end := start + cfg.SectionSeconds
+		origin := anchor.Add(time.Duration(index-1) * duration)
+		quality := "complete"
+		if partial || final || len(indices) < int(math.Ceil(cfg.SectionSeconds*cfg.FrameFPS/2)) {
+			quality = "partial"
+		}
+		if final {
+			end = math.Min(end, start+last.Sub(origin).Seconds()+0.001)
+		}
+		row := section{sectionSummary: sectionSummary{Index: index, Start: start, End: end, Status: "queued"},
+			InputQuality: quality, Telemetry: telemetry}
+		if len(indices) == 0 {
+			row.Status, row.Error = "gap", "No decodable frames were available in this section."
+			return r.setSection(row)
+		}
+		if len(jobs) == cap(jobs) {
+			row.Status, row.Error = "gap", "Analysis fell behind the live stream. This section was skipped."
+			return r.setSection(row)
+		}
+		if err := r.setSection(row); err != nil {
+			return err
+		}
+		jobs <- liveSection{row: row, packets: packets, indices: indices, origin: origin}
+		return nil
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-in.stop:
+			return publish(true)
+		default:
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-in.stop:
+			return publish(true)
+		case frame := <-in.frames:
+			at := frame.CapturedAt
+			var capture *float64
+			if at.IsZero() {
+				at = frame.ReceivedAt
+			} else {
+				stamp := seconds(at)
+				capture = &stamp
+			}
+			if at.IsZero() || frame.ReceivedAt.Sub(at) > 30*time.Second ||
+				at.Sub(frame.ReceivedAt) > 3*time.Second || (!last.IsZero() && !at.After(last)) {
+				continue
+			}
+			if anchor.IsZero() {
+				anchor = at
+			}
+			next := int(at.Sub(anchor)/duration) + 1
+			if next != index {
+				if err := publish(false); err != nil {
+					return err
+				}
+				if index != 0 && next > index+1 {
+					row := section{sectionSummary: sectionSummary{Index: index + 1, Status: "gap",
+						Start: float64(index)*cfg.SectionSeconds + offset(), End: float64(next-1)*cfg.SectionSeconds + offset(),
+						Error: "No fresh frames were received in this interval."}, InputQuality: "partial"}
+					if err := r.setSection(row); err != nil {
+						return err
+					}
+				}
+				// Carry only the last GOP across the boundary so predictive
+				// frames at the beginning of a section can still be decoded.
+				packets, bytesUsed = trailingGOP(packets)
+				if frame.Keyframe {
+					packets, bytesUsed = nil, 0
+				}
+				indices, telemetry, picked, partial = nil, nil, time.Time{}, false
+				index = next
+			}
+			if current := in.dropped.Load(); current != dropped || (haveID && frame.ID != lastID+1) {
+				partial, dropped, needKeyframe = true, current, true
+				if len(indices) == 0 {
+					packets, bytesUsed = nil, 0
+				}
+			}
+			last, lastID, haveID = at, frame.ID, true
+			if needKeyframe {
+				if !frame.Keyframe {
+					continue
+				}
+				needKeyframe = false
+			}
+			if (len(packets) == 0 && !frame.Keyframe) || bytesUsed+len(frame.Data) > maxLiveBytes || len(packets) == maxLiveFrames {
+				partial = true
+				last = at
+				continue
+			}
+			packets = append(packets, livePacket{data: frame.Data, at: at, capture: capture, id: frame.ID, key: frame.Keyframe})
+			bytesUsed += len(frame.Data)
+			selected := picked.IsZero() || at.Sub(picked) >= interval-time.Microsecond
+			if selected {
+				picked = at
+				indices = append(indices, len(packets)-1)
+				if frame.RelativeAltitude != nil {
+					telemetry = map[string]any{"relative_altitude_m": *frame.RelativeAltitude, "source": "imaging_frame"}
+				} else if reading := in.altitude.Load(); reading != nil && math.Abs(at.Sub(reading.at).Seconds()) <= 2 {
+					telemetry = map[string]any{"relative_altitude_m": reading.meters, "source": "telemetry_feed"}
+				} else {
+					telemetry = nil
+				}
+			}
+			if !selected {
+				continue
+			}
+			r.mu.Lock()
+			r.lastFrame = seconds(frame.ReceivedAt)
+			r.collecting, r.frameCount = index, len(indices)
+			r.notice = "Receiving timestamped imagery."
+			if capture == nil {
+				r.notice = "Receiving imagery using GCS receipt time."
+			}
+			r.update()
+			r.mu.Unlock()
+		}
+	}
+}
+
+func trailingGOP(packets []livePacket) ([]livePacket, int) {
+	var size int
+	for i := len(packets) - 1; i >= 0; i-- {
+		size += len(packets[i].data)
+		if packets[i].key {
+			return slices.Clone(packets[i:]), size
+		}
+	}
+	return nil, 0
+}
+
+func decodeLive(ctx context.Context, r *run, meta session, job liveSection) ([]sample, error) {
+	selector := make([]string, len(job.indices))
+	for i, idx := range job.indices {
+		selector[i] = "eq(n\\," + strconv.Itoa(idx) + ")"
+	}
+	filter := "select=" + strings.Join(selector, "+") + "," + scaleFilter(meta.Settings.MaxFrameSide) + ",showinfo"
+	input := make([]io.Reader, 0, len(job.packets))
+	for _, packet := range job.packets {
+		input = append(input, bytes.NewReader(packet.data))
+	}
+	frames, err := decode(ctx, framesDir(r, job.row.Index), io.MultiReader(input...), []string{"-xerror", "-f", "h264", "-i", "pipe:0"},
+		filter, len(job.indices), func(i int, _ []byte) (sample, error) {
+			packet := job.packets[job.indices[i]]
+			var frame sample
+			frame.Time = packet.at.Sub(job.origin).Seconds()
+			frame.Capture, frame.ID = packet.capture, &packet.id
+			return frame, nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	if len(frames) != len(job.indices) {
+		return nil, errors.New("Live frames could not be matched to their capture timestamps.")
+	}
+	return frames, nil
+}

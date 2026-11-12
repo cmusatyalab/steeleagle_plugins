@@ -353,6 +353,16 @@ func typedDefault(kind, value string) any {
 // is used as written; otherwise it must be a key of engines, and its value (the
 // engine's full resolved name) is what the generated constant names.
 func GraphToAst(g Graph, ix *TypeIndex, header map[string]any, engines map[string]string) (map[string]any, error) {
+	return graphToAstWithMode(g, ix, header, engines, false)
+}
+
+// graphToPortableAst preserves template engine names for a DSL import/export
+// round trip. The compiler path resolves them to SDK constants separately.
+func graphToPortableAst(g Graph, ix *TypeIndex, header map[string]any) (map[string]any, error) {
+	return graphToAstWithMode(g, ix, header, nil, true)
+}
+
+func graphToAstWithMode(g Graph, ix *TypeIndex, header map[string]any, engines map[string]string, portable bool) (map[string]any, error) {
 	type block struct {
 		action string
 		rules  []any
@@ -371,7 +381,7 @@ func GraphToAst(g Graph, ix *TypeIndex, header map[string]any, engines map[strin
 
 	actionDecls := []any{}
 	for _, n := range g.Nodes {
-		d, err := astDecl(ix, "actions", n, engines)
+		d, err := astDecl(ix, "actions", n, engines, portable)
 		if err != nil {
 			return nil, err
 		}
@@ -379,7 +389,7 @@ func GraphToAst(g Graph, ix *TypeIndex, header map[string]any, engines map[strin
 	}
 	eventDecls := []any{}
 	for _, e := range g.Events {
-		d, err := astDecl(ix, "events", GraphNode(e), engines)
+		d, err := astDecl(ix, "events", GraphNode(e), engines, portable)
 		if err != nil {
 			return nil, err
 		}
@@ -422,7 +432,7 @@ func orderedParams(ix *TypeIndex, qualified string, params map[string]any) []str
 	return append(keys, rest...)
 }
 
-func astDecl(ix *TypeIndex, sec string, instance GraphNode, engines map[string]string) (map[string]any, error) {
+func astDecl(ix *TypeIndex, sec string, instance GraphNode, engines map[string]string, portable bool) (map[string]any, error) {
 	qualified, ok := ix.Qualify(sec, instance.TypeName)
 	if !ok {
 		qualified = instance.TypeName
@@ -430,7 +440,9 @@ func astDecl(ix *TypeIndex, sec string, instance GraphNode, engines map[string]s
 	attrs := []any{}
 	for _, key := range orderedParams(ix, qualified, instance.Params) {
 		goType, _ := ix.FieldType(qualified, key)
-		value, err := astValue(ix, goType, instance.Params[key], &engineCtx{engines, instance.InstanceID, key})
+		value, err := astValue(ix, goType, instance.Params[key], &engineCtx{
+			engines: engines, portable: portable, node: instance.InstanceID, field: key,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -468,9 +480,10 @@ func isIntLiteral(s string) bool { return !strings.ContainsAny(s, ".eE") }
 // the flow's engines (nil for none known) and the top-level node and field the
 // value sits in, for the error.
 type engineCtx struct {
-	engines map[string]string
-	node    string
-	field   string
+	engines  map[string]string
+	portable bool
+	node     string
+	field    string
 }
 
 // astValue converts one plain-JSON param value into an AST Value, shaped by
@@ -488,6 +501,9 @@ func astValue(ix *TypeIndex, goType string, value any, ec *engineCtx) (map[strin
 		return map[string]any{"Ident": fmt.Sprintf("%s_%v", goType, value)}, nil
 	}
 	if s, isStr := value.(string); kind == "engine" && isStr {
+		if ec.portable {
+			return map[string]any{"String": s}, nil
+		}
 		full := s
 		if ec.engines != nil {
 			var ok bool
@@ -680,6 +696,10 @@ func GraphRoles(g Graph) []string { return nil }
 // are inlined into the params that reference them. Numbers may be json.Number
 // or float64; Float values come out as float64 and Int values as int64.
 func AstToGraph(ast map[string]any, ix *TypeIndex) map[string]any {
+	return astToGraph(ast, ix, nil)
+}
+
+func astToGraph(ast map[string]any, ix *TypeIndex, engineAliases map[string]string) map[string]any {
 	warnings := []any{}
 	data := map[string]map[string]any{}
 	var dataOrder []string
@@ -705,7 +725,7 @@ func AstToGraph(ast map[string]any, ix *TypeIndex) map[string]any {
 			out = append(out, map[string]any{
 				"instance_id": asStr(decl["Name"]),
 				"type_name":   key,
-				"params":      fromAttrs(ix, owner, decl["Attrs"], data, used),
+				"params":      fromAttrs(ix, owner, decl["Attrs"], data, used, engineAliases),
 			})
 		}
 		return out
@@ -778,19 +798,19 @@ func typeKey(ix *TypeIndex, sec, typeName string, warnings *[]any) string {
 	return Bare(typeName)
 }
 
-func fromAttrs(ix *TypeIndex, owner string, attrs any, data map[string]map[string]any, used map[string]bool) map[string]any {
+func fromAttrs(ix *TypeIndex, owner string, attrs any, data map[string]map[string]any, used map[string]bool, engineAliases map[string]string) map[string]any {
 	out := map[string]any{}
 	for _, a := range asList(attrs) {
 		attr := asMap(a)
 		key := asStr(attr["Key"])
 		ft, _ := ix.FieldType(owner, key)
-		out[key] = fromValue(ix, ft, asMap(attr["Value"]), data, used)
+		out[key] = fromValue(ix, ft, asMap(attr["Value"]), data, used, engineAliases)
 	}
 	return out
 }
 
 // fromValue converts one AST Value into the plain-JSON param the frontend holds.
-func fromValue(ix *TypeIndex, goType string, value map[string]any, data map[string]map[string]any, used map[string]bool) any {
+func fromValue(ix *TypeIndex, goType string, value map[string]any, data map[string]map[string]any, used map[string]bool, engineAliases map[string]string) any {
 	if v, ok := value["Float"]; ok {
 		return toFloat(v)
 	}
@@ -807,7 +827,7 @@ func fromValue(ix *TypeIndex, goType string, value map[string]any, data map[stri
 		}
 		out := []any{}
 		for _, e := range asList(asMap(v)["Elems"]) {
-			out = append(out, fromValue(ix, elemType, asMap(e), data, used))
+			out = append(out, fromValue(ix, elemType, asMap(e), data, used, engineAliases))
 		}
 		return out
 	}
@@ -817,7 +837,7 @@ func fromValue(ix *TypeIndex, goType string, value map[string]any, data map[stri
 		if owner == "" {
 			owner = asStr(inline["Type"])
 		}
-		return fromAttrs(ix, owner, inline["Args"], data, used)
+		return fromAttrs(ix, owner, inline["Args"], data, used, engineAliases)
 	}
 	ident := asStr(value["Ident"])
 	switch ident {
@@ -832,13 +852,20 @@ func fromValue(ix *TypeIndex, goType string, value map[string]any, data map[stri
 		if owner == "" {
 			owner = asStr(d["Type"])
 		}
-		return fromAttrs(ix, owner, d["Attrs"], data, used)
+		return fromAttrs(ix, owner, d["Attrs"], data, used, engineAliases)
 	}
 	if goType != "" && ix.Kind(goType) == "feature" {
 		return strings.TrimPrefix(Bare(ident), Bare(goType)+"_")
 	}
 	if goType != "" && ix.Kind(goType) == "engine" {
-		return strings.TrimPrefix(Bare(ident), Bare(goType)+"_")
+		bare := Bare(ident)
+		if suffix, ok := strings.CutPrefix(bare, Bare(goType)+"_"); ok {
+			if name := engineAliases[suffix]; name != "" {
+				return name
+			}
+			return suffix
+		}
+		return bare
 	}
 	return Bare(ident)
 }

@@ -94,6 +94,55 @@ Compiling runs `go build`, so the first build needs network access (`GOPROXY`)
 or a warm Go module cache. If the config is invalid, or the compiler can't
 start, the server still runs and the compiler routes answer 503 with the reason.
 
+### AI Chat and Inferred Mission
+
+The Plan page has **Chat** and **Inferred Mission** tabs. Both use the GCS's
+Go NL2DSL service and the same V4 schema and compiler as the Mission Builder.
+Apply opens the candidate on the canvas for review. Use the existing Map,
+Flow Builder, Compile and Deploy controls to finish the mission.
+
+Set `OPENAI_API_KEY` in the GCS process environment for OpenAI Chat and
+video inference. For Anthropic Chat set `ANTHROPIC_API_KEY` and set
+`chat_provider = "anthropic"` in the plugin args. Keep the OpenAI key for
+the separate vision model if you use Inferred Mission. The status indicators
+show whether credentials are configured. They do not test model access.
+
+```toml
+[services.plugin.args.ai]
+chat_provider = "openai"
+chat_model = "gpt-6.1-sol"
+chat_reasoning_effort = "medium"
+vision_model = "gpt-6.1-sol"
+vision_reasoning_effort = "medium"
+data_dir = "/var/lib/steeleagle/gcs-analysis"
+
+[services.plugin.args.ai.inferred_mission]
+section_seconds = 15
+frame_fps = 1
+history_mode = "recency"
+history_sections = 10
+half_life_sections = 3
+```
+
+The GCS process must be able to write to `data_dir`. It defaults to
+`steeleagle/gcs/inferred-mission` within the service user's configuration
+directory. `STEELEAGLE_INFERRED_MISSION_DATA` can override it. Use a distinct
+data directory for each GCS instance. For a trusted model gateway, set
+`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, or
+`STEELEAGLE_VISION_BASE_URL` to the provider's versioned base URL.
+
+Install FFmpeg and ffprobe for both MP4 and live analysis. Live Observe lists
+currently streaming V4 cameras. Keep the camera → encoder → GCS and
+telemetry → GCS edges in the active dataflow. MP4 runs can resume after a
+restart. Saved live runs remain available for review. The graph JSON
+download uses the V4 format and carries a schema version.
+
+For local verification, run `pixi run mock` and open the Plan page at
+`http://localhost:8002`. Test a short MP4 and a mock camera separately.
+The mock supplies frames and telemetry. A draft referencing a detector or
+map feature requires the corresponding Flow Builder or Map configuration
+before compilation. Detector behavior requires a real detector.
+
 ### Flows in missions
 
 A flow designed on the Flow Builder tab ships with Deploy: the Plan page sends it

@@ -33,6 +33,7 @@ import (
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/feed"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/inferredmission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/metrics"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/presence"
@@ -85,12 +86,14 @@ type args struct {
 	DumpDir string `json:"dump_dir"`
 	// PrometheusURL is where the Metrics page's numbers are queried.
 	PrometheusURL string `json:"prometheus_url"`
+	AI            aiArgs `json:"ai"`
 }
 
 // parseArgs reads the plugin's args from JSON, defaulting the ones it leaves
 // out as gcs.plugin.toml does.
 func parseArgs(content string) (args, error) {
-	a := args{HTTPAddr: defaultHTTPAddr, MaxInputSize: defaultMaxInputSize, PrometheusURL: defaultPrometheusURL}
+	a := args{HTTPAddr: defaultHTTPAddr, MaxInputSize: defaultMaxInputSize, PrometheusURL: defaultPrometheusURL,
+		AI: aiArgs{InferredMission: inferredmission.DefaultSettings()}}
 	if content != "" {
 		if err := json.Unmarshal([]byte(content), &a); err != nil {
 			return args{}, fmt.Errorf("invalid plugin args: %w", err)
@@ -249,12 +252,16 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	register, inference := registerAI(ctx, a.AI, missions.svc, hub, log)
+	if inference != nil {
+		defer inference.Close()
+	}
 
 	ln, err := net.Listen("tcp", a.HTTPAddr)
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: newHandler(hub, controller, vehicles, missions, daemonsRoutes, metricsRoutes, uiConfig{Mapbox: a.Mapbox}, web, log), ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{Handler: newHandler(hub, controller, vehicles, missions, daemonsRoutes, metricsRoutes, uiConfig{Mapbox: a.Mapbox}, web, log, register), ReadHeaderTimeout: 10 * time.Second}
 	errs := make(chan error, 2)
 	go func() {
 		log.Info().Str("addr", ln.Addr().String()).Msg("serving web UI")
@@ -299,6 +306,13 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 					recorder.Write(msg.Producer, msg.Seq, msg.Frame, time.Now())
 				}
 				next(msg)
+			}
+		}
+		if inference != nil {
+			next := publish
+			publish = func(msg feed.Message) {
+				next(msg)
+				observeFeed(inference, msg)
 			}
 		}
 		if err := feed.Run(ctx, engine, a.MaxInputSize, log, publish); err != nil {
@@ -458,7 +472,7 @@ type uiConfig struct {
 // serves the vehicle list, missions the mission routes, orchestration the
 // daemon routes, metricsRoutes the Metrics page's routes and /metrics, and ui
 // the web UI's settings.
-func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Handler, missions missionRoutes, orchestration daemonRoutes, metricsRoutes map[string]http.Handler, ui uiConfig, web string, log zerolog.Logger) http.Handler {
+func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Handler, missions missionRoutes, orchestration daemonRoutes, metricsRoutes map[string]http.Handler, ui uiConfig, web string, log zerolog.Logger, extensions ...func(*http.ServeMux)) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -487,6 +501,9 @@ func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Hand
 	}
 	for pattern, h := range metricsRoutes {
 		mux.Handle(pattern, h)
+	}
+	for _, register := range extensions {
+		register(mux)
 	}
 	mux.HandleFunc("/api/", http.NotFound)
 	if _, err := os.Stat(filepath.Join(web, "index.html")); err != nil {

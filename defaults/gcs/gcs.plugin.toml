@@ -62,6 +62,12 @@ type = "string"
 description = "Mapbox access token for the web UI's maps; empty shows no basemap"
 default = ""
 
+[[args]]
+name = "ai"
+type = "object"
+description = "AI Chat and Inferred Mission settings: chat_provider, chat_model, chat_reasoning_effort, vision_model, vision_reasoning_effort, data_dir and inferred_mission. Supply model credentials through the process environment."
+default = {}
+
 [engine]
 # Engine type: (detection, classification, guidance, position, generic, filter)
 type = "generic"
