@@ -8,6 +8,7 @@ import { displayName } from './vehicleNames.js'
 import MapUnavailable from './MapUnavailable.jsx'
 import { cameraRay, setpointPath, cameraLabel, setpointLabel, vehicleCameraGeoJSON, vehicleSetpointGeoJSON, vehicleFootprintGeoJSON } from './mapOverlays.js'
 import { hasMapboxToken } from './mapboxToken.js'
+import { classColor, pinOpacity, pinCardHTML } from './detectionPins.js'
 
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -26,6 +27,27 @@ const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', 
 // (stationary/offline markers are the ones likely to sit still on such a
 // boundary). Mapbox never reaches into a nested element, so opacity set
 // there is untouched by that logic.
+// A detection pin's tag: a dot and the class, bordered in the class's colour.
+// As with the vehicle marker, its fade goes on an inner element, since
+// mapbox sets the marker element's own opacity for terrain occlusion.
+function createPinTagElement(cls) {
+  const el = document.createElement('div');
+  const tag = document.createElement('div');
+  const color = classColor(cls);
+  Object.assign(tag.style, {
+    display: 'flex', alignItems: 'center', gap: '3px', padding: '1px 6px 1px 3px',
+    background: 'rgba(20,22,28,0.85)', border: `2px solid ${color}`, borderRadius: '10px',
+    color: '#fff', fontSize: '11px', whiteSpace: 'nowrap', cursor: 'default',
+  });
+  const dot = document.createElement('span');
+  Object.assign(dot.style, { width: '8px', height: '8px', borderRadius: '50%', background: color });
+  const label = document.createElement('span');
+  label.textContent = cls;
+  tag.append(dot, label);
+  el.appendChild(tag);
+  return el;
+}
+
 function createVehicleMarkerElement(color, opacity = 1) {
   const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   el.setAttribute('width', '34');
@@ -253,8 +275,10 @@ function cameraColor() {
   return themeColor('--primary-color', '#f59e0b');
 }
 
-function MapboxMap({ selectedVehicle, vehicles, mapPanelSize, tracking, detectedObjects, mapHeight, squadList, onToggleVehicle, controlGroups, mapStyle }) {
+function MapboxMap({ selectedVehicle, vehicles, mapPanelSize, tracking, detectedObjects, mapHeight, squadList, onToggleVehicle, controlGroups, mapStyle, pins, expiryS }) {
   const mapRef = useRef()
+  // The detection pins' markers by pin id, updated in place as pins change
+  const pinMarkersRef = useRef(new Map());
   const mapContainerRef = useRef()
   const markerRefs = useRef([]); // To store references to all markers
   const isFirstStyleEffect = useRef(true);
@@ -449,6 +473,47 @@ function MapboxMap({ selectedVehicle, vehicles, mapPanelSize, tracking, detected
     }
 
   }, [vehicles, detectedObjects, squadList, controlGroups]);
+
+  // Detection pins: tags on the ground, with a card on hover. Kept apart from
+  // the vehicle markers so they aren't rebuilt on every vehicle update.
+  useEffect(() => {
+    if (!mapRef.current) return;
+    const markers = pinMarkersRef.current;
+    const seen = new Set();
+    for (const pin of pins ?? []) {
+      seen.add(pin.id);
+      let entry = markers.get(pin.id);
+      if (!entry) {
+        const popup = new mapboxgl.Popup({ offset: 14, focusAfterOpen: false, closeButton: false, closeOnClick: false, className: 'pin-card-popup' });
+        const marker = new mapboxgl.Marker({ element: createPinTagElement(pin.class) })
+          .setLngLat([pin.long, pin.lat])
+          .setPopup(popup)
+          .addTo(mapRef.current);
+        const el = marker.getElement();
+        el.addEventListener('mouseenter', () => { if (!popup.isOpen()) marker.togglePopup(); });
+        el.addEventListener('mouseleave', () => { if (popup.isOpen()) marker.togglePopup(); });
+        entry = { marker, popup };
+        markers.set(pin.id, entry);
+      }
+      entry.marker.setLngLat([pin.long, pin.lat]);
+      entry.popup.setHTML(pinCardHTML(pin));
+      entry.marker.getElement().firstChild.style.opacity = String(pinOpacity(pin.last_seen_s, expiryS));
+    }
+    for (const [id, entry] of markers) {
+      if (!seen.has(id)) {
+        entry.marker.remove();
+        markers.delete(id);
+      }
+    }
+  }, [pins, expiryS]);
+
+  useEffect(() => {
+    const markers = pinMarkersRef.current;
+    return () => {
+      for (const entry of markers.values()) entry.marker.remove();
+      markers.clear();
+    };
+  }, []);
 
   useEffect(() => {
     let v = vehicles.find(v => v.name === selectedVehicle);

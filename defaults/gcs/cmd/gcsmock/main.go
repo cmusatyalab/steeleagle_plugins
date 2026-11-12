@@ -254,7 +254,7 @@ func run(o options, log zerolog.Logger) (int, error) {
 		}
 	}
 	if top.Detector != "" {
-		if err := u.StartEngine(top.Detector, detectionID, detectorMaxOutput, Detector); err != nil {
+		if err := u.StartEngine(top.Detector, detectionID, detectorMaxOutput, NewDetector(vehicles)); err != nil {
 			return 1, err
 		}
 	}

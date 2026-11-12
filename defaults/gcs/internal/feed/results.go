@@ -26,11 +26,36 @@ type Result struct {
 	// "drone1.front", and Vehicle the vehicle it belongs to.
 	Producer string
 	Vehicle  string
-	Seq      uint64
+	// Session and Seq identify the input among the producer's: Seq starts
+	// again in a new Session when the producer restarts.
+	Session uint64
+	Seq     uint64
 	// Type is the result's message type, e.g. "DetectionResult".
 	Type string
 	// JSON is the result as protobuf JSON.
 	JSON []byte
+	// OfferedAt is when the input was offered to the engine, on this
+	// machine's wall clock, as near as can be told (see offeredWallTime).
+	OfferedAt time.Time
+}
+
+// offeredWallTime is the wall-clock time of an input's offer to an engine,
+// from the event's monotonic timestamps: offered, else at (the event's own
+// time) if the offer has none. Timestamps of an event received from a remote
+// server (received set) are on its clock, so now is used instead, as it is
+// if there are none. now and nowMono are read at the same moment.
+func offeredWallTime(now time.Time, nowMono, offered, at, received uriel.Timestamp) time.Time {
+	if !received.IsZero() {
+		return now
+	}
+	t := offered
+	if t.IsZero() {
+		t = at
+	}
+	if t.IsZero() {
+		return now
+	}
+	return now.Add(-nowMono.Sub(t))
 }
 
 // displayable are the result messages the GCS can show, by their message
@@ -118,7 +143,8 @@ func subscribeResults(ctx context.Context, name string, log zerolog.Logger, hand
 			}
 			continue
 		}
-		r.Seq = ev.ID.Seq
+		r.Session, r.Seq = ev.ID.Session, ev.ID.Seq
+		r.OfferedAt = offeredWallTime(time.Now(), uriel.Now(), ev.OfferedAt, ev.At, ev.ReceivedAt)
 		handle(r)
 	}
 }

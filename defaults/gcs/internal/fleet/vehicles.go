@@ -115,7 +115,7 @@ func ToVehicleJSON(v Vehicle, t *telemetrypb.Telemetry, flowStatus string, now t
 			ZVel: float64(vel.GetZVel()), AngularVel: float64(vel.GetAngularVel()),
 		}
 	}
-	out.Camera = cameraView(t.GetGimbalInfo(), out.Bearing)
+	out.Camera = CameraViewOf(t.GetGimbalInfo(), out.Bearing)
 	if c := gimbalCamera(v.Driver); out.Camera != nil && c != nil {
 		out.Camera.HFov, out.Camera.VFov = float64(c.HFov), float64(c.VFov)
 	}
@@ -127,10 +127,10 @@ func wrap360(deg float64) float64 {
 	return math.Mod(math.Mod(deg, 360)+360, 360)
 }
 
-// cameraView is where gimbal g points, or nil if it reports no pose. Its pose
+// CameraViewOf is where gimbal g points, or nil if it reports no pose. Its pose
 // in NEU is used if given; otherwise its pose relative to the body, turned by
 // the vehicle's bearing (taking the body as level).
-func cameraView(g *telemetrypb.GimbalInfo, bearing float64) *CameraView {
+func CameraViewOf(g *telemetrypb.GimbalInfo, bearing float64) *CameraView {
 	if p := g.GetPoseNeu(); p != nil {
 		return &CameraView{Yaw: wrap360(float64(p.GetYaw())), Pitch: float64(p.GetPitch())}
 	}

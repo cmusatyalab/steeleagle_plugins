@@ -1,10 +1,13 @@
 package main
 
 import (
+	"math"
 	"testing"
 	"time"
 
+	resultpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/result"
 	"github.com/cmusatyalab/steeleagle/config"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/pins"
 )
 
 // TestMockDetections ensures that the mock objects stay inside the frame and
@@ -59,5 +62,57 @@ func TestWithDetector(t *testing.T) {
 	telemetryOnly := &config.FlowConfig{Producers: []config.Producer{{Name: "100.64.0.1.alpha.telemetry"}}}
 	if got := withDetector(telemetryOnly, detector); len(got.Engines) != 0 || len(got.Edges) != 0 {
 		t.Errorf("a flow without cameras got %+v", got)
+	}
+}
+
+// flyingAt returns a vehicle at its home, flying at 20 m, facing heading with
+// the gimbal at pitch.
+func flyingAt(heading, pitch float64) *Vehicle {
+	v := NewVehicle("100.64.0.1.alpha", LatLon{Lat: 40.4433, Lon: -79.9436})
+	v.mode, v.alt, v.heading, v.gimbalPitch = Flying, 20, heading, pitch
+	return v
+}
+
+func classes(ds []*resultpb.Detection) map[string]*resultpb.Detection {
+	out := map[string]*resultpb.Detection{}
+	for _, d := range ds {
+		out[d.GetClassName()] = d
+	}
+	return out
+}
+
+// TestWorldDetectionsVisibleWhenLookingAtThem ensures that a box of an
+// object fixed on the ground projects back onto it.
+func TestWorldDetectionsVisibleWhenLookingAtThem(t *testing.T) {
+	car := worldObjects[1]
+	heading := math.Atan2(car.east, car.north) * 180 / math.Pi
+	v := flyingAt(heading, -35)
+	d := classes(worldDetections(v))["car"]
+	if d == nil {
+		t.Fatal("no car seen while looking at it")
+	}
+	b := d.GetBbox()
+	pose := pins.CameraPose{Lat: v.home.Lat, Lon: v.home.Lon, Alt: 20, Yaw: heading, Pitch: -35}
+	lat, lon, ok := pins.Project(pose, pins.FOV{H: mockHFov, V: mockVFov}, (b.GetXMin()+b.GetXMax())/2, (b.GetYMin()+b.GetYMax())/2)
+	if !ok {
+		t.Fatal("the car's box doesn't project to the ground")
+	}
+	n, e := metersBetween(v.home, LatLon{lat, lon})
+	if math.Hypot(n-car.north, e-car.east) > 1.5 {
+		t.Fatalf("car's box projects to %.1f m north, %.1f m east; want %.0f, %.0f", n, e, car.north, car.east)
+	}
+}
+
+func TestWorldDetectionsNoneWhenLanded(t *testing.T) {
+	v := flyingAt(0, -35)
+	v.mode, v.alt = Landed, 0
+	if got := worldDetections(v); len(got) != 0 {
+		t.Fatalf("landed vehicle sees %d objects", len(got))
+	}
+}
+
+func TestWorldDetectionsOutsideFrameOmitted(t *testing.T) {
+	if got := worldDetections(flyingAt(180, -35)); len(got) != 0 {
+		t.Fatalf("facing away, saw %v", classes(got))
 	}
 }

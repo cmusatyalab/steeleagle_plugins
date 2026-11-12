@@ -11,6 +11,7 @@ import { Knob } from 'primereact/knob';
 import { Button } from 'primereact/button';
 import { OverlayPanel } from 'primereact/overlaypanel';
 import { Chip } from 'primereact/chip';
+import { TabView, TabPanel } from 'primereact/tabview';
 import 'primereact/resources/primereact.min.css';        // Core PrimeReact CSS
 import 'primeicons/primeicons.css';                     // Icons
 import 'primeflex/primeflex.css';                       // PrimeFlex utilities
@@ -24,6 +25,7 @@ import PlanPage from './PlanPage.jsx';
 import MissionUploadProgress from './MissionUploadProgress.jsx';
 import VehicleSidebar, { VEHICLE_SIDEBAR_COLLAPSED_WIDTH, VEHICLE_SIDEBAR_EXPANDED_WIDTH } from './VehicleSidebar.jsx';
 import ControlMappingsTable from './ControlMappingsTable.jsx';
+import DetectionSettings from './DetectionSettings.jsx';
 import PresenceBar, { PRESENCE_BAR_HEIGHT } from './PresenceBar.jsx';
 import { getApiUrl } from './urls.js';
 import { assignControlGroup, recallControlGroup } from './squadUtils.js';
@@ -415,7 +417,8 @@ function App() {
   ), [appName]);
 
   const overlayContent = useMemo(() => (
-    <>
+    <TabView>
+     <TabPanel header="Controls">
       <div className="flex flex-row gap-2">
         <div className="flex flex-column flex-wrap align-content-center m-2">
           <Knob className="flex align-items-center justify-content-center" value={basePlanarVelocity} onChange={(e) => setBasePlanarVelocity(e.value)} min={1} max={10} valueTemplate={'{value}m/s'} />
@@ -445,7 +448,11 @@ function App() {
         <span className="font-bold mb-2">Control Mappings</span>
         <ControlMappingsTable />
       </div>
-    </>
+     </TabPanel>
+     <TabPanel header="Detections">
+      <DetectionSettings toast={toast} />
+     </TabPanel>
+    </TabView>
   ), [baseAngularVelocity, setBaseAngularVelocity, basePlanarVelocity, setBasePlanarVelocity,
     gamepadDeadzone, setGamepadDeadzone, takeOffAltitude, setTakeOffAltitude, gimbalVelocity, setGimbalVelocity]);
 

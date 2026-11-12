@@ -167,7 +167,7 @@ func driverConfig() ([]byte, error) {
 			Type: "copter",
 			Cameras: []config.DriverCamera{{
 				Name: "front", Type: "steeleagle_protocol/v1/messages/frame/RawFrame", HRes: 1280, VRes: 720, HFov: 90, VFov: 60,
-				Fps: 30, Primary: true, Encode: true,
+				Fps: 30, Gimbal: true, Primary: true, Encode: true,
 			}},
 			Supported: config.DriverSupported{Services: []string{
 				"steeleagle_protocol/v1/services/driver/ControlService",
