@@ -10,7 +10,13 @@ engine (e.g. the thumbnail plugin's WebP encoder) compresses it for the link.
 The result is a DetectionResult of the tiles this input picked, which may not
 be the tile it carries: one per picked tile, of class `prompt`, with its score
 s and its box in the frame.
+
+With learning on, the verifier's RESULT for a tile also teaches the selector
+(clip.Selector.learn): tiles like one it said yes to are sent, and tiles like
+one it said no to, again and again, are not; when that changes, every tile
+still queued is rescored, and the ones that no longer pass are dropped.
 """
+import json
 import logging
 import time
 
@@ -18,7 +24,7 @@ import numpy as np
 import uriel
 from google.protobuf.message import DecodeError
 
-from cliped.clip import cut_tiles, tile_boxes
+from cliped.clip import ADDED_GOOD, CONFIRMED, cut_tiles, tile_boxes
 from cliped.send_queue import SendQueue, Tile
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from steeleagle_protocol.v1.messages.result import result_pb2
@@ -27,6 +33,8 @@ logger = logging.getLogger("cliped")
 
 RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
 DETECTION_RESULT_TYPE = "steeleagle_protocol/v1/messages/result/DetectionResult"
+# The verifier's result: a JSON object {"match": bool}
+GENERIC_RESULT_TYPE = "steeleagle_protocol/v1/messages/result/GenericResult"
 RGB_CHANNELS = 3
 # Room in an output for a tile's fields besides its pixels, and for the
 # result: its ids, timestamp and pose, and a detection per picked tile.
@@ -51,6 +59,22 @@ def max_output_size(tile_size):
 
 class FrameError(ValueError):
     pass
+
+
+def read_verdict(event):
+    """The verifier's answer in its RESULT `event`, True or False; or None
+    if the result is not a GenericResult holding {"match": true|false}."""
+    if event.payload_type.replace(".", "/") != GENERIC_RESULT_TYPE:
+        return None
+    try:
+        answer = json.loads(result_pb2.GenericResult.FromString(event.result).payload)
+    except (DecodeError, ValueError) as err:
+        logger.warning("unreadable verifier result: %s", err)
+        return None
+    if not isinstance(answer, dict) or not isinstance(answer.get("match"), bool):
+        logger.warning("verifier result %r has no boolean 'match'", answer)
+        return None
+    return answer["match"]
 
 
 def read_frame(data):
@@ -107,8 +131,27 @@ class Cliped:
         self.picked = 0
 
     def on_event(self, event):
-        if event.engine == self.verifier:
-            self.queue.on_event(event)
+        if event.engine != self.verifier:
+            return
+        tile = self.queue.on_event(event)
+        if tile is not None and self.selector.learning:
+            self.learn(tile, event)
+
+    def learn(self, tile, event):
+        """Learns from the verifier's result about `tile`, then rescores the
+        queue if that changed what the selector knows."""
+        match = read_verdict(event)
+        if match is None or tile.embedding is None:
+            return
+        outcome = self.selector.learn(tile.embedding, match)
+        message = "verifier: %s for the tile of frame %d: %s (%d good, %d background tiles)"
+        args = ["yes" if match else "no", tile.frame_id, outcome, len(self.selector.good),
+                len(self.selector.backgrounds)]
+        if outcome in (ADDED_GOOD, CONFIRMED):
+            dropped = self.queue.rescore(lambda t: self.selector.passes(t.embedding))
+            message += "; rescored the queue, dropping %d (%d left)"
+            args += [len(dropped), len(self.queue)]
+        logger.info(message, *args)
 
     def boxes(self, width, height):
         key = (width, height)
@@ -130,14 +173,16 @@ class Cliped:
         started = time.perf_counter()
         v = self.encoder.encode_tiles(cut_tiles(rgb, boxes, self.encoder.size))
         picked, s = self.selector.select(v)
+        must_send = self.selector.score(v[picked])[1] == 1 if len(picked) else []
         self.frames += 1
 
         result = result_pb2.DetectionResult()
-        for i in picked:
+        for i, must in zip(picked, must_send):
             box = boxes[i]
             score = float(s[i])
             self.queue.push(
-                Tile(score=score, payload=tile_frame(frame, rgb, box), frame_id=frame.id, box=box, index=int(i))
+                Tile(score=score, payload=tile_frame(frame, rgb, box), frame_id=frame.id, box=box, index=int(i),
+                     embedding=v[i], must_send=bool(must))
             )
             x0, y0, x1, y1 = box
             result.detections.add(

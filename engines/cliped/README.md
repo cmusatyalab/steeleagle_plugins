@@ -3,7 +3,7 @@
 SteelEagle engine plugins for prompt-guided edge filtering:
 
 - `cliped.plugin.toml`, the edge filter: each camera frame (`RawFrame`) is cut into overlapping square tiles, every tile is scored against a text or image prompt with MobileCLIP2-S0, and the tiles worth sending wait in a prioritized send queue until the remote verifier has them.
-- `verifier.plugin.toml`, the verifier: asks a vision-language model on Ollama (Qwen2.5-VL 3B by default) whether each tile matches the prompt, and forwards it if so, dropping it if not.
+- `verifier.plugin.toml`, the verifier: asks a vision-language model on Ollama (Qwen3-VL 8B Instruct by default) whether each tile matches the prompt, and forwards it if so, dropping it if not. Its answer goes back to cliped, which learns from it.
 
 eagled picks one with `STEELEAGLE_PLUGIN`; unset runs the edge filter.
 
@@ -21,6 +21,20 @@ camera → rescale (720p) → cliped → webp encoder ══ link ══ webp de
 
 With an `image` prompt, `t` is the reference image's embedding by the same image encoder as the tiles (the whole image, squeezed to a square). Image-to-image similarities run well above the image-to-text similarities of the backgrounds, so most tiles score `s > 0` and the adaptive threshold alone decides what is sent.
 
+## Learning from the verifier
+
+With `learn` (on by default), every `RESULT` the verifier sends back for a tile teaches cliped: the result is a `GenericResult` holding `{"match": true|false}`, and cliped keeps the tile's embedding, in its good tiles on a yes and its background tiles on a no. The learned tiles gate `s` rather than join it, the same way for text and image prompts. Tile-to-tile similarities (~0.8) dwarf a tile's similarity to the prompt (~0.5 to a reference photo, ~0.25 to text), so a learned tile in `s` would outscore the prompt everywhere.
+
+- A tile at least `learn_similarity` to a **confirmed** background tile, and closer to it than to any good tile, is not sent.
+- A tile at least `learn_similarity` to a good tile, and no closer to a background tile, is sent, whatever its `s`.
+- Any other tile is decided by `s` as before.
+
+After a change, every queued tile is rescored and reprioritized: each waiting tile that no longer passes is dropped (tiles in flight are kept), and tiles like a good tile go ahead of all the others in the queue, best score first within each group.
+
+A background tile is confirmed once the verifier has said no `confirmations` times to tiles within `learn_similarity` of it. The verifier misses targets too, so with a single no, one missed target would suppress the target from then on. A distractor seen frame after frame (a car, a patch of ground) is soon said no to again. For the same reason, a no is never learned if it looks like a good tile: at least as close to the good tiles as to the background tiles, or within `learn_similarity` of a good tile. A tile is added only if it's below `learn_similarity` to everything in its set, and at most `max_learned` per set are kept, oldest first out.
+
+Replayed over the logged tiles of the normal-network runs (3 scenes × 3 trials), the defaults cut the tiles sent by 24% with an image prompt (precision 30% → 39%) without losing a tile the verifier confirmed, and by 12% with a text prompt (precision 51% → 57%), losing 10 of 444 confirmed tiles, all but one of them blurry or not a person. A lower `learn_similarity` suppresses more, but below ~0.8 it starts suppressing targets: a small target lying on the ground is about 0.8 similar to an empty tile of that ground.
+
 ## The send queue
 
 A tile leaves the queue only on the verifier's `RESULT` event for an input it went out as: the verifier finished it. `ACCEPTED` is not enough: for a remote verifier it means only that the remote server got the tile, and a busy or stuck verifier then produces `ACCEPTED`, `SENT`, `TIMED_OUT` without ever taking it. Until its `RESULT`:
@@ -30,7 +44,7 @@ A tile leaves the queue only on the verifier's `RESULT` event for an input it we
 | `SKIPPED` / `TIMED_OUT` for the tile's latest carrier | the tile waits to be sent again |
 | `DISCONNECTED`, or `LOST` (its `RESULT` may be among the lost) | every tile in flight waits to be sent again |
 | `resend_after_ms` without word, e.g. dropped by the encoder before reaching the verifier | the tile waits to be sent again |
-| more than `max_queue` tiles | the lowest-scored tile is dropped, in flight or not |
+| more than `max_queue` tiles | the lowest-priority tile is dropped, in flight or not: not a must-send, lowest score |
 
 A tile sent again may reach the verifier twice; that is the price of never losing one.
 
@@ -53,12 +67,16 @@ A tile sent again may reach the verifier twice; that is the price of never losin
 | `resend_after_ms` | `5000` | Wait for a sent tile's `RESULT` before sending it again; keep it above the verifier's edge timeout plus its processing time |
 | `npu` | `true` | With `quantized`, run on the HTP through QNN (`libs/`); `false` runs it on the CPU |
 | `threads` | `4` | CPU threads for the text encoder, and for the image encoder off the HTP |
+| `learn` | `true` | Learn from the verifier's answers (see above) |
+| `learn_similarity` | `0.85` | Cosine similarity of tile embeddings at which two tiles count as the same thing, for the gate and for adding a learned tile |
+| `confirmations` | `2` | No's to tiles within `learn_similarity` of each other before tiles like them stop being sent |
+| `max_learned` | `32` | Most yes and most no answers kept learned, each |
 | `log_scores` | `false` | Log every frame's scores, not only frames that pick a tile |
 | `log_tiles` | `false` | Write each input frame to `STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg` and each tile sent to `STEELEAGLE_FILES/<engine>/out/<frame id>_<tile number>.jpeg` (JPEG, quality 75). `<engine>` is `STEELEAGLE_ENGINE_ENDPOINT`, the frame id is the `RawFrame`'s `id`, and the tile number is the tile's index in the frame's tiling, row by row. A tile sent again overwrites its file |
 
 ## The verifier
 
-The verifier takes RGB `RawFrame`s (a tile from cliped, decoded) and asks the model, through Ollama's `/api/chat`, whether the frame shows the `prompt`; with an `image`, it shows the model the reference image first and asks whether the frame shows the same kind of thing. A yes forwards the frame unchanged; a no, any other answer, or a failure to reach Ollama drops it. Every input gets a `DetectionResult` (one detection covering the frame, of class `prompt` or the image's name, on a match; none otherwise), so cliped sees a `RESULT` for every tile it sent.
+The verifier takes RGB `RawFrame`s (a tile from cliped, decoded) and asks the model, through Ollama's `/api/chat`, whether the frame shows the `prompt`; with an `image`, it shows the model the reference image, shrunk to at most 448 px on its longer side, first and asks whether the frame, seen from above, contains that same target (same appearance, not merely the same category). The model answers yes or no. A yes forwards the frame unchanged; a no, any other answer, or a failure to reach Ollama drops it. Every input the model judged gets a `GenericResult` holding `{"match": true|false}`, so cliped sees a `RESULT` for every tile it sent and learns from it.
 
 It needs an Ollama server (`ollama serve`); at startup it pulls the model if the server does not have it. It does not load torch or the CLIP models.
 
@@ -66,7 +84,7 @@ It needs an Ollama server (`ollama serve`); at startup it pulls the model if the
 | --- | --- | --- |
 | `prompt` | | What to look for, as a noun phrase; this or `image` is required |
 | `image` | | An image of what to look for, instead of `prompt`: a file in `STEELEAGLE_FILES`. With both set, `image` is used |
-| `model` | `qwen2.5vl:3b` | Ollama model to ask |
+| `model` | `qwen3-vl:8b-instruct` | Ollama model to ask |
 | `host` | | Ollama server URL; blank uses `OLLAMA_HOST`, or `http://localhost:11434` |
 | `timeout_ms` | `30000` | Wait for the model's answer about one frame before dropping it |
 | `log_tiles` | `false` | Write each input to `STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg` and each frame forwarded to `STEELEAGLE_FILES/<engine>/out/<frame id>_0.jpeg` (JPEG, quality 75) |

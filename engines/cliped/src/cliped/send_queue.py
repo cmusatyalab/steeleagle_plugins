@@ -1,5 +1,7 @@
-"""The prioritized send queue: tiles wait in it, best score first, until the
-verifier has them, so a tile sent while the link is down is not lost.
+"""The prioritized send queue: tiles wait in it until the verifier has them,
+so a tile sent while the link is down is not lost. Tiles the selector must
+send (like one the verifier said yes to) go first, then the rest; each group
+best score first.
 
 An engine can only send something as the outcome of an input, so a tile goes
 out in place of an input (its carrier), and keeps that input's id: the
@@ -22,7 +24,8 @@ its RESULT:
 
 A tile put back may be sent again and reach the verifier twice; that is the
 price of never losing one. When the queue is over `max_size`, the tile with the
-lowest score is dropped, in flight or not.
+lowest priority (not a must-send, lowest score) is dropped, in flight or
+not.
 """
 import itertools
 import logging
@@ -57,10 +60,19 @@ class Tile:
     carriers: list = field(default_factory=list)
     # When it was last sent (time.monotonic()), or None while it waits
     sent_at: float | None = None
+    # Its image embedding, to rescore it and to learn from the verifier
+    embedding: object = None
+    # Whether the selector must send it: it goes ahead of every other tile
+    must_send: bool = False
 
     @property
     def in_flight(self):
         return self.sent_at is not None
+
+    @property
+    def priority(self):
+        """Higher goes first: must-sends, then score, then the oldest."""
+        return (self.must_send, self.score, -self.order)
 
 
 class SendQueue:
@@ -84,20 +96,20 @@ class SendQueue:
         return sum(tile.in_flight for tile in self._tiles)
 
     def push(self, tile):
-        """Queues `tile`, dropping the lowest-scored tile if the queue is over
-        its size. Returns the tile dropped, if any."""
+        """Queues `tile`, dropping the lowest-priority tile if the queue is
+        over its size. Returns the tile dropped, if any."""
         tile.order = next(self._order)
         self._tiles.append(tile)
         if len(self._tiles) <= self.max_size:
             return None
-        # Lowest score; of equal scores, the newest
-        worst = min(self._tiles, key=lambda t: (t.score, -t.order))
+        # Lowest priority; of equal ones, the newest
+        worst = min(self._tiles, key=lambda t: t.priority)
         self._remove(worst)
         logger.debug("queue full; dropped the tile of frame %d (score %.3f)", worst.frame_id, worst.score)
         return worst
 
     def next(self, carrier, now):
-        """The best tile not in flight, marked as sent in place of the input
+        """The highest-priority tile not in flight, marked as sent in place of the input
         `carrier` at `now`; or None if every tile is in flight or there are
         none."""
         best = None
@@ -105,7 +117,7 @@ class SendQueue:
             if tile.in_flight and now - tile.sent_at >= self.resend_after_s:
                 logger.info("tile of frame %d unacknowledged for %.1fs; resending it", tile.frame_id, now - tile.sent_at)
                 tile.sent_at = None
-            if not tile.in_flight and (best is None or (tile.score, -tile.order) > (best.score, -best.order)):
+            if not tile.in_flight and (best is None or tile.priority > best.priority):
                 best = tile
         if best is not None:
             best.carriers.append(carrier)
@@ -114,21 +126,38 @@ class SendQueue:
         return best
 
     def on_event(self, event):
-        """Takes an event of the verifier."""
+        """Takes an event of the verifier. Returns the tile its RESULT
+        confirmed, if any."""
         kind = event.kind
         if kind in _RESET:
             for tile in self._tiles:
                 tile.sent_at = None
-            return
+            return None
         tile = self._carried.get(event.id)
         if tile is None:
-            return
+            return None
         if kind in _CONFIRMED:
             self._remove(tile)
             self.confirmed += 1
             logger.info("verifier has the tile of frame %d (score %.3f)", tile.frame_id, tile.score)
-        elif kind in _NOT_ACCEPTED and tile.carriers[-1] == event.id:
+            return tile
+        if kind in _NOT_ACCEPTED and tile.carriers[-1] == event.id:
             tile.sent_at = None
+        return None
+
+    def rescore(self, passes):
+        """Rescores and reprioritizes every tile with `passes(tile)`, which
+        returns whether the tile is still worth sending, its new score, and
+        whether it must be sent; and drops each waiting tile that is not
+        worth sending. A tile in flight is kept, as the verifier may have it.
+        Returns the tiles dropped."""
+        dropped = []
+        for tile in list(self._tiles):
+            keep, tile.score, tile.must_send = passes(tile)
+            if not keep and not tile.in_flight:
+                self._remove(tile)
+                dropped.append(tile)
+        return dropped
 
     def discard(self, tile):
         """Removes `tile` without it being confirmed, e.g. one too large to

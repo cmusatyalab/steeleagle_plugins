@@ -41,17 +41,21 @@ DEFAULTS = {
     "threads": 4,
     "log_scores": False,
     "log_tiles": False,
+    "learn": True,
+    "learn_similarity": 0.85,
+    "confirmations": 2,
+    "max_learned": 32,
 }
 # Defaults of the args of verifier.plugin.toml
 VERIFIER_DEFAULTS = {
     "prompt": "",
     "image": "",
-    "model": "qwen2.5vl:3b",
+    "model": "qwen3-vl:8b-instruct",
     "host": "",
     "timeout_ms": 30000,
     "log_tiles": False,
 }
-POSITIVE_INTS = ("tile_size", "stride", "max_send", "k", "max_queue", "threads")
+POSITIVE_INTS = ("tile_size", "stride", "max_send", "k", "max_queue", "threads", "confirmations", "max_learned")
 
 LD_LIBRARY_PATH = "LD_LIBRARY_PATH"
 ADSP_LIBRARY_PATH = "ADSP_LIBRARY_PATH"
@@ -105,19 +109,21 @@ def parse_args(content):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value) or value < 1:
             raise ConfigError(f"{name} must be a positive integer, not {value!r}")
         args[name] = int(value)
-    for name in ("margin", "ema", "resend_after_ms"):
+    for name in ("margin", "ema", "resend_after_ms", "learn_similarity"):
         if isinstance(args[name], bool) or not isinstance(args[name], (int, float)):
             raise ConfigError(f"{name} must be a number, not {args[name]!r}")
     if not 0 <= args["ema"] < 1:
         raise ConfigError("ema must be in [0, 1)")
     if args["resend_after_ms"] <= 0:
         raise ConfigError("resend_after_ms must be positive")
+    if not 0 < args["learn_similarity"] <= 1:
+        raise ConfigError("learn_similarity must be in (0, 1]")
     backgrounds = args["backgrounds"]
     if (not isinstance(backgrounds, list) or not backgrounds
             or not all(isinstance(bg, str) and bg.strip() for bg in backgrounds)):
         raise ConfigError("backgrounds must be a non-empty list of prompts")
     args["backgrounds"] = [bg.strip() for bg in backgrounds]
-    for name in ("quantized", "npu", "log_scores", "log_tiles"):
+    for name in ("quantized", "npu", "log_scores", "log_tiles", "learn"):
         if not isinstance(args[name], bool):
             raise ConfigError(f"{name} must be true or false")
     return args
@@ -202,7 +208,12 @@ def build(args, verifier, *, image=None, tile_log=None):
         t = image_vector(image_encoder, read_rgb(image))
         log.info("searching for the image %s", image)
 
-    selector = Selector(t, b, k=args["k"], ema=args["ema"], margin=args["margin"], max_send=args["max_send"])
+    if args["learn"]:
+        log.info("learning from the verifier's answers (similarity %.2f, %d no's to gate, at most %d of each)",
+                 args["learn_similarity"], args["confirmations"], args["max_learned"])
+    selector = Selector(t, b, k=args["k"], ema=args["ema"], margin=args["margin"], max_send=args["max_send"],
+                        learn=args["learn"], similarity=args["learn_similarity"],
+                        confirmations=args["confirmations"], max_learned=args["max_learned"])
     queue = SendQueue(max_size=args["max_queue"], resend_after_s=args["resend_after_ms"] / 1000)
     return Cliped(
         image_encoder,
@@ -245,12 +256,12 @@ def main_cliped(name):
 
 
 def main_verifier(name):
-    from cliped.verifier import DEFAULT_HOST, Ollama, OllamaError, Verifier, encode_png, run
+    from cliped.verifier import DEFAULT_HOST, Ollama, OllamaError, Verifier, encode_png, run, shrink
 
     try:
         args = parse_verifier_args(os.environ.get("STEELEAGLE_PLUGIN_ARGS"))
         image = image_path(args)
-        reference = encode_png(read_rgb(image)) if image is not None else None
+        reference = encode_png(shrink(read_rgb(image))) if image is not None else None
         log = tile_log(args, name)
     except (ConfigError, FilesError, ValueError) as err:
         sys.exit(f"Bad args for the verifier engine: {err}")

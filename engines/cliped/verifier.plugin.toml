@@ -1,7 +1,7 @@
 [plugin]
 name = "CLIP Edge Filter Verifier"
 type = "engine"
-description = "Asks a vision-language model on Ollama (Qwen2.5-VL 3B by default) whether each frame, e.g. a tile from the CLIP edge filter, matches a text or image prompt; forwards the frames that do and drops the rest"
+description = "Asks a vision-language model on Ollama (Qwen3-VL 8B Instruct by default) whether each frame, e.g. a tile from the CLIP edge filter, matches a text or image prompt; forwards the frames that do and drops the rest"
 
 [[args]]
 name = "prompt"
@@ -19,7 +19,7 @@ default = ""
 name = "model"
 type = "string"
 description = "Ollama model to ask; pulled at startup if the server does not have it"
-default = "qwen2.5vl:3b"
+default = "qwen3-vl:8b-instruct"
 
 [[args]]
 name = "host"
@@ -43,7 +43,7 @@ default = false
 type = "filter"
 inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
 # Each RGB frame the model says matches is forwarded unchanged, and every other
-# frame is dropped. Either way the result is a DetectionResult: one detection
-# covering the frame, of class prompt (or the image's name), on a match, and
-# none otherwise, so cliped's send queue sees a RESULT for every tile it sent.
-result = "steeleagle_protocol/v1/messages/result/DetectionResult"
+# frame is dropped. Either way the result is a GenericResult holding the JSON
+# {"match": true|false}, so cliped's send queue sees a RESULT for every tile
+# it sent, and learns from it.
+result = "steeleagle_protocol/v1/messages/result/GenericResult"
