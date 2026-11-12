@@ -22,6 +22,18 @@ type = "string"
 description = "H.264 decoder of the video stream, in gst-launch syntax; its output must be NV12, I420 or RGB, and is converted to RGB on the CPU after it (e.g. \"qtic2vdec\" with the native environment)"
 default = "avdec_h264 max-threads=1"
 
+# The camera settings below have no default: left out, the drone keeps what it
+# has, which persists on it between connections
+[[args]]
+name = "shutter_speed"
+type = "string"
+description = "Shutter speed of the main camera, as a fraction of a second (e.g. \"1/500\"; the ISO stays automatic), or \"auto\" for automatic exposure"
+
+[[args]]
+name = "hdr"
+type = "boolean"
+description = "Whether the main camera uses HDR"
+
 [driver]
 # Driver type: (copter, legged, wheeled, boat)
 type = "copter"

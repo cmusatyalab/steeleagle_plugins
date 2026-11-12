@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Button } from 'primereact/button';
 import { Toolbar } from 'primereact/toolbar';
 import { ButtonGroup } from 'primereact/buttongroup';
 import { Tooltip } from 'primereact/tooltip';
 import { FileUpload } from 'primereact/fileupload';
 import { Dropdown } from 'primereact/dropdown';
+import { MultiSelect } from 'primereact/multiselect';
 import { Dialog } from 'primereact/dialog';
 import { InputText } from 'primereact/inputtext';
 import React from 'react';
@@ -15,6 +16,7 @@ import { STYLE_OPTIONS } from './mapStyles.js';
 import { streamUpload, initialUploadState, applyUploadEvent, isUploadFinished, finishUpload, validMissionName, defaultMissionName } from './missionUpload.js';
 import { displayName } from './vehicleNames.js';
 import VehicleVideoPanel from './VehicleVideoPanel.jsx';
+import { fetchPins, classCounts, visiblePins } from './detectionPins.js';
 
 const vehicleOptionTemplate = (name) => (name ? <span title={name}>{displayName(name)}</span> : null);
 const vehicleValueTemplate = (name, props) => (name ? <span title={name}>{displayName(name)}</span> : props.placeholder);
@@ -29,6 +31,41 @@ const uploadOptions = { icon: 'pi pi-fw pi-cloud-upload', iconOnly: true, classN
 // Swarm Controls Panel wrapper below frees up the vertical room for it.
 const videoPanelHeight = '26rem';
 
+// How often the detection pins are fetched.
+const PIN_POLL_MS = 1000;
+// Where this browser keeps the classes it hides from the map.
+const HIDDEN_CLASSES_KEY = 'se-hidden-pin-classes';
+
+function loadHiddenClasses() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(HIDDEN_CLASSES_KEY) ?? '[]');
+    return new Set(Array.isArray(stored) ? stored.filter((c) => typeof c === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+// The detection pins and their shared settings, fetched every PIN_POLL_MS
+// while mounted; a failed fetch keeps the last ones.
+function usePins() {
+  const [state, setState] = useState({ pins: [], settings: null });
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const result = await fetchPins();
+        if (!cancelled) setState({ pins: result.pins ?? [], settings: result.settings ?? null });
+      } catch {
+        // keep the last pins
+      }
+    };
+    poll();
+    const id = setInterval(poll, PIN_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  return state;
+}
+
 function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, resultsEngine, setResultsEngine, tracking, setTracking,
   toast, onCommand,
   setManualControl, squadList, setSquadList, takeOffAltitude, controlGroups,
@@ -38,6 +75,19 @@ function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, resultsEng
   const noVideoLabel = 'No video: the vehicle isn\'t sending video to the GCS (a mission dataflow may be active; Hold restores it)'
     + (gcsFlow.startsWith('no video:') || gcsFlow.startsWith('error:') ? ` (${gcsFlow})` : '');
   const [mapStyle, setMapStyle] = useState('streets');
+  const { pins, settings: pinSettings } = usePins();
+  // The classes this browser hides; a class not listed, even a new one, shows
+  const [hiddenClasses, setHiddenClasses] = useState(loadHiddenClasses);
+  const pinClasses = useMemo(() => classCounts(pins), [pins]);
+  const shownPins = useMemo(() => visiblePins(pins, hiddenClasses), [pins, hiddenClasses]);
+  const onShownClasses = (shown) => {
+    const next = new Set(hiddenClasses);
+    for (const { cls } of pinClasses) {
+      if (shown.includes(cls)) next.delete(cls); else next.add(cls);
+    }
+    setHiddenClasses(next);
+    localStorage.setItem(HIDDEN_CLASSES_KEY, JSON.stringify([...next]));
+  };
   // The last mission name used, kept as the next upload's default
   const [missionName, setMissionName] = useState('');
   // The FileUpload event waiting for its mission name, while the dialog is open
@@ -146,9 +196,15 @@ function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, resultsEng
         <div className="flex align-items-center gap-2 mb-2 px-2 py-1 border-round" style={{ backgroundColor: 'var(--surface-card)', border: '1px solid var(--surface-border)' }}>
           {/* Left/center/right flex-1 sections roughly align with the map
               and video panels below. */}
-          <div className="flex-1 flex justify-content-start">
+          <div className="flex-1 flex justify-content-start gap-2">
             <Dropdown value={mapStyle} options={STYLE_OPTIONS} onChange={(e) => setMapStyle(e.value)}
               className="w-full md:w-9rem" />
+            {pinClasses.length > 0 && (
+              <MultiSelect value={pinClasses.map((c) => c.cls).filter((c) => !hiddenClasses.has(c))}
+                options={pinClasses.map(({ cls, count }) => ({ label: `${cls} (${count})`, value: cls }))}
+                onChange={(e) => onShownClasses(e.value)} placeholder="Detections" display="comma" maxSelectedLabels={2}
+                selectedItemsLabel="{0} classes" className="w-full md:w-12rem" />
+            )}
           </div>
           <div className="flex align-items-center gap-1">
             <Button
@@ -172,7 +228,8 @@ function ControlPage({ vehicles, selectedVehicle, setSelectedVehicle, resultsEng
         <div className="grid m-0">
           <div className="col-12 lg:col-6 p-2">
             <Mapbox selectedVehicle={selectedVehicle} vehicles={vehicles} mapPanelSize={mapPanelSize} tracking={tracking}
-              mapHeight={videoPanelHeight} squadList={squadList} onToggleVehicle={onToggleVehicle} controlGroups={controlGroups} mapStyle={mapStyle} />
+              mapHeight={videoPanelHeight} squadList={squadList} onToggleVehicle={onToggleVehicle} controlGroups={controlGroups} mapStyle={mapStyle}
+              pins={shownPins} expiryS={pinSettings?.expiry_s ?? 60} />
           </div>
           <div className="col-12 lg:col-6 p-2">
             <VehicleVideoPanel vehicle={selectedVehicle} engine={resultsEngine} setEngine={setResultsEngine}

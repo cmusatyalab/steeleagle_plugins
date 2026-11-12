@@ -115,6 +115,22 @@ func NewVehicle(name string, home LatLon) *Vehicle {
 	return &Vehicle{name: name, home: home, pos: home, mode: Landed, battery: 100}
 }
 
+// CameraPose is where the vehicle's camera is and points: its position,
+// altitude above home, yaw (its heading, as the gimbal doesn't yaw) and
+// gimbal pitch, and whether the vehicle is in the air.
+func (v *Vehicle) CameraPose() (pos LatLon, alt, yaw, pitch float64, flying bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.pos, v.alt, v.heading, v.gimbalPitch, v.mode != Landed && v.alt > 0
+}
+
+// Home is where the vehicle took off from.
+func (v *Vehicle) Home() LatLon {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.home
+}
+
 // TakeOff climbs (or descends) to alt meters. It succeeds if already airborne.
 func (v *Vehicle) TakeOff(alt float64) {
 	v.mu.Lock()

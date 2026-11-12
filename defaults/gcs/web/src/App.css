@@ -65,6 +65,11 @@
 .vehicle-label-popup {
   z-index: 2;
 }
+/* A detection pin's hover card goes over every marker (pins, setpoints,
+   vehicles), so it can be read where pins crowd together. */
+.pin-card-popup {
+  z-index: 5;
+}
 
 .vehicle-label-popup .mapboxgl-popup-content {
   background: transparent;
