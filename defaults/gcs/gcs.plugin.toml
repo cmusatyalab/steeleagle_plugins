@@ -65,7 +65,7 @@ default = ""
 [[args]]
 name = "ai"
 type = "object"
-description = "AI Chat and Inferred Mission settings: chat_provider, chat_model, chat_reasoning_effort, vision_model, vision_reasoning_effort, data_dir and inferred_mission. Supply model credentials through the process environment."
+description = "AI Chat and Inferred Mission settings: chat_provider, chat_model, chat_reasoning_effort, chat_temperature, vision_model, vision_reasoning_effort, vision_temperature, data_dir and inferred_mission. Use temperature only on compatible models. Supply API keys through the GCS process environment."
 default = {}
 
 [engine]

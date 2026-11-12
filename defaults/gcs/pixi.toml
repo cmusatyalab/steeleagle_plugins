@@ -61,7 +61,7 @@ cmd = "./bin/gcs -web web/dist"
 depends-on = ["build"]
 
 # The mock harness: a fake daemon with simulated vehicles, which runs the GCS as
-# its child (see cmd/gcsmock)
+# its child (see cmd/gcsmock). Pass -ai-config /path/to/ai.json to override AI settings.
 [tasks.build-mock]
 cmd = "go build -trimpath -o bin/gcsmock ./cmd/gcsmock"
 depends-on = ["uriel"]
@@ -69,7 +69,7 @@ inputs = ["go.mod", "go.sum", "**/*.go"]
 outputs = ["bin/gcsmock"]
 
 [tasks.mock]
-cmd = "./bin/gcsmock -gcs bin/gcs -web web/dist"
+cmd = "./bin/gcsmock -gcs bin/gcs -web web/dist -gcs-manifest gcs.plugin.toml"
 depends-on = ["build", "build-mock"]
 
 # The mock harness's end-to-end test runs bin/gcs, so the server is built first

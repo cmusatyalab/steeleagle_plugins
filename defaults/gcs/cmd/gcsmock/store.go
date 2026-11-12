@@ -55,7 +55,7 @@ type storedPackage struct {
 
 // newDaemonStore seeds a config and packages for every daemon in top: its
 // vehicles, encoder and yolo engine, and the GCS on the GCS's daemon.
-func newDaemonStore(top Topology) (*daemonStore, error) {
+func newDaemonStore(top Topology, gcs mockGCSConfig) (*daemonStore, error) {
 	s := &daemonStore{now: time.Now, gcsIP: top.GCSIP, deny: top.DenyConfig, daemons: map[string]*storedDaemon{}}
 	driver, err := driverConfig()
 	if err != nil {
@@ -66,10 +66,6 @@ func newDaemonStore(top Topology) (*daemonStore, error) {
 		return nil, err
 	}
 	yolo, err := engineConfig(yoloService, "detection", []string{rawFrameID}, detectionID)
-	if err != nil {
-		return nil, err
-	}
-	gcs, err := engineConfig("gcs", "generic", []string{encodedFrameID, telemetryID}, "")
 	if err != nil {
 		return nil, err
 	}
@@ -100,8 +96,9 @@ func newDaemonStore(top Topology) (*daemonStore, error) {
 			service(yoloService, config.ServiceEngine, "", yoloService, mockYoloPackage)
 		}
 		if ip == top.GCSIP {
-			add(mockGCSPackage, "gcs", gcs)
+			add(mockGCSPackage, "gcs", gcs.manifest)
 			service("gcs", config.ServiceEngine, config.AuthAdmin, "gcs", mockGCSPackage)
+			dc.Services[len(dc.Services)-1].Plugin.Args = gcs.args
 		}
 		sort.Strings(names)
 		for _, n := range names {

@@ -56,8 +56,12 @@ function uploadVideo(file, onProgress) {
 function ModelStages({ label, models }) {
     return (
         <div className="im-models" role="group" aria-label={label}>
-            <span>Vision analysis <strong>{models.vision_model || 'Unknown'}</strong></span>
-            <span>DSL generation <strong>{models.dsl_model || 'Unknown'}</strong></span>
+            <span>Vision analysis <strong>{models.vision_model || 'Unknown'}</strong>
+                {models.vision_temperature != null && models.vision_temperature !== '' && ` · temperature ${models.vision_temperature}`}
+            </span>
+            <span>DSL generation <strong>{models.dsl_model || 'Unknown'}</strong>
+                {models.dsl_temperature != null && models.dsl_temperature !== '' && ` · temperature ${models.dsl_temperature}`}
+            </span>
         </div>
     );
 }

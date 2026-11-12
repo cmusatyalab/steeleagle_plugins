@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -190,7 +191,7 @@ type Service struct {
 }
 
 func New(ctx context.Context, root string, settings Settings, vision, generation nl2dsl.Provider, generator nl2dsl.Generator, log zerolog.Logger) (*Service, error) {
-	if err := settings.validate(); err != nil {
+	if err := settings.Validate(); err != nil {
 		return nil, err
 	}
 	for _, dir := range []string{"runs", "videos"} {
@@ -215,11 +216,18 @@ func (s *Service) Close() {
 
 func (s *Service) models() map[string]string {
 	// Endpoint hashes distinguish resumed runs without serializing endpoints or credentials.
-	return map[string]string{
+	models := map[string]string{
 		"vision_provider": s.vision.Name, "vision_model": s.vision.ModelID, "vision_reasoning_effort": s.vision.Reasoning,
 		"dsl_provider": s.generation.Name, "dsl_model": s.generation.ModelID, "reasoning_effort": s.generation.Reasoning,
 		"vision_endpoint_hash": hash(s.vision.BaseURL), "dsl_endpoint_hash": hash(s.generation.BaseURL),
 	}
+	if s.vision.Temperature != nil {
+		models["vision_temperature"] = strconv.FormatFloat(*s.vision.Temperature, 'f', -1, 64)
+	}
+	if s.generation.Temperature != nil {
+		models["dsl_temperature"] = strconv.FormatFloat(*s.generation.Temperature, 'f', -1, 64)
+	}
+	return models
 }
 
 func hash(s string) string {
@@ -242,7 +250,7 @@ func (s *Service) recover() {
 		dir := filepath.Join(s.root, "runs", id)
 		r := &run{dir: dir, rows: map[int]section{}, changed: make(chan struct{})}
 		if readJSON(filepath.Join(dir, "session.json"), &r.meta) != nil ||
-			r.meta.SchemaVersion != 1 || r.meta.ID != id || r.meta.Settings.validate() != nil {
+			r.meta.SchemaVersion != 1 || r.meta.ID != id || r.meta.Settings.Validate() != nil {
 			continue
 		}
 		paths, _ := filepath.Glob(filepath.Join(dir, "sections", "*", "record.json"))
@@ -282,7 +290,7 @@ func (s *Service) start(req startRequest) (*run, error) {
 	if req.History != "" {
 		cfg.HistoryMode = req.History
 	}
-	if err := cfg.validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	if req.Flight != nil && (*req.Flight <= 0 || *req.Flight > seconds(time.Now())) {

@@ -26,6 +26,7 @@ import (
 	"runtime"
 
 	vehiclepb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/vehicle"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/daemons"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/rtc"
 	"github.com/pion/webrtc/v4"
 	"google.golang.org/grpc"
@@ -133,6 +134,7 @@ func startMock(t *testing.T, noEncoderRemote bool, extra ...string) *mockRun {
 	args := []string{
 		"-gcs", gcs,
 		"-web", web,
+		"-gcs-manifest", "../../gcs.plugin.toml",
 		"-http", "127.0.0.1:" + strconv.Itoa(port),
 		"-socket", r.socket,
 		// Clips are generated per test (about 0.2 s each), since their names
@@ -833,6 +835,78 @@ func TestE2EDeployFlow(t *testing.T) {
 // TestE2EDetectorResults has a browser's peer connection receive alpha's
 // video and ask for the mock detector's results: they arrive on its data
 // channel, about alpha's camera, with the mock objects.
+// TestE2EMockAIConfig checks the child process and the two data sources
+// read by Configure. No model endpoint is called.
+func TestE2EMockAIConfig(t *testing.T) {
+	const key = "fake-test-key-from-environment"
+	t.Setenv("OPENAI_API_KEY", key)
+	t.Setenv("STEELEAGLE_INFERRED_MISSION_DATA", t.TempDir())
+	path := filepath.Join(t.TempDir(), "ai.json")
+	const settings = `{
+		"chat_model": "gpt-4o-mini",
+		"vision_model": "gpt-4o",
+		"chat_temperature": 0.25,
+		"vision_temperature": 0,
+		"inferred_mission": {"section_seconds": 12, "frame_fps": 2, "history_mode": "uniform"}
+	}`
+	if err := os.WriteFile(path, []byte(settings), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := startMock(t, false, "-ai-config", path)
+
+	var catalog struct {
+		Packages []daemons.Package `json:"packages"`
+	}
+	if err := r.getJSON("/api/daemons/packages?ip="+r.gcsIP, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	declared := false
+	for _, pkg := range catalog.Packages {
+		for _, plugin := range pkg.Plugins {
+			for _, arg := range plugin.Args {
+				if pkg.URI == mockGCSPackage && plugin.Name == "gcs" && arg.Name == "ai" && arg.Type == "object" {
+					declared = true
+				}
+			}
+		}
+	}
+	if !declared {
+		t.Fatalf("GCS ai object missing from installed package metadata")
+	}
+
+	var cfg struct {
+		TOML string `json:"raw_toml"`
+	}
+	if err := r.getJSON("/api/daemons/config?ip="+r.gcsIP, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cfg.TOML, "gpt-4o-mini") || !strings.Contains(cfg.TOML, "uniform") || strings.Contains(cfg.TOML, key) {
+		t.Fatal("mock configuration did not contain the non-secret startup overrides")
+	}
+
+	var state json.RawMessage
+	if err := r.getJSON("/api/inferred-mission/status", &state); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(state, []byte(key)) {
+		t.Fatal("status exposed the OpenAI key")
+	}
+	var effective struct {
+		Configured bool           `json:"configured"`
+		Models     map[string]any `json:"models"`
+		Settings   map[string]any `json:"settings"`
+	}
+	if err := json.Unmarshal(state, &effective); err != nil {
+		t.Fatal(err)
+	}
+	if !effective.Configured || effective.Models["dsl_model"] != "gpt-4o-mini" || effective.Models["vision_model"] != "gpt-4o" ||
+		effective.Models["dsl_temperature"] != "0.25" || effective.Models["vision_temperature"] != "0" ||
+		effective.Settings["section_seconds"] != float64(12) || effective.Settings["frame_fps"] != float64(2) ||
+		effective.Settings["history_mode"] != "uniform" {
+		t.Fatalf("startup overrides not applied by the child: %+v", effective)
+	}
+}
+
 func TestE2EDetectorResults(t *testing.T) {
 	r := startMock(t, false)
 	r.waitVideo(15*time.Second, "alpha's video", map[string]bool{r.alpha: true})

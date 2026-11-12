@@ -13,6 +13,7 @@ import (
 
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
 	"github.com/cmusatyalab/steeleagle/config"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/aiconfig"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 )
 
@@ -144,6 +145,7 @@ func (h *Handler) check(ctx context.Context, ip string, raw []byte) (checkResult
 	if err != nil {
 		res.Errors = append(res.Errors, err.Error())
 	} else {
+		res.Errors = append(res.Errors, checkGCSAI(dc)...)
 		pkgs, err := h.packages(ctx, ip)
 		if err != nil {
 			return res, err
@@ -154,6 +156,32 @@ func (h *Handler) check(ctx context.Context, ip string, raw []byte) (checkResult
 	}
 	res.Blocking = h.own(ip) && (len(res.Errors) > 0 || len(res.Warnings) > 0)
 	return res, nil
+}
+
+// checkGCSAI validates AI options before Apply can restart the GCS.
+func checkGCSAI(dc *config.DaemonConfig) []string {
+	var issues []string
+	for _, svc := range dc.Services {
+		if svc.Plugin.Plugin != "gcs" || svc.Simulate {
+			continue
+		}
+		for key := range svc.Plugin.Args {
+			switch strings.ToLower(key) {
+			case "openai_api_key", "anthropic_api_key", "api_key":
+				issues = append(issues, fmt.Sprintf("%s: supply API keys through the GCS process environment", svc.Name))
+			}
+		}
+		if value, ok := svc.Plugin.Args["ai"]; ok {
+			raw, err := json.Marshal(value)
+			if err == nil {
+				_, err = aiconfig.Parse(raw)
+			}
+			if err != nil {
+				issues = append(issues, fmt.Sprintf("%s: %s", svc.Name, err))
+			}
+		}
+	}
+	return issues
 }
 
 // formOf is the part of a parsed config the package check reads.

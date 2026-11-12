@@ -165,6 +165,17 @@
     white-space: nowrap;
 }
 
+.se-chat-header__model {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-inline-start: 0.5rem;
+    color: var(--text-color-secondary);
+    font-size: 0.8rem;
+    font-weight: 400;
+}
+
 .se-chat-header .p-tag {
     flex-shrink: 0;
 }

@@ -104,8 +104,22 @@ Flow Builder, Compile and Deploy controls to finish the mission.
 Set `OPENAI_API_KEY` in the GCS process environment for OpenAI Chat and
 video inference. For Anthropic Chat set `ANTHROPIC_API_KEY` and set
 `chat_provider = "anthropic"` in the plugin args. Keep the OpenAI key for
-the separate vision model if you use Inferred Mission. The status indicators
-show whether credentials are configured. They do not test model access.
+the separate vision model if you use Inferred Mission. On a Linux host with
+the `eagle init` user service and GCS running in process mode (empty
+Isolation), put the variable in the service user's private
+`~/.config/steeleagle/eagled.env` (mode `0600`) and restart the service.
+Configure shows whether the variables are set for the current GCS. It does
+not check model access. The daemon returns its saved configuration to
+Configure, so keep key values out of plugin args and Raw TOML.
+
+In **Orchestrate → Configure**, open the GCS service and edit the **ai**
+argument to select a provider, set the Chat and vision model IDs, and
+adjust inference settings. Chat and DSL generation share the Chat model.
+`chat_temperature` and `vision_temperature` are optional, in the range
+0–1. An omitted field uses the provider default. Leave temperature blank
+for reasoning models such as `gpt-6.1-sol` and for providers or models that
+do not support it. Configure and the Plan tabs distinguish saved settings
+from the models currently in use.
 
 ```toml
 [services.plugin.args.ai]
@@ -278,6 +292,34 @@ Run it in `gcs/` and open <http://localhost:8002>:
 ```sh
 pixi run mock
 ```
+
+The mock reads `gcs.plugin.toml` from this checkout so Configure shows the
+same declared args as the installed plugin. To use custom non-secret
+settings in the running GCS, set the API key in the shell environment and
+pass a file containing the `ai` object directly:
+
+```sh
+pixi run mock -ai-config /path/to/gcs-ai.json
+```
+
+For example, `gcs-ai.json` can contain:
+
+```json
+{
+  "chat_model": "gpt-4.1",
+  "chat_temperature": 0.2,
+  "vision_model": "gpt-6.1-sol",
+  "inferred_mission": {
+    "section_seconds": 12,
+    "frame_fps": 1,
+    "history_mode": "recency"
+  }
+}
+```
+
+The file seeds the mock's Configure form and the GCS process at startup.
+Configure's Apply operation still simulates the daemon restart. To change
+the mock's running settings, edit the file and restart the mock.
 
 Ctrl-C stops the mock and the GCS. By default there are three vehicles:
 `100.64.0.1.alpha` and `100.64.0.1.bravo` on the GCS's daemon (`100.64.0.1`),

@@ -57,6 +57,7 @@ var cmu = LatLon{Lat: 40.4433, Lon: -79.9436}
 // options are the command's flags.
 type options struct {
 	gcs, web, http, socket, clips string
+	gcsManifest, aiConfig         string
 	mapbox                        string
 	gcsIP                         string
 	vehicles                      []string
@@ -96,6 +97,8 @@ func parseFlags(args []string) (options, error) {
 	}
 	var o options
 	fs.StringVar(&o.gcs, "gcs", "bin/gcs", "path of the GCS binary")
+	fs.StringVar(&o.gcsManifest, "gcs-manifest", "gcs.plugin.toml", "path of the GCS plugin manifest for Configure")
+	fs.StringVar(&o.aiConfig, "ai-config", "", "path to a JSON object of non-secret GCS AI settings")
 	fs.StringVar(&o.web, "web", "web/dist", "directory of the built web UI, passed to the GCS")
 	fs.StringVar(&o.http, "http", ":8002", "address the GCS serves the web UI on")
 	fs.StringVar(&o.socket, "socket", filepath.Join(runtimeDir, fmt.Sprintf("gcsmock-%d.sock", os.Getpid())),
@@ -200,6 +203,10 @@ func (o options) daemonIPs() []string {
 // run runs the mock until the child exits or a signal stops it, and returns
 // the child's exit status.
 func run(o options, log zerolog.Logger) (int, error) {
+	gcsConfig, err := loadGCSConfig(o)
+	if err != nil {
+		return 1, err
+	}
 	top := o.topology()
 	// A signal before the child starts still shuts down cleanly: Uriel's
 	// shared memory is released by Close
@@ -272,8 +279,13 @@ func run(o options, log zerolog.Logger) (int, error) {
 		return 1, err
 	}
 	defer os.Remove(o.socket)
+	d, err := NewDaemon(top, vehicles, u, log, gcsConfig)
+	if err != nil {
+		ln.Close()
+		return 1, err
+	}
 	grpcServer := grpc.NewServer()
-	NewDaemon(top, vehicles, u, log).Register(grpcServer)
+	d.Register(grpcServer)
 	grpcDone := make(chan struct{})
 	go func() {
 		defer close(grpcDone)
@@ -304,7 +316,7 @@ func run(o options, log zerolog.Logger) (int, error) {
 	if stopped() {
 		return 0, nil
 	}
-	return runChild(o, gcsEngine, signals, log)
+	return runChild(o, gcsConfig.args, gcsEngine, signals, log)
 }
 
 // loadClip reads the vehicle's clip, generating it first if needed, and
@@ -405,8 +417,8 @@ func simulate(ctx context.Context, vehicles map[string]*Vehicle) {
 
 // runChild runs the GCS until it exits, stopping it on a signal from
 // signals, and returns its exit status.
-func runChild(o options, engine string, signals <-chan os.Signal, log zerolog.Logger) (int, error) {
-	pluginArgs, err := json.Marshal(map[string]string{"http_addr": o.http, "mapbox": o.mapbox})
+func runChild(o options, args map[string]any, engine string, signals <-chan os.Signal, log zerolog.Logger) (int, error) {
+	pluginArgs, err := json.Marshal(args)
 	if err != nil {
 		return 1, err
 	}

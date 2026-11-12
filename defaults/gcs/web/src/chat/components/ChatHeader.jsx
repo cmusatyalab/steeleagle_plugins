@@ -38,8 +38,12 @@ function ChatHeader({ title, onClear, canClear }) {
 
     const showLive = Boolean(llmStatus?.configured);
     const showNoKey = Boolean(llmStatus) && !llmStatus.configured;
+    const temperature = llmStatus?.temperature;
+    const modelDetails = llmStatus?.model
+        ? `${llmStatus.model}${temperature != null && temperature !== '' ? ` · temperature ${temperature}` : ''}`
+        : '';
     const providerTip = llmStatus
-        ? `Using ${llmStatus.label}${llmStatus.model ? ` (${llmStatus.model})` : ''}`
+        ? `Using ${llmStatus.label}${modelDetails ? ` (${modelDetails})` : ''}`
         : '';
     const noKeyTip = llmStatus?.label
         ? `No API key configured for ${llmStatus.label}`
@@ -80,6 +84,7 @@ function ChatHeader({ title, onClear, canClear }) {
                         />
                     </>
                 )}
+                {!offline && modelDetails && <span className="se-chat-header__model" title={modelDetails}>{modelDetails}</span>}
                 {!offline && showLive && (
                     <>
                         <Tag

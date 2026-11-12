@@ -27,7 +27,8 @@ func DefaultSettings() Settings {
 	}
 }
 
-func (s Settings) validate() error {
+// Validate checks the supported inference settings and resource limits.
+func (s Settings) Validate() error {
 	if s.SectionSeconds < 1 || s.SectionSeconds > 60 || s.SectionSeconds*s.FrameFPS < 1 || s.SectionSeconds*s.FrameFPS > 60 ||
 		s.MaxFrameSide < 32 || s.MaxFrameSide > 2048 || s.HistorySections < 0 || s.HistorySections > 30 ||
 		s.HalfLifeSections <= 0 || s.RequestTimeout <= 0 || s.RequestTimeout > 600 ||

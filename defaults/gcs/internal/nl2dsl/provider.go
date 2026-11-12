@@ -40,12 +40,13 @@ type Model interface {
 }
 
 type Provider struct {
-	Name      string
-	ModelID   string
-	BaseURL   string
-	Reasoning string
-	Key       string
-	Client    *http.Client
+	Name        string
+	ModelID     string
+	BaseURL     string
+	Reasoning   string
+	Temperature *float64
+	Key         string
+	Client      *http.Client
 }
 
 func (p Provider) Configured() bool {
@@ -159,6 +160,9 @@ func (p Provider) openAIRequest(req Request) map[string]any {
 	if p.Reasoning != "" && !strings.HasPrefix(p.ModelID, "gpt-4") && !strings.HasPrefix(p.ModelID, "gpt-3.5") {
 		body["reasoning"] = map[string]string{"effort": p.Reasoning}
 	}
+	if p.Temperature != nil {
+		body["temperature"] = *p.Temperature
+	}
 	if req.AllowDraft {
 		body["tools"] = []any{map[string]any{
 			"type": "function", "name": draftTool, "description": "Submit a V4 DSL candidate for local validation.",
@@ -171,6 +175,9 @@ func (p Provider) openAIRequest(req Request) map[string]any {
 
 func (p Provider) anthropicRequest(req Request) map[string]any {
 	body := map[string]any{"model": p.ModelID, "system": req.Instructions, "messages": req.Messages, "max_tokens": 4096}
+	if p.Temperature != nil {
+		body["temperature"] = *p.Temperature
+	}
 	if req.AllowDraft {
 		body["tools"] = []any{map[string]any{
 			"name": draftTool, "description": "Submit a V4 DSL candidate for local validation.", "input_schema": draftParameters,

@@ -27,13 +27,13 @@ import (
 
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
 	"github.com/cmusatyalab/steeleagle/config"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/aiconfig"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/control"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/daemons"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/dump"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/feed"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
-	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/inferredmission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/metrics"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/presence"
@@ -85,15 +85,15 @@ type args struct {
 	// came from Uriel; empty to record none. See package dump.
 	DumpDir string `json:"dump_dir"`
 	// PrometheusURL is where the Metrics page's numbers are queried.
-	PrometheusURL string `json:"prometheus_url"`
-	AI            aiArgs `json:"ai"`
+	PrometheusURL string           `json:"prometheus_url"`
+	AI            aiconfig.Options `json:"ai"`
 }
 
 // parseArgs reads the plugin's args from JSON, defaulting the ones it leaves
 // out as gcs.plugin.toml does.
 func parseArgs(content string) (args, error) {
 	a := args{HTTPAddr: defaultHTTPAddr, MaxInputSize: defaultMaxInputSize, PrometheusURL: defaultPrometheusURL,
-		AI: aiArgs{InferredMission: inferredmission.DefaultSettings()}}
+		AI: aiconfig.Defaults()}
 	if content != "" {
 		if err := json.Unmarshal([]byte(content), &a); err != nil {
 			return args{}, fmt.Errorf("invalid plugin args: %w", err)

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	framepb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/frame"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/aiconfig"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/chat"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/feed"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/inferredmission"
@@ -20,29 +21,19 @@ import (
 	"github.com/rs/zerolog"
 )
 
-type aiArgs struct {
-	ChatProvider    string                   `json:"chat_provider"`
-	ChatModel       string                   `json:"chat_model"`
-	ChatReasoning   string                   `json:"chat_reasoning_effort"`
-	VisionModel     string                   `json:"vision_model"`
-	VisionReasoning string                   `json:"vision_reasoning_effort"`
-	DataDir         string                   `json:"data_dir"`
-	InferredMission inferredmission.Settings `json:"inferred_mission"`
-}
-
-func aiProvider(args aiArgs) (nl2dsl.Provider, nl2dsl.Provider) {
+func aiProvider(args aiconfig.Options) (nl2dsl.Provider, nl2dsl.Provider) {
 	key, openAIBase := os.Getenv("OPENAI_API_KEY"), os.Getenv("OPENAI_BASE_URL")
 	provider := strings.ToLower(defaultString(args.ChatProvider, "openai"))
 	model := defaultString(args.ChatModel, "gpt-6.1-sol")
 	chat := nl2dsl.Provider{Name: provider, ModelID: model, Key: key, BaseURL: openAIBase,
-		Reasoning: reasoning(model, args.ChatReasoning)}
+		Reasoning: reasoning(model, args.ChatReasoning), Temperature: args.ChatTemperature}
 	if provider == "anthropic" {
 		chat.ModelID = defaultString(args.ChatModel, "claude-sonnet-4-20250514")
 		chat.Key, chat.BaseURL, chat.Reasoning = os.Getenv("ANTHROPIC_API_KEY"), os.Getenv("ANTHROPIC_BASE_URL"), ""
 	}
 	visionModel := defaultString(args.VisionModel, "gpt-6.1-sol")
 	vision := nl2dsl.Provider{Name: "openai", ModelID: visionModel, Key: key,
-		BaseURL: defaultString(os.Getenv("STEELEAGLE_VISION_BASE_URL"), openAIBase), Reasoning: reasoning(visionModel, args.VisionReasoning)}
+		BaseURL: defaultString(os.Getenv("STEELEAGLE_VISION_BASE_URL"), openAIBase), Reasoning: reasoning(visionModel, args.VisionReasoning), Temperature: args.VisionTemperature}
 	return chat, vision
 }
 
@@ -60,10 +51,12 @@ func defaultString(value, fallback string) string {
 	return value
 }
 
-func registerAI(ctx context.Context, a aiArgs, missions *mission.Service, hub *rtc.Hub, log zerolog.Logger) (func(*http.ServeMux), *inferredmission.Service) {
+func registerAI(ctx context.Context, a aiconfig.Options, missions *mission.Service, hub *rtc.Hub, log zerolog.Logger) (func(*http.ServeMux), *inferredmission.Service) {
 	provider, vision := aiProvider(a)
 	generator := nl2dsl.Generator{Model: provider, Compiler: missions}
-	chatAPI := chat.New(provider, generator)
+	chatAPI := chat.New(provider, generator, chat.Credentials{
+		OpenAI: vision.Key != "", Anthropic: os.Getenv("ANTHROPIC_API_KEY") != "",
+	})
 	dataDir := defaultString(os.Getenv("STEELEAGLE_INFERRED_MISSION_DATA"), a.DataDir)
 	var configErr error
 	if dataDir == "" {

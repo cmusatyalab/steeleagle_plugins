@@ -413,6 +413,7 @@ function ConfigureDialog({ daemon, focus, onHide, onApplied }) {
                                             key={svc.key}
                                             svc={svc}
                                             packages={packages}
+                                            currentGCS={loaded?.own && svc.origName === loaded.selfService}
                                             hasSimulator={state.simulator.present}
                                             simPackage={state.simulator.package}
                                             errors={serviceErrors(svc.key)}
