@@ -1,36 +1,79 @@
-"""The reachback engine: stores every frame and forwards it. It subscribes to
-the swiftmap engine on the remote daemon and answers its requests for lost
-frames by transferring them to that daemon as files (reachback-<n>.frame),
-outside the flow. Put it right after the JPEG encoder, whose frame numbers
-the requests name."""
+"""The reachback engine: stores frames, with where the camera was and where it
+looked, and forwards every frame. It subscribes to the swiftmap engine on the
+remote daemon, and for each viewpoint that engine asks about, transfers the
+stored frame that looks at the viewpoint's target from the closest angle to
+that daemon as a file (reachback-<n>.frame), outside the flow. Put it after
+the JPEG encoder and before the keyframe engine, so it sees every frame."""
 
 import logging
+import math
 import queue
 import sqlite3
 import threading
+import time
 
 import grpc
+import numpy as np
 import uriel
 from google.protobuf.message import DecodeError
 
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from steeleagle_protocol.v1.services.daemon import transfer_pb2, transfer_pb2_grpc
-from swiftmap.engine import ENCODED_FRAME_TYPE, REQUEST_TYPE, decode_request, frame_filename
+from swiftmap.engine import ENCODED_FRAME_TYPE, REQUEST_TYPE, decode_request, frame_filename, frame_gps
 
 logger = logging.getLogger("swiftmap.reachback")
 
 POLL_INTERVAL_S = 0.1
-MAX_OUTPUT_SIZE = 4096  # it only forwards, but Uriel needs a bound
-CHUNK_SIZE = 1 << 20  # as eagle sends files
+MAX_OUTPUT_SIZE = 4096
+CHUNK_SIZE = 1 << 20
 ROUTE_HEADER = "x-route-key"
 TRANSFER_TIMEOUT_S = 120.0
-# swiftmap never asks for older frames: it gives up after gap_timeout or 300 held
-KEEP_FRAMES = 1000
+KEEP_FRAMES = 6000
+STORE_INTERVAL_S = 0.2
+HALF_FOV_DEG = 30.0
+MAX_ANGLE_DEG = 30.0
+M_PER_DEG = 111_320.0
+
+
+def frame_pose(frame):
+    """(lat, lon, alt, yaw, pitch) of the camera that took the frame, yaw and
+    pitch in degrees from north and the horizon; None without a GPS fix or
+    gimbal pose."""
+    gps = frame_gps(frame)
+    if gps is None or not (frame.HasField("gimbal_info") and frame.gimbal_info.HasField("pose_neu")):
+        return None
+    pose = frame.gimbal_info.pose_neu
+    return (*gps, pose.yaw, pose.pitch)
+
+
+def to_enu(lla, origin):
+    """(N, 3) east, north, up metres of the (N, 3) lat, lon, alt about `origin`."""
+    return np.column_stack([
+        (lla[:, 1] - origin[1]) * M_PER_DEG * math.cos(math.radians(origin[0])),
+        (lla[:, 0] - origin[0]) * M_PER_DEG,
+        lla[:, 2] - origin[2],
+    ])
+
+
+def closest(poses, numbers, view, exclude):
+    """Index of the frame that looks at the target of `view` from closest to
+    its angle, within MAX_ANGLE_DEG and twice its distance; None if none does."""
+    cams = to_enu(poses[:, :3], view[3:])
+    ideal = to_enu(np.array([view[:3]]), view[3:])[0]
+    dist, reach = np.linalg.norm(cams, axis=1), np.linalg.norm(ideal)
+    yaw, pitch = np.radians(poses[:, 3]), np.radians(poses[:, 4])
+    look = np.column_stack([np.sin(yaw) * np.cos(pitch), np.cos(yaw) * np.cos(pitch), np.sin(pitch)])
+    facing = -(look * cams).sum(1) / np.maximum(dist, 1e-9)
+    angle = cams @ ideal / np.maximum(dist * reach, 1e-9)
+    ok = ((facing >= math.cos(math.radians(HALF_FOV_DEG)))
+          & (angle >= math.cos(math.radians(MAX_ANGLE_DEG)))
+          & (dist <= 2 * reach) & ~np.isin(numbers, list(exclude)))
+    return int(np.flatnonzero(ok)[np.argmax(angle[ok])]) if ok.any() else None
 
 
 class FrameStore:
-    """The newest `keep` EncodedFrames, by producer, session and frame number,
-    in SQLite."""
+    """The newest `keep` EncodedFrames, with their camera poses and whether
+    they were sent, in SQLite."""
 
     def __init__(self, path=":memory:", keep=KEEP_FRAMES):
         self.keep = keep
@@ -40,32 +83,40 @@ class FrameStore:
             PRAGMA journal_mode = OFF;
             PRAGMA synchronous = OFF;
             CREATE TABLE IF NOT EXISTS frames (
-                producer TEXT NOT NULL, session TEXT NOT NULL,
-                number INTEGER NOT NULL, data BLOB NOT NULL
+                producer TEXT NOT NULL, session TEXT NOT NULL, number INTEGER NOT NULL,
+                lat REAL, lon REAL, alt REAL, yaw REAL, pitch REAL,
+                sent INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS frames_by_number ON frames (producer, session, number);
+            CREATE INDEX IF NOT EXISTS frames_by_stream ON frames (producer, session, sent);
             """
         )
 
     def close(self):
         self._db.close()
 
-    def add(self, producer, session, number, data):
+    def add(self, producer, session, number, pose, data):
         with self._db:
             row = self._db.execute(
-                "INSERT INTO frames VALUES (?, ?, ?, ?)", (producer, str(session), number, data)
+                "INSERT INTO frames (producer, session, number, lat, lon, alt, yaw, pitch, data) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (producer, str(session), number, *pose, data),
             ).lastrowid
             self._db.execute("DELETE FROM frames WHERE rowid <= ?", (row - self.keep,))
 
-    def frames(self, producer, session, first, last):
-        """(number, data) of the frames numbered first to last, in order; the
-        last stored of each number."""
+    def unsent(self, producer, session):
+        """(rowids, numbers, (N, 5) poses) of the frames not sent yet."""
         rows = self._db.execute(
-            "SELECT number, data FROM frames WHERE producer = ? AND session = ? "
-            "AND number BETWEEN ? AND ? ORDER BY number, rowid",
-            (producer, str(session), first, last),
-        )
-        return sorted(dict(rows).items())
+            "SELECT rowid, number, lat, lon, alt, yaw, pitch FROM frames "
+            "WHERE producer = ? AND session = ? AND sent = 0", (producer, str(session)),
+        ).fetchall()
+        rows = np.array(rows, dtype=float).reshape(-1, 7)
+        return rows[:, 0].astype(int), rows[:, 1].astype(int), rows[:, 2:]
+
+    def take(self, rowid):
+        """The frame `rowid`, marked sent."""
+        rowid = int(rowid)
+        with self._db:
+            self._db.execute("UPDATE frames SET sent = 1 WHERE rowid = ?", (rowid,))
+            return self._db.execute("SELECT data FROM frames WHERE rowid = ?", (rowid,)).fetchone()[0]
 
 
 def chunks(name, data, chunk_size=CHUNK_SIZE):
@@ -103,7 +154,6 @@ class Transfer:
             while (item := self._queue.get()) is not None:
                 name, data = item
                 try:
-                    # One ack per chunk; the stream ends once the file is saved
                     for _ in stub.TransferFile(chunks(name, data), timeout=TRANSFER_TIMEOUT_S,
                                                metadata=[(ROUTE_HEADER, self.route)]):
                         pass
@@ -114,15 +164,20 @@ class Transfer:
 
 
 class Reachback:
-    """Stores frames, and sends back those asked for with `transfer(name, data)`."""
+    """Stores a frame with a camera pose every `interval` seconds per camera,
+    and sends the frames closest to the viewpoints asked about with
+    `transfer(name, data)`."""
 
-    def __init__(self, store, transfer):
+    def __init__(self, store, transfer, interval=STORE_INTERVAL_S):
         self.store = store
         self.transfer = transfer
+        self.interval = interval
+        self._last_stored = {}
 
-    def on_input(self, input):
-        if input.payload_type.replace(".", "/") != ENCODED_FRAME_TYPE:
-            logger.warning("input %d: not an EncodedFrame; not stored", input.id.seq)
+    def on_input(self, input, now):
+        stream = (input.id.producer, input.id.session)
+        if input.payload_type.replace(".", "/") != ENCODED_FRAME_TYPE or (
+                now - self._last_stored.get(stream, float("-inf")) < self.interval):
             return
         data = bytes(input.data)
         try:
@@ -130,15 +185,24 @@ class Reachback:
         except DecodeError as err:
             logger.warning("input %d: bad EncodedFrame (%s); not stored", input.id.seq, err)
             return
-        self.store.add(input.id.producer, input.id.session, frame.id, data)
+        pose = frame_pose(frame)
+        if pose is not None:
+            self.store.add(*stream, frame.id, pose, data)
+            self._last_stored[stream] = now
 
     def on_request(self, id, payload):
-        """Sends back the frames asked for; ValueError if `payload` is no request."""
-        first, last = decode_request(payload)
-        frames = self.store.frames(id.producer, id.session, first, last)
-        logger.info("frames %d to %d asked for; sending the %d stored", first, last, len(frames))
-        for number, data in frames:
-            self.transfer(frame_filename(number), data)
+        """Sends the frame closest to each viewpoint asked about; ValueError if
+        `payload` is not a request."""
+        views, exclude = decode_request(payload)
+        rowids, numbers, poses = self.store.unsent(id.producer, id.session)
+        sent = []
+        for view in views:
+            i = closest(poses, numbers, view, exclude)
+            if i is not None:
+                self.transfer(frame_filename(numbers[i]), self.store.take(rowids[i]))
+                exclude.add(int(numbers[i]))
+                sent.append(int(numbers[i]))
+        logger.info("sending frames %s for %d viewpoints", sent, len(views))
 
 
 def run(name, reachback, remote, *, stop, on_ready=None):
@@ -163,7 +227,7 @@ def run(name, reachback, remote, *, stop, on_ready=None):
             if input is None:
                 continue
             try:
-                reachback.on_input(input)
+                reachback.on_input(input, time.monotonic())
             except Exception:
                 logger.exception("input %d: failed to store it", input.id.seq)
             engine.forward()

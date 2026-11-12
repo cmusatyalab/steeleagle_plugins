@@ -1,12 +1,12 @@
 [plugin]
 name = "SwiftMap Reachback"
 type = "engine"
-description = "Stores every frame and forwards it on unchanged. When the swiftmap engine on the remote daemon finds frames lost on the way, it asks for them, and they are sent to its daemon as files, outside the flow. Put it right after the JPEG encoder, which numbers the frames the swiftmap engine asks for"
+description = "Stores frames with where the camera was and where it looked, and forwards every frame unchanged. For each viewpoint the swiftmap engine on the remote daemon asks about, the stored frame that looks at its target from the closest angle is sent to that daemon as a file, outside the flow. Put it after the JPEG encoder and before the keyframe engine"
 
 [[args]]
 name = "remote"
 type = "string"
-description = "Service name of the swiftmap engine on the remote daemon, whose requests for lost frames it answers"
+description = "Service name of the swiftmap engine on the remote daemon, whose requests it answers"
 default = "swiftmap"
 
 [engine]

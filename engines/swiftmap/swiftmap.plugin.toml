@@ -1,7 +1,7 @@
 [plugin]
 name = "SwiftMap"
 type = "engine"
-description = "Sends each camera frame, with the GPS fix it was taken at, to a SwiftMap mapping server, in the order they were taken, and reports the next-flight area it plans as a KML. Put the keyframe engine in front of it to choose which frames are sent, and the reachback engine to send back frames lost on the way"
+description = "Sends each camera frame, with the GPS fix it was taken at, to a SwiftMap mapping server, and reports the next-flight area it plans as a KML. For each viewpoint in that plan, it asks the reachback engine for the frame already taken closest to it, and sends that frame to the server too"
 
 [[args]]
 name = "server"
@@ -20,12 +20,6 @@ name = "jpeg_quality"
 type = "number"
 description = "JPEG quality (1-100) RawFrames are encoded at before they are forwarded; JPEG EncodedFrames are forwarded as they are"
 default = 95
-
-[[args]]
-name = "gap_timeout"
-type = "number"
-description = "Seconds to wait for frames lost on the way, which the JPEG encoder's frame numbers show, to be sent back before the frames after them are sent without them; 0 to send each frame as it arrives, in any order"
-default = 30.0
 
 [[args]]
 name = "max_output_size"

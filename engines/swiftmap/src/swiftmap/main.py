@@ -34,7 +34,6 @@ DEFAULTS = {
         "server": "localhost",
         "server_port": DEFAULT_PORT,
         "jpeg_quality": 95,
-        "gap_timeout": 30.0,
         "max_output_size": 1 << 20,
     },
     KEYFRAME_PLUGIN: {
@@ -83,9 +82,6 @@ def parse_args(plugin, content):
         args["jpeg_quality"] = int(args["jpeg_quality"])
         if not 1 <= args["jpeg_quality"] <= 100:
             raise ConfigError("jpeg_quality must be from 1 to 100")
-        args["gap_timeout"] = float(args["gap_timeout"])
-        if args["gap_timeout"] < 0:
-            raise ConfigError("gap_timeout must not be negative")
     return args
 
 
@@ -109,8 +105,8 @@ def run_reachback(name, args, stop):
 
 def run_swiftmap(name, args, stop):
     files_dir = os.environ.get("STEELEAGLE_FILES")
-    if args["gap_timeout"] > 0 and not files_dir:
-        logging.getLogger("swiftmap").warning("STEELEAGLE_FILES is not set; lost frames can't come back")
+    if not files_dir:
+        logging.getLogger("swiftmap").warning("STEELEAGLE_FILES is not set; frames can't come back")
     client = SwiftMapClient(args["server"], args["server_port"])
     # The engine comes up without the server, and connects on the first frame
     # it sends
@@ -120,8 +116,7 @@ def run_swiftmap(name, args, stop):
             args["server"], args["server_port"],
         )
     with Sender(client) as sender:
-        swiftmap = SwiftMap(sender, jpeg_quality=args["jpeg_quality"],
-                            gap_timeout=args["gap_timeout"], files_dir=files_dir)
+        swiftmap = SwiftMap(sender, jpeg_quality=args["jpeg_quality"], files_dir=files_dir)
         engine.run(name, swiftmap, max_output_size=args["max_output_size"], stop=stop)
 
 

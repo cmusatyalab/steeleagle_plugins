@@ -1,3 +1,4 @@
+import math
 import socket
 import struct
 import threading
@@ -83,18 +84,48 @@ def position(lat, lon, alt=10.0):
     )
 
 
-def numbered_frame(number):
+TARGET = (40.0, -79.0, 0.0)
+
+
+def near(east, north, up, origin=TARGET):
+    """(lat, lon, alt) `east`, `north` and `up` metres from `origin`."""
+    lat, lon, alt = origin
+    return (lat + north / 111_320.0, lon + east / (111_320.0 * math.cos(math.radians(lat))),
+            alt + up)
+
+
+def numbered_frame(number, gps=(40.0, -79.0, 10.0), yaw=0.0, pitch=-90.0):
     """A JPEG EncodedFrame numbered `number` as the JPEG encoder numbers them,
-    whose "JPEG" says its number, so the server shows the order frames came."""
+    whose "JPEG" says its number, so the server shows the order frames came,
+    taken at `gps` with the camera at `yaw` and `pitch` degrees."""
     return frame_pb2.EncodedFrame(
         encoded_data=f"jpeg-{number}".encode(), id=number, codec=frame_pb2.CODEC_JPEG,
-        position_info=position(40.0, -79.0),
+        position_info=position(*gps),
+        gimbal_info=telemetry_pb2.GimbalInfo(pose_neu=common_pb2.Pose(yaw=yaw, pitch=pitch)),
     )
 
 
-def numbered_input(number, seq=None, **id):
-    frame = numbered_frame(number)
+def numbered_input(number, seq=None, pose=None, **id):
+    frame = numbered_frame(number, **(pose or {}))
     return Input(ENCODED_FRAME_TYPE, frame.SerializeToString(), Id(number if seq is None else seq, **id))
+
+
+def plan_kml(*views):
+    """A next-flight KML as the SwiftMap server writes it, a pin for each
+    (position, target) and the area around them."""
+    pins = "".join(
+        f"<Placemark><name>v{i}</name><LookAt><longitude>{t[1]}</longitude>"
+        f"<latitude>{t[0]}</latitude><altitude>{t[2]}</altitude>"
+        f"<altitudeMode>absolute</altitudeMode></LookAt>"
+        f"<Point><altitudeMode>absolute</altitudeMode><coordinates>{p[1]},{p[0]},{p[2]}"
+        f"</coordinates></Point></Placemark>"
+        for i, (p, t) in enumerate(views))
+    area = ("<Placemark><name>nfn_flight_area</name><Polygon><outerBoundaryIs><LinearRing>"
+            "<coordinates>-79,40,0 -79.1,40,0 -79,40.1,0 -79,40,0</coordinates>"
+            "</LinearRing></outerBoundaryIs></Polygon></Placemark>")
+    return ('<?xml version="1.0" encoding="UTF-8"?>'
+            f'<kml xmlns="http://www.opengis.net/kml/2.2"><Document>{area}{pins}</Document></kml>'
+            ).encode()
 
 
 def numbers_received(server):
