@@ -217,9 +217,9 @@ class Reachback:
         self._waiting.clear()
 
     def _next(self, now):
-        """The next undelivered frame, then the end once nothing is out; None
-        if nothing is due or the link is down."""
-        if now - self._heard >= LINK_S:
+        """The next undelivered frame, then the end; None while one is out (so
+        a newer one never replaces it unsent), nothing is due, or the link is down."""
+        if now - self._heard >= LINK_S or self._waiting:
             return None
         while self.todo:
             out = self.todo.popleft()
@@ -266,9 +266,10 @@ class Reachback:
                 self._settle(id, delivered=False, counts=False)
 
     def on_input(self, input, now):
-        """FORWARD, DROP, or (output type, payload) to send in place of `input`."""
+        """FORWARD, DROP, or (output type, payload) to send in place of `input`.
+        No keyframes go while a request still has frames to send."""
         out = self._next(now)
-        if out is None and not self.holding:
+        if out is None and not self.holding and not self.todo:
             keep = self.keyframes.keep(input)
             self._store(input, now, sent=keep)
             return FORWARD if keep else DROP

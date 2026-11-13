@@ -149,21 +149,33 @@ def answering(store, keep=()):
     return rb
 
 
-def test_frames_covering_the_targets_are_sent_back_before_any_more_keyframes(store):
-    rb = answering(store, keep={22, 23})
+def test_frames_covering_the_targets_are_sent_back_one_at_a_time_before_any_more_keyframes(store):
+    rb = answering(store, keep={22, 23, 25})
     tell(rb, False, Request(7, [WEAK, WEAK], 2))
-    sent = [rb.on_input(numbered_input(n), 1.0) for n in (20, 21)]
-    assert [unstamped(a) for a in sent] == [(REACHBACK_FRAME_TYPE, 7, 0, 4),
-                                             (REACHBACK_FRAME_TYPE, 7, 1, 3)]
-    # The end waits for word that both arrived; keyframes go meanwhile
-    assert rb.on_input(numbered_input(22), 1.0) == FORWARD
-    report(rb, RESULT, 20, 21)
+    assert unstamped(rb.on_input(numbered_input(20), 1.0)) == (REACHBACK_FRAME_TYPE, 7, 0, 4)
+    # The next waits for word of the first, so it is never replaced unsent; no keyframes meanwhile
+    assert rb.on_input(numbered_input(22), 1.0) == DROP
+    report(rb, RESULT, 20)
+    assert unstamped(rb.on_input(numbered_input(21), 1.0)) == (REACHBACK_FRAME_TYPE, 7, 1, 3)
+    # Every frame is out: the end waits for word of the last, and keyframes go meanwhile
+    assert rb.on_input(numbered_input(25), 1.0) == FORWARD
+    report(rb, RESULT, 21)
     assert unstamped(rb.on_input(numbered_input(24), 1.0)) == (REACHBACK_DONE_TYPE, 7, 2, None)
     report(rb, RESULT, 24)
     assert not rb.busy
     assert rb.on_input(numbered_input(23), 1.0) == FORWARD
     unsent = store.unsent("camera", 1)[1]
     assert 20 in unsent and 3 not in unsent and 4 not in unsent
+
+
+def test_a_skipped_frame_is_not_given_up_while_frames_go_one_at_a_time(store):
+    rb = answering(store)
+    tell(rb, True, Request(1, [WEAK, WEAK], 2))
+    first = rb.on_input(numbered_input(20), 1.0)
+    for seq in range(21, 21 + 3 * MAX_TRIES):
+        assert rb.on_input(numbered_input(seq), 1.0) == DROP
+    report(rb, RESULT, 20)
+    assert rb.on_input(numbered_input(40), 1.0) not in (DROP, first)
 
 
 def test_a_request_sends_at_most_its_count_and_the_end_even_with_none(store):
@@ -457,7 +469,7 @@ def test_an_nfn_round_holds_keyframes_and_sends_frames_back_through_the_flow(ser
     assert POLL in server.kinds
 
 
-def test_a_frame_sent_back_that_times_out_is_sent_again_and_reaches_the_server_once(server):
+def test_a_frame_sent_back_that_times_out_still_reaches_the_server_once(server):
     server.replies.extend([NFN_HOLD, PLAN])
     store = FrameStore()
     rb = RecordingReachback(store, Keyframes({0}), interval=0)
@@ -471,9 +483,9 @@ def test_a_frame_sent_back_that_times_out_is_sent_again_and_reaches_the_server_o
             send_until_done(send, server, first=4, wait=False)
     finally:
         store.close()
-    # The first frame sent back timed out while the swiftmap engine stalled,
-    # so it went again; the engine passed it on once all the same
-    assert rb.sent_back.count(0) > 1
+    # The first frame sent back timed out while the swiftmap engine stalled;
+    # sent again or not, the engine passed each frame on once, in order
+    assert rb.sent_back[-1] == "end" and rb.sent_back.count("end") == 1
     received = numbers_received(server)
     assert received[:2] == [0, 1] and len(received) == len(set(received))
     assert server.kinds.count(REACHBACK_DONE) == 1
