@@ -1,24 +1,24 @@
 [plugin]
 name = "SwiftMap Reachback"
 type = "engine"
-description = "Keyframe selection and reach back for SwiftMap, on the vehicle. Stores frames with where the camera was and where it looked, and forwards only keyframes. When the swiftmap engine on the remote daemon asks for frames covering the weak targets of a plan, keyframe selection pauses and the stored frames that cover them are sent in the flow instead, each sent again if it does not arrive, then keyframe selection resumes. Put it right after the JPEG encoder"
+description = "SwiftMap on the vehicle, after preprocess: forwards keyframes and sends back stored frames covering the weak targets of the swiftmap engine's plans"
 
 [[args]]
 name = "remote"
 type = "string"
-description = "Service name of the swiftmap engine on the remote daemon, whose requests it answers"
+description = "Service name of the swiftmap engine on the remote daemon"
 default = "swiftmap"
 
 [[args]]
 name = "send_distance"
 type = "number"
-description = "Forward at most one keyframe per this many meters of travel; 0 to not check distance. Frames without a GPS fix are dropped unless it is 0"
+description = "Meters of travel between keyframes forwarded; frames without a GPS fix are dropped. 0 turns this off"
 default = 5.0
 
 [[args]]
 name = "min_disparity"
 type = "number"
-description = "Optical-flow disparity from the last keyframe, in pixels at the frame's resolution, a frame needs to be the next keyframe; 0 to not check it. It means what the server's SWIFTMAP_MIN_DISPARITY does"
+description = "Optical-flow disparity from the last keyframe, in px at the frame's resolution, that makes the next keyframe. 0 turns this off"
 default = 40.0
 
 [[args]]
@@ -30,7 +30,5 @@ default = 6237184
 [engine]
 type = "filter"
 inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]
-# No result: a keyframe is forwarded unchanged and any other frame dropped;
-# while frames are sent back, each frame's place carries one of them
-# (swiftmap/ReachbackFrame, an EncodedFrame stamped with the request), then a
-# swiftmap/ReachbackDone
+# No result: keyframes forwarded, others dropped; frames sent back
+# (swiftmap/ReachbackFrame, then swiftmap/ReachbackDone) take incoming frames' places

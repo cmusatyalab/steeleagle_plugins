@@ -1,0 +1,39 @@
+[plugin]
+name = "SwiftMap Preprocess"
+type = "engine"
+description = "SwiftMap on the vehicle, after the camera: crops and resizes each frame to the VGGT-Omega model input and sends it as WebP; lossless, the model input is exactly the server's"
+
+[[args]]
+name = "image_resolution"
+type = "number"
+description = "The server's VGGT_OMEGA_IMAGE_RESOLUTION"
+default = 512
+
+[[args]]
+name = "patch_size"
+type = "number"
+description = "Model patch size in pixels"
+default = 16
+
+[[args]]
+name = "lossless"
+type = "boolean"
+description = "Send lossless WebP; false for lossy WebP at quality"
+default = true
+
+[[args]]
+name = "quality"
+type = "number"
+description = "WebP quality, 0-100, when not lossless"
+default = 90
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest frame sent, in bytes"
+default = 6237184
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# No result: each frame is replaced by its WebP EncodedFrame at the model input size

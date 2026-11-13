@@ -1,7 +1,7 @@
 [plugin]
 name = "SwiftMap"
 type = "engine"
-description = "Sends each camera frame, with the GPS fix it was taken at, to a SwiftMap mapping server, and reports the next-flight area it plans as a KML. For each plan, it asks the reachback engine for frames already taken that cover its weak targets, and sends those to the server too, marked as frames sent back"
+description = "SwiftMap on the remote daemon: sends each preprocessed frame and its GPS to a SwiftMap server, reports its next-flight KML, and turns its plans into reachback requests"
 
 [[args]]
 name = "server"
@@ -16,21 +16,14 @@ description = "TCP port of the SwiftMap mapping server"
 default = 43322
 
 [[args]]
-name = "jpeg_quality"
-type = "number"
-description = "JPEG quality (1-100) RawFrames are encoded at before they are forwarded; JPEG EncodedFrames are forwarded as they are"
-default = 95
-
-[[args]]
 name = "max_output_size"
 type = "number"
-description = "Largest result sent, in bytes; a planned area's KML over it is not reported"
+description = "Largest result sent, in bytes; a larger KML is not reported"
 default = 1048576
 
 [engine]
 type = "generic"
 inputs = [
-    "steeleagle_protocol/v1/messages/frame/RawFrame",
     "steeleagle_protocol/v1/messages/frame/EncodedFrame",
     "swiftmap/ReachbackFrame",
     "swiftmap/ReachbackDone",

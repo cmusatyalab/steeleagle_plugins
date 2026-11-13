@@ -9,13 +9,13 @@ import pytest
 from steeleagle_protocol.v1.common import common_pb2
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from steeleagle_protocol.v1.messages.telemetry import telemetry_pb2
-from swiftmap.client import GPS_FMT, KIND_FMT, PAYLOAD_LEN_FMT, REPLY_FMT, SIZE_FMT
-from swiftmap.engine import ENCODED_FRAME_TYPE
+from swiftmap.remote import GPS_FMT, KIND_FMT, PAYLOAD_LEN_FMT, REPLY_FMT, SIZE_FMT
+from swiftmap.protocol import ENCODED_FRAME_TYPE
 
 
 class FakeServer:
     """A stand-in SwiftMap server. It accepts one connection at a time,
-    records each (jpeg, gps) it gets and the kind of every message, and
+    records each (image, gps) it gets and the kind of every message, and
     replies with a keyframe status and the KML queued for it, if any."""
 
     def __init__(self):
@@ -44,12 +44,12 @@ class FakeServer:
             with conn:
                 while (head := self._recv_exact(conn, 4)) is not None:
                     (n,) = struct.unpack(SIZE_FMT, head)
-                    jpeg = self._recv_exact(conn, n)
+                    image = self._recv_exact(conn, n)
                     gps = struct.unpack(GPS_FMT, self._recv_exact(conn, 24))
                     (kind,) = struct.unpack(KIND_FMT, self._recv_exact(conn, 1))
                     self.kinds.append(kind)
-                    if jpeg:
-                        self.received.append((jpeg, gps))
+                    if image:
+                        self.received.append((image, gps))
                     kml = self.replies.pop(0) if self.replies else b""
                     conn.sendall(
                         struct.pack(REPLY_FMT, 1.0, len(self.received), len(self.received))
@@ -100,12 +100,17 @@ def near(east, north, up, origin=TARGET):
             alt + up)
 
 
+WEBP_HEADER = b"RIFF\0\0\0\0WEBP"
+
+
 def numbered_frame(number, gps=(40.0, -79.0, 10.0), yaw=0.0, pitch=-90.0):
-    """A JPEG EncodedFrame numbered `number` as the JPEG encoder numbers them,
-    whose "JPEG" says its number, so the server shows the order frames came,
-    taken at `gps` with the camera at `yaw` and `pitch` degrees."""
+    """A WebP EncodedFrame numbered `number`, as the preprocess engine sends
+    one, whose "WebP" is a header and its number, so the server shows the
+    order frames came, taken at `gps` with the camera at `yaw` and `pitch`
+    degrees."""
     return frame_pb2.EncodedFrame(
-        encoded_data=f"jpeg-{number}".encode(), id=number, codec=frame_pb2.CODEC_JPEG,
+        encoded_data=WEBP_HEADER + f"frame-{number}".encode(), id=number,
+        codec=frame_pb2.CODEC_UNSPECIFIED,
         position_info=position(*gps),
         gimbal_info=telemetry_pb2.GimbalInfo(pose_neu=common_pb2.Pose(yaw=yaw, pitch=pitch)),
     )
@@ -138,4 +143,5 @@ def plan_kml(*views, count=0):
 
 def numbers_received(server):
     """The numbers of the numbered frames the server got, in order."""
-    return [int(jpeg.decode().removeprefix("jpeg-")) for jpeg, _ in server.received]
+    return [int(image.removeprefix(WEBP_HEADER).decode().removeprefix("frame-"))
+            for image, _ in server.received]

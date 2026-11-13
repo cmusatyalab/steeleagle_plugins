@@ -15,11 +15,13 @@ import uriel
 from conftest import TARGET, Id, Input, near, numbered_frame, numbered_input, numbers_received, plan_kml
 
 from steeleagle_protocol.v1.messages.frame import frame_pb2
-from swiftmap import engine, reachback
-from swiftmap.client import FRAME, POLL, REACHBACK, REACHBACK_DONE, SwiftMapClient
-from swiftmap.engine import (
-    ENCODED_FRAME_TYPE, NFN_HOLD, NFN_RELEASE, REACHBACK_DONE_TYPE, REACHBACK_FRAME_TYPE,
-    STATUS_TYPE, Request, Sender, SwiftMap, encode_status, unstamp,
+from swiftmap import reachback, remote
+from swiftmap.protocol import (
+    ENCODED_FRAME_TYPE, REACHBACK_DONE_TYPE, REACHBACK_FRAME_TYPE, STATUS_TYPE, Request,
+    encode_status, unstamp,
+)
+from swiftmap.remote import (
+    FRAME, NFN_HOLD, NFN_RELEASE, POLL, REACHBACK, REACHBACK_DONE, Sender, SwiftMap, SwiftMapClient,
 )
 from swiftmap.main import REACHBACK_PLUGIN, ConfigError, parse_args
 from swiftmap.reachback import (
@@ -315,8 +317,8 @@ PLAN = plan_kml((near(0, -15, 10), TARGET), count=2)
 class StallingSwiftMap(SwiftMap):
     """Takes `stall_s` over the first frame sent back, as a slow link would."""
 
-    def __init__(self, sender, *, jpeg_quality, stall_s):
-        super().__init__(sender, jpeg_quality=jpeg_quality)
+    def __init__(self, sender, *, stall_s):
+        super().__init__(sender)
         self.stall_s = stall_s
 
     def on_input(self, input):
@@ -344,8 +346,8 @@ class RecordingReachback(Reachback):
 
 def serve_swiftmap(name, port, stop, ready, stall_s):
     with Sender(SwiftMapClient("127.0.0.1", port)) as sender:
-        swiftmap = StallingSwiftMap(sender, jpeg_quality=90, stall_s=stall_s)
-        engine.run(name, swiftmap, max_output_size=MAX_BYTES, stop=stop, on_ready=ready.set)
+        swiftmap = StallingSwiftMap(sender, stall_s=stall_s)
+        remote.run(name, swiftmap, max_output_size=MAX_BYTES, stop=stop, on_ready=ready.set)
 
 
 def serve_reachback(name, remote, rb, stop, ready):

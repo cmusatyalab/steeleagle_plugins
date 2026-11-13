@@ -10,11 +10,13 @@ import pytest
 from conftest import Id, Input, numbered_frame, numbered_input, numbers_received, plan_kml, position
 
 from steeleagle_protocol.v1.messages.frame import frame_pb2
-from swiftmap.client import FRAME, POLL, REACHBACK, REACHBACK_DONE, SwiftMapClient
-from swiftmap.engine import (
-    ENCODED_FRAME_TYPE, NFN_HOLD, NFN_RELEASE, POLL_S, RAW_FRAME_TYPE, REACHBACK_DONE_TYPE,
-    REACHBACK_FRAME_TYPE, STATUS_S, FrameError, Request, Sender, SwiftMap, decode_status,
-    encode_status, read_plan, stamp, unstamp,
+from swiftmap.protocol import (
+    ENCODED_FRAME_TYPE, RAW_FRAME_TYPE, REACHBACK_DONE_TYPE, REACHBACK_FRAME_TYPE, FrameError,
+    Request, decode_status, encode_status, stamp, unstamp,
+)
+from swiftmap.remote import (
+    FRAME, NFN_HOLD, NFN_RELEASE, POLL, POLL_S, REACHBACK, REACHBACK_DONE, STATUS_S, Sender,
+    SwiftMap, SwiftMapClient, read_plan,
 )
 from swiftmap.main import SWIFTMAP_PLUGIN, ConfigError, parse_args
 
@@ -22,46 +24,39 @@ KML = b"<kml>next flight</kml>"
 VIEW = ((40.0, -79.0, 15.0), (40.0001, -79.0, 0.0))
 
 
-def raw_input(seq, gps=None, width=32, height=24):
-    frame = frame_pb2.RawFrame(
-        data=np.full((height, width, 3), 120, dtype=np.uint8).tobytes(),
-        h_res=width, v_res=height, channels=3, id=seq,
-    )
+def webp_input(seq, gps=None, width=32, height=24):
+    """A WebP EncodedFrame, as the preprocess engine sends one."""
+    webp = cv2.imencode(".webp", np.full((height, width, 3), 120, dtype=np.uint8),
+                        [cv2.IMWRITE_WEBP_QUALITY, 101])[1].tobytes()
+    frame = frame_pb2.EncodedFrame(encoded_data=webp, id=seq, codec=frame_pb2.CODEC_UNSPECIFIED)
     if gps is not None:
         frame.position_info.CopyFrom(position(*gps))
-    return Input(RAW_FRAME_TYPE, frame.SerializeToString(), Id(seq))
-
-
-def jpeg_input(seq, gps, codec=frame_pb2.CODEC_JPEG):
-    jpeg = cv2.imencode(".jpg", np.zeros((8, 8, 3), dtype=np.uint8))[1].tobytes()
-    frame = frame_pb2.EncodedFrame(
-        encoded_data=jpeg, id=seq, codec=codec, position_info=position(*gps)
-    )
-    return Input(ENCODED_FRAME_TYPE, frame.SerializeToString(), Id(seq)), jpeg
+    return Input(ENCODED_FRAME_TYPE, frame.SerializeToString(), Id(seq)), webp
 
 
 def swiftmap(server):
     """The engine, sending each frame as it gets it, so the server has it
     when on_input returns."""
-    return SwiftMap(Sender(SwiftMapClient("127.0.0.1", server.port)), jpeg_quality=90)
+    return SwiftMap(Sender(SwiftMapClient("127.0.0.1", server.port)))
 
 
-def test_raw_frames_go_to_the_server_as_jpegs_with_their_gps(server):
-    swiftmap(server).on_input(raw_input(1, (40.0, -79.0, 12.0)))
-    [(jpeg, gps)] = server.received
-    assert gps == (40.0, -79.0, 12.0) and server.kinds == [FRAME]
-    assert cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR).shape == (24, 32, 3)
-
-
-def test_jpeg_frames_go_to_the_server_as_they_are(server):
-    input, jpeg = jpeg_input(1, (40.0, -79.0))
+def test_webp_frames_go_to_the_server_as_they_are_with_their_gps(server):
+    input, webp = webp_input(1, (40.0, -79.0, 12.0))
     swiftmap(server).on_input(input)
-    assert server.received[0][0] == jpeg
+    [(image, gps)] = server.received
+    assert image == webp and gps == (40.0, -79.0, 12.0) and server.kinds == [FRAME]
 
 
-def test_h264_frames_are_not_sent(server):
-    input, _ = jpeg_input(1, (40.0, -79.0), codec=frame_pb2.CODEC_H264)
-    swiftmap(server).on_input(input)
+def test_jpeg_h264_and_raw_frames_are_not_sent(server):
+    jpeg = cv2.imencode(".jpg", np.zeros((8, 8, 3), dtype=np.uint8))[1].tobytes()
+    engine = swiftmap(server)
+    for seq, (data, codec) in enumerate([(jpeg, frame_pb2.CODEC_JPEG),
+                                         (b"\0\0\1", frame_pb2.CODEC_H264)], 1):
+        frame = frame_pb2.EncodedFrame(encoded_data=data, id=seq, codec=codec,
+                                       position_info=position(40.0, -79.0))
+        engine.on_input(Input(ENCODED_FRAME_TYPE, frame.SerializeToString(), Id(seq)))
+    raw = frame_pb2.RawFrame(data=bytes(8 * 8 * 3), h_res=8, v_res=8, channels=3, id=3)
+    engine.on_input(Input(RAW_FRAME_TYPE, raw.SerializeToString(), Id(3)))
     assert server.received == []
 
 
@@ -69,7 +64,7 @@ def test_what_the_server_sends_back_is_kept_in_order(server):
     server.replies.extend([NFN_HOLD, KML])
     engine = swiftmap(server)
     for n in range(3):
-        engine.on_input(raw_input(n, (40.0, -79.0)))
+        engine.on_input(webp_input(n, (40.0, -79.0))[0])
     assert engine.sender.take_replies() == [NFN_HOLD, KML]
     assert engine.sender.take_replies() == []
 
@@ -82,16 +77,16 @@ def test_a_planned_area_is_the_next_result(server):
 
 
 def test_a_frame_without_a_fix_is_sent_with_a_nan_one(server):
-    swiftmap(server).on_input(raw_input(1))
+    swiftmap(server).on_input(webp_input(1)[0])
     [(_, gps)] = server.received
     assert all(math.isnan(v) for v in gps)
 
 
 def test_the_engine_reconnects_when_the_server_drops_the_connection(server):
     engine = swiftmap(server)
-    engine.on_input(raw_input(1, (40.0, -79.0)))
+    engine.on_input(webp_input(1, (40.0, -79.0))[0])
     engine.sender.client.sock.shutdown(socket.SHUT_RDWR)
-    engine.on_input(raw_input(2, (41.0, -79.0)))
+    engine.on_input(webp_input(2, (41.0, -79.0))[0])
     assert len(server.received) == 2
 
 
@@ -100,13 +95,13 @@ def test_an_unreachable_server_maps_nothing():
     port = listener.getsockname()[1]
     listener.close()
     sender = Sender(SwiftMapClient("127.0.0.1", port))
-    SwiftMap(sender, jpeg_quality=90).on_input(raw_input(1, (40.0, -79.0)))
+    SwiftMap(sender).on_input(webp_input(1, (40.0, -79.0))[0])
     assert sender.sent == 0
 
 
 def test_a_started_sender_sends_on_its_own_thread(server):
     with Sender(SwiftMapClient("127.0.0.1", server.port)) as sender:
-        engine = SwiftMap(sender, jpeg_quality=90)
+        engine = SwiftMap(sender)
         for n in (1, 2, 5, 3):
             engine.on_input(numbered_input(n))
     assert numbers_received(server) == [1, 2, 5, 3]
@@ -154,7 +149,7 @@ def test_a_payload_too_short_to_be_stamped_is_not_sent(server):
     assert server.kinds == []
     with pytest.raises(FrameError):
         unstamp(b"short")
-    assert unstamp(stamp(7, 2, b"jpeg")) == (7, 2, b"jpeg")
+    assert unstamp(stamp(7, 2, b"image")) == (7, 2, b"image")
 
 
 def test_a_plan_has_targets_and_a_count():
@@ -238,8 +233,6 @@ def test_a_status_says_whether_to_hold_and_the_request():
 
 def test_args_are_defaulted_and_checked():
     args = parse_args(SWIFTMAP_PLUGIN, '{"server": "mapper"}')
-    assert (args["server"], args["server_port"], args["jpeg_quality"]) == ("mapper", 43322, 95)
+    assert (args["server"], args["server_port"]) == ("mapper", 43322)
     with pytest.raises(ConfigError):
         parse_args(SWIFTMAP_PLUGIN, '{"server": ""}')
-    with pytest.raises(ConfigError):
-        parse_args(SWIFTMAP_PLUGIN, '{"jpeg_quality": 0}')
