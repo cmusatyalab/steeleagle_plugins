@@ -15,6 +15,12 @@ description = "Play the video once, then stop the plugin, instead of looping it 
 default = false
 
 [[args]]
+name = "pad_after"
+type = "boolean"
+description = "With no_loop, keep sending blank (black) frames at 30 fps after the video ends, until the camera is no longer asked for, instead of stopping the plugin"
+default = false
+
+[[args]]
 name = "decoder"
 type = "string"
 description = "H.264 decoder of the video, in gst-launch syntax; its output must be NV12, I420 or RGB, and is converted to RGB on the CPU after it (e.g. \"qtic2vdec\" with the native environment)"

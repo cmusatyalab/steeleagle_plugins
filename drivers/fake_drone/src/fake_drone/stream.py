@@ -1,5 +1,6 @@
 """Stream Service of the fake drone: replays an .mp4 file as its camera,
-looping it, or, with no_loop, playing it once and then stopping the plugin.
+looping it, or, with no_loop, playing it once and then stopping the plugin,
+or, with pad_after too, sending blank frames at 30 fps after it ends.
 
 The vehicle calls StreamCameras when a flow is pushed, so the video plays
 from its start each time the camera is asked for, as an experiment's trial
@@ -11,6 +12,9 @@ there's no telemetry stream: StreamTelemetry starts nothing.
 """
 import logging
 import threading
+import time
+
+import numpy as np
 
 import grpc
 
@@ -30,6 +34,11 @@ CAPTURE_RETRY_DELAY = 1.0
 MAX_FAILED_READS = 10
 # Name of the fake camera, matching fake_drone.plugin.toml
 CAMERA_NAME = 'rgb'
+# Framerate of the blank frames sent after the video ends, with pad_after
+PAD_FPS = 30
+# (height, width) of the blank frames if the video gave none to match, as
+# the camera's resolution in fake_drone.plugin.toml
+PAD_DEFAULT_SHAPE = (720, 1280)
 
 RESOLUTION_DIMENSIONS = {
     stream_proto.RESOLUTION_360P: (640, 360),
@@ -43,15 +52,21 @@ RESOLUTION_DIMENSIONS = {
 class Stream(StreamServiceServicer):
     """Stream Service implementation. `telemetry` is the vmeta.Telemetry
     recorded in the video, which goes with each frame, or None. Unless
-    `loop`, the video plays once, and then `on_end` is called."""
+    `loop`, the video plays once, and then `on_end` is called, or, if
+    `pad_after`, blank frames are sent at PAD_FPS until the playback is
+    stopped."""
 
-    def __init__(self, video_path, decoder, telemetry=None, loop=True, on_end=None):
+    def __init__(self, video_path, decoder, telemetry=None, loop=True, on_end=None,
+                 pad_after=False):
         self.video_path = video_path
         # H.264 decoder of the video, in gst-launch syntax
         self.decoder = decoder
         self.telemetry = telemetry
         self.loop = loop
         self.on_end = on_end
+        self.pad_after = pad_after
+        # (height, width) of the last frame read, which blank frames match
+        self._frame_shape = None
         self._capture_lock = threading.Lock()
         self._grabber_thread = None
         # Set to stop the current playback
@@ -83,9 +98,11 @@ class Stream(StreamServiceServicer):
     def _grab_frames(self, stop):
         """Reads the video until `stop` is set, reopening it whenever it fails
         to open or stops giving frames, or, unless looping, until it ends, and
-        then calls on_end. The publisher is used only here, on this thread.
+        then calls on_end, or, with pad_after, sends blank frames until `stop`
+        is set. The publisher is used only here, on this thread.
         """
         ended = False
+        padded = False
         try:
             while not stop.is_set():
                 cap = GstCapture(self.video_path, self.decoder, loop=self.loop)
@@ -104,11 +121,14 @@ class Stream(StreamServiceServicer):
                     logger.warning(f'video could not be opened; retrying in {CAPTURE_RETRY_DELAY} s')
                 cap.release()
                 stop.wait(CAPTURE_RETRY_DELAY)
+            if ended and self.pad_after:
+                padded = True
+                self._send_blank_frames(stop)
         finally:
             if self._raw_frames is not None:
                 self._raw_frames.close()
                 self._raw_frames = None
-        if not ended:
+        if not ended or padded:
             logger.info('video stopped')
             return
         logger.info('video ended')
@@ -145,6 +165,7 @@ class Stream(StreamServiceServicer):
                 failed_reads += 1
                 continue
             failed_reads = 0
+            self._frame_shape = frame.shape[:2]
             self._update_publisher()
             if self._raw_frames is None:
                 continue
@@ -155,6 +176,30 @@ class Stream(StreamServiceServicer):
                 self._raw_frames.publish(frame, position_info, gimbal_info)
             except Exception as e:
                 logger.warning(f'raw frame could not be published, reason: {e}')
+
+    def _send_blank_frames(self, stop):
+        """Publishes black frames, the size of the video's, at PAD_FPS until
+        `stop` is set, if the vehicle asks for the camera."""
+        height, width = self._frame_shape or PAD_DEFAULT_SHAPE
+        blank = np.zeros((height, width, 3), dtype=np.uint8)
+        logger.info(f'video ended; sending {width}x{height} blank frames at {PAD_FPS} fps')
+        period = 1.0 / PAD_FPS
+        deadline = time.monotonic()
+        while not stop.is_set():
+            self._update_publisher()
+            if self._raw_frames is not None:
+                try:
+                    self._raw_frames.publish(blank)
+                except Exception as e:
+                    logger.warning(f'blank frame could not be published, reason: {e}')
+            deadline += period
+            delay = deadline - time.monotonic()
+            if delay < 0:
+                # Fell behind, e.g. on a slow publish: skip the missed frames
+                # rather than sending them in a burst
+                deadline = time.monotonic()
+                delay = 0
+            stop.wait(delay)
 
     def StreamCameras(self, request, context):
         # The fake drone has one camera, so it is streamed if it is requested,

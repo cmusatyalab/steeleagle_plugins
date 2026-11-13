@@ -51,6 +51,9 @@ def main():
     video_path = find_video(video)
     decoder = args.get('decoder') or DEFAULT_DECODER
     loop = not _flag(args.get('no_loop', False))
+    pad_after = _flag(args.get('pad_after', False))
+    if pad_after and loop:
+        logger.warning('pad_after has no effect without no_loop: a looping video never ends')
 
     # Read before the socket exists, so that a recording without telemetry
     # is reported before the daemon connects
@@ -70,17 +73,20 @@ def main():
 
     logger.info(f'replaying {video_path} {"in a loop" if loop else "once"}, '
                 f'decoding with {decoder!r}, '
-                f'{"with" if telemetry is not None else "without"} telemetry')
+                f'{"with" if telemetry is not None else "without"} telemetry'
+                f'{", padding with blank frames after it ends" if pad_after and not loop else ""}')
     server = grpc.server(
         thread_pool=futures.ThreadPoolExecutor(max_workers=10)
     )
 
     def on_end():
-        # With no_loop, the plugin stops once the video has played
+        # With no_loop, the plugin stops once the video has played, unless
+        # pad_after keeps it sending blank frames
         logger.info('video finished; stopping the plugin')
         server.stop(grace=1)
 
-    stream = Stream(video_path, decoder, telemetry, loop=loop, on_end=on_end)
+    stream = Stream(video_path, decoder, telemetry, loop=loop, on_end=on_end,
+                    pad_after=pad_after)
     add_StreamServiceServicer_to_server(stream, server)
     server.add_insecure_port(f'unix://{listen_address}')
     server.start()
