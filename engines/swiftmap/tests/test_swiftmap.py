@@ -13,8 +13,8 @@ from steeleagle_protocol.v1.messages.frame import frame_pb2
 from swiftmap.client import FRAME, POLL, REACHBACK, REACHBACK_DONE, SwiftMapClient
 from swiftmap.engine import (
     ENCODED_FRAME_TYPE, NFN_HOLD, NFN_RELEASE, POLL_S, RAW_FRAME_TYPE, REACHBACK_DONE_TYPE,
-    REACHBACK_FRAME_TYPE, Sender, SwiftMap, decode_request, encode_hold, encode_request,
-    read_plan,
+    REACHBACK_FRAME_TYPE, STATUS_S, FrameError, Request, Sender, SwiftMap, decode_status,
+    encode_status, read_plan, stamp, unstamp,
 )
 from swiftmap.main import SWIFTMAP_PLUGIN, ConfigError, parse_args
 
@@ -112,15 +112,49 @@ def test_a_started_sender_sends_on_its_own_thread(server):
     assert numbers_received(server) == [1, 2, 5, 3]
 
 
+def sent_back(request_id, number, frame_number):
+    frame = numbered_frame(frame_number).SerializeToString()
+    return Input(REACHBACK_FRAME_TYPE, stamp(request_id, number, frame), Id(9))
+
+
+def end_of(request_id, count):
+    return Input(REACHBACK_DONE_TYPE, stamp(request_id, count), Id(9))
+
+
 def test_frames_sent_back_and_their_end_go_to_the_server_marked(server):
     engine = swiftmap(server)
     engine.on_input(numbered_input(1))
-    for n in (7, 3):
-        frame = numbered_frame(n).SerializeToString()
-        engine.on_input(Input(REACHBACK_FRAME_TYPE, frame, Id(9)))
-    engine.on_input(Input(REACHBACK_DONE_TYPE, b"", Id(9)))
+    engine.on_reply(plan_kml(VIEW, count=2))
+    request_id = engine.request.id
+    engine.on_input(sent_back(request_id, 0, 7))
+    engine.on_input(sent_back(request_id, 1, 3))
+    engine.on_input(end_of(request_id, 2))
     assert numbers_received(server) == [1, 7, 3]
     assert server.kinds == [FRAME, REACHBACK, REACHBACK, REACHBACK_DONE]
+
+
+def test_what_is_sent_back_twice_late_or_for_an_old_request_is_dropped(server):
+    engine = swiftmap(server)
+    engine.on_reply(plan_kml(VIEW, count=2))
+    old = engine.request.id
+    engine.on_reply(plan_kml(VIEW, count=2))
+    current = engine.request.id
+    for input in (sent_back(old, 0, 5), sent_back(current, 0, 7), sent_back(current, 0, 7),
+                  end_of(old, 1), end_of(current, 2), end_of(current, 2),
+                  sent_back(current, 1, 8)):
+        engine.on_input(input)
+    assert numbers_received(server) == [7]
+    assert server.kinds == [REACHBACK, REACHBACK_DONE]
+
+
+def test_a_payload_too_short_to_be_stamped_is_not_sent(server):
+    engine = swiftmap(server)
+    engine.on_input(Input(REACHBACK_FRAME_TYPE, b"short", Id(9)))
+    engine.on_input(Input(REACHBACK_DONE_TYPE, b"", Id(9)))
+    assert server.kinds == []
+    with pytest.raises(FrameError):
+        unstamp(b"short")
+    assert unstamp(stamp(7, 2, b"jpeg")) == (7, 2, b"jpeg")
 
 
 def test_a_plan_has_targets_and_a_count():
@@ -130,19 +164,42 @@ def test_a_plan_has_targets_and_a_count():
         read_plan(b"not xml")
 
 
-def test_a_plan_asks_for_frames_covering_its_targets(server):
+def test_a_plan_with_targets_and_a_count_is_the_request(server):
     engine = swiftmap(server)
     engine.on_input(numbered_input(4))
     engine.on_reply(plan_kml(VIEW, VIEW, count=3))
+    hold, request = decode_status(engine.take_status(0.0))
+    assert not hold and (request.targets, request.count) == ([list(VIEW[1])] * 2, 3)
     engine.on_reply(plan_kml(VIEW))
+    assert decode_status(engine.take_status(0.0)) == (False, None)
+    engine.on_reply(plan_kml(VIEW, count=1))
     engine.on_reply(b"not xml")
-    [(id, payload)] = engine.take_requests()
-    assert id.seq == 4
-    assert decode_request(payload) == ([list(VIEW[1])] * 2, 3, None)
-    assert engine.take_requests() == []
+    assert engine.request is None
 
 
-def test_a_hold_and_release_are_passed_on_and_it_polls_while_held(server):
+def test_request_ids_are_new_after_a_restart(server):
+    engine = swiftmap(server)
+    engine.on_reply(plan_kml(VIEW, count=1))
+    restarted = swiftmap(server)
+    restarted.on_reply(plan_kml(VIEW, count=1))
+    assert restarted.request.id > engine.request.id
+
+
+def test_the_status_is_told_at_once_on_a_change_and_every_second_once_nfn_starts(server):
+    engine = swiftmap(server)
+    engine.on_input(numbered_input(4))
+    assert engine.take_status(0.0) is None
+    engine.on_reply(NFN_HOLD)
+    assert decode_status(engine.take_status(0.0)) == (True, None)
+    assert engine.take_status(STATUS_S / 2) is None
+    assert decode_status(engine.take_status(STATUS_S)) == (True, None)
+    engine.on_reply(NFN_RELEASE)
+    assert decode_status(engine.take_status(STATUS_S)) == (False, None)
+    assert engine.take_status(STATUS_S * 1.5) is None
+    assert decode_status(engine.take_status(STATUS_S * 2)) == (False, None)
+
+
+def test_a_hold_and_release_are_kept_and_it_polls_while_held(server):
     engine = swiftmap(server)
     engine.on_input(numbered_input(4))
     engine.on_reply(NFN_HOLD)
@@ -153,18 +210,30 @@ def test_a_hold_and_release_are_passed_on_and_it_polls_while_held(server):
     engine.poll(engine.sender.last_sent + POLL_S)
     assert not engine.holding
     assert server.kinds == [FRAME, POLL]
-    assert [decode_request(p)[2] for _, p in engine.take_requests()] == [True, False]
 
 
-def test_requests_name_targets_and_a_count_or_a_hold():
-    targets = [list(VIEW[1])]
-    assert json.loads(encode_request(targets, 3)) == {"targets": targets, "count": 3}
-    assert decode_request(encode_request(targets, 3)) == (targets, 3, None)
-    assert decode_request(encode_hold(True)) == ([], 0, True)
-    for bad in (b"[]", b"{}", b'{"targets": [[1, 2]], "count": 1}',
-                b'{"targets": [], "count": -1}', b"\xff"):
+def test_a_hold_or_release_withdraws_the_request(server):
+    engine = swiftmap(server)
+    engine.on_reply(NFN_HOLD)
+    engine.on_reply(plan_kml(VIEW, count=1))
+    assert engine.request is not None
+    engine.on_reply(NFN_RELEASE)
+    assert engine.request is None
+
+
+def test_a_status_says_whether_to_hold_and_the_request():
+    request = Request(7, [list(VIEW[1])], 3)
+    assert json.loads(encode_status(True, request)) == {
+        "hold": True, "request": {"id": 7, "targets": [list(VIEW[1])], "count": 3}}
+    assert decode_status(encode_status(True, request)) == (True, request)
+    assert decode_status(encode_status(False, None)) == (False, None)
+    for bad in (b"[]", b"{}", b'{"hold": 1, "request": null}',
+                b'{"hold": true, "request": {"id": 1, "targets": [[1, 2]], "count": 1}}',
+                b'{"hold": true, "request": {"id": 1, "targets": [], "count": -1}}',
+                b'{"hold": true, "request": {"id": -1, "targets": [], "count": 1}}',
+                b"\xff"):
         with pytest.raises(ValueError):
-            decode_request(bad)
+            decode_status(bad)
 
 
 def test_args_are_defaulted_and_checked():

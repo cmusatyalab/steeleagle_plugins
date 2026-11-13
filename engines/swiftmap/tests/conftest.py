@@ -68,8 +68,10 @@ def server():
     s.close()
 
 
-@dataclass
+@dataclass(frozen=True)
 class Id:
+    """An input id; hashable, as uriel's is, since reachback keys sends by it."""
+
     seq: int
     producer: str = "camera"
     session: int = 1

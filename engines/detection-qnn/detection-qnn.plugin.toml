@@ -1,7 +1,7 @@
 [plugin]
 name = "QNN Object Detection"
 type = "engine"
-description = "Quantized YOLO on the Tachyon's HTP; detects COCO objects in camera frames"
+description = "Quantized YOLO on a Qualcomm HTP (Tachyon) or Hexagon v66 DSP (QRB5165); detects COCO objects in camera frames"
 
 [[args]]
 name = "model"
@@ -18,7 +18,7 @@ default = ""
 [[args]]
 name = "backend"
 type = "string"
-description = "Path to the QNN HTP backend .so, relative to the plugin folder"
+description = "Path to the QNN backend .so, relative to the plugin folder: libs/libQnnHtp.so for the HTP (Tachyon), or libs/libQnnDsp.so for the Hexagon v66 DSP (QRB5165, e.g. VOXL 2), which needs a model quantized to 8 bits throughout"
 default = "libs/libQnnHtp.so"
 
 [[args]]
@@ -62,6 +62,12 @@ name = "early_discard"
 type = "boolean"
 description = "Drop frames with no detections instead of forwarding them to the next engines"
 default = false
+
+[[args]]
+name = "letterbox_interpolation"
+type = "string"
+description = "How frames are resized to the model's input: \"linear\" (bilinear, as Ultralytics resizes) or \"area\" (area averaging, slower)"
+default = "linear"
 
 [engine]
 type = "detection"
