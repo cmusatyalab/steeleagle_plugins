@@ -48,6 +48,16 @@ export function formatSeconds(s) {
     return ms < WHOLE_MS_FROM ? `${ms.toFixed(1)} ms` : `${Math.round(ms)} ms`;
 }
 
+// A time Prometheus estimated from a histogram's buckets (a median or p95),
+// marked as approximate.
+export function formatEstimate(s) {
+    return s == null ? NONE : `≈${formatSeconds(s)}`;
+}
+
+// Why the medians and p95s are approximate, for where they are shown.
+export const ESTIMATE_NOTE =
+    'Medians and p95s (≈) are estimated from histogram buckets, so a time anywhere in a wide bucket reads about the same; means are exact.';
+
 export function formatShare(x) {
     return x == null ? NONE : `${Math.round(x * PERCENT)}%`;
 }

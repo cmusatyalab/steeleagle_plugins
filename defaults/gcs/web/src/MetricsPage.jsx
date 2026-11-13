@@ -7,7 +7,9 @@ import MetricsNode from './MetricsNode.jsx';
 import { flowCanvasThemeVars } from './canvasTheme.js';
 import { displayName } from './vehicleNames.js';
 import { getApiUrl } from './urls.js';
-import { DEFAULT_WINDOW, POLL_INTERVAL_MS, WINDOWS, formatSeconds, formatShare, toReactFlow } from './metricsView.js';
+import {
+    DEFAULT_WINDOW, ESTIMATE_NOTE, POLL_INTERVAL_MS, WINDOWS, formatEstimate, formatSeconds, formatShare, toReactFlow,
+} from './metricsView.js';
 import '@xyflow/react/dist/style.css';
 
 const nodeTypes = { metrics: MetricsNode };
@@ -80,10 +82,10 @@ function MetricsPage({ vehicles, theme, active }) {
             {view?.end_to_end && (
                 <div className="mb-2">
                     <div style={{ fontSize: 14 }}>
-                        Capture → GCS: <b>p50 {formatSeconds(view.end_to_end.p50_seconds)} · p95 {formatSeconds(view.end_to_end.p95_seconds)}</b>
+                        Capture → GCS: <b>mean {formatSeconds(view.end_to_end.mean_seconds)} · p50 {formatEstimate(view.end_to_end.p50_seconds)} · p95 {formatEstimate(view.end_to_end.p95_seconds)}</b>
                     </div>
                     <div style={{ fontSize: 11, opacity: 0.65 }}>
-                        Engine times don't add up to this: capture, transfer and queueing aren't engine time.
+                        Engine times don't add up to this: capture, transfer and queueing aren't engine time. {ESTIMATE_NOTE}
                     </div>
                 </div>
             )}

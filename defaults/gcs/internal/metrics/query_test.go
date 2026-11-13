@@ -48,9 +48,12 @@ func scalar(value float64) model.Vector {
 }
 
 // Answers distinguish the queries by a part only that query has; skipped
-// comes before inputs/s, whose metric it also uses.
+// comes before inputs/s, and the means before busy, whose metrics they also
+// use.
 func encoderAnswers() []answer {
 	return []answer{
+		{"uriel_engine_processing_latency_seconds_count", model.Vector{sample(encoder, 0.059)}},
+		{"rate(gcs_frame_age_seconds_sum", scalar(0.151)},
 		{"histogram_quantile(0.5, sum by (le, engine_id)", model.Vector{sample(encoder, 0.082)}},
 		{"histogram_quantile(0.95, sum by (le, engine_id)", model.Vector{sample(encoder, math.NaN())}},
 		{`outcome="skipped"`, model.Vector{sample(encoder, 0.59)}},
@@ -95,13 +98,23 @@ func TestFillReadsEachEnginesNumbers(t *testing.T) {
 	if m == nil {
 		t.Fatal("encoder has no metrics")
 	}
-	for name, got := range map[string]*float64{"p50": m.P50, "inputs/s": m.InputsPerSecond, "skipped": m.Skipped, "busy": m.Busy} {
+	for name, got := range map[string]*float64{"mean": m.Mean, "p50": m.P50, "inputs/s": m.InputsPerSecond, "skipped": m.Skipped, "busy": m.Busy} {
 		if got == nil {
-			t.Errorf("%s is null", name)
+			t.Fatalf("%s is null", name)
 		}
 	}
-	if *m.P50 != 0.082 || *m.InputsPerSecond != 12.2 || *m.Skipped != 0.59 || *m.Busy != 0.98 {
-		t.Errorf("encoder metrics = p50 %v, inputs/s %v, skipped %v, busy %v", *m.P50, *m.InputsPerSecond, *m.Skipped, *m.Busy)
+	if *m.Mean != 0.059 || *m.P50 != 0.082 || *m.InputsPerSecond != 12.2 || *m.Skipped != 0.59 || *m.Busy != 0.98 {
+		t.Errorf("encoder metrics = mean %v, p50 %v, inputs/s %v, skipped %v, busy %v",
+			*m.Mean, *m.P50, *m.InputsPerSecond, *m.Skipped, *m.Busy)
+	}
+}
+
+func TestMeanIsTheHistogramsSumOverItsCount(t *testing.T) {
+	got := meanQuery("h", `{vehicle="v"}`, " by (engine_id)", "1m")
+
+	want := `sum by (engine_id) (rate(h_sum{vehicle="v"}[1m])) / sum by (engine_id) (rate(h_count{vehicle="v"}[1m]))`
+	if got != want {
+		t.Errorf("meanQuery = %q, want %q", got, want)
 	}
 }
 
@@ -128,17 +141,25 @@ func TestFillReadsEndToEndForTheVehicle(t *testing.T) {
 
 	v := filled(t, prom, "1m")
 
-	if v.EndToEnd == nil || v.EndToEnd.P50 == nil || *v.EndToEnd.P50 != 0.144 || *v.EndToEnd.P95 != 0.181 {
-		t.Fatalf("end to end = %+v, want p50 0.144, p95 0.181", v.EndToEnd)
+	e2e := v.EndToEnd
+	if e2e == nil || e2e.Mean == nil || e2e.P50 == nil || e2e.P95 == nil ||
+		*e2e.Mean != 0.151 || *e2e.P50 != 0.144 || *e2e.P95 != 0.181 {
+		t.Fatalf("end to end = %+v, want mean 0.151, p50 0.144, p95 0.181", e2e)
 	}
-	var vehicleQueries int
+	var quantileQueries, meanQueries int
 	for _, q := range prom.queries {
-		if strings.Contains(q, "histogram_quantile") && strings.Contains(q, `vehicle="`+fakeDrone+`"`) {
-			vehicleQueries++
+		if !strings.Contains(q, `vehicle="`+fakeDrone+`"`) {
+			continue
+		}
+		if strings.Contains(q, "histogram_quantile") {
+			quantileQueries++
+		} else if strings.Contains(q, "rate(gcs_frame_age_seconds_sum") {
+			meanQueries++
 		}
 	}
-	if vehicleQueries != 2 {
-		t.Errorf("%d end-to-end quantile queries select the vehicle, want 2 (p50 and p95)", vehicleQueries)
+	if quantileQueries != 2 || meanQueries != 1 {
+		t.Errorf("end-to-end queries selecting the vehicle: %d quantile, %d mean; want 2 (p50 and p95) and 1",
+			quantileQueries, meanQueries)
 	}
 }
 
