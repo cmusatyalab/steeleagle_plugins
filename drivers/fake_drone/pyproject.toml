@@ -9,7 +9,7 @@ dependencies = [
     "opencv-python-headless>=5.0.0.93",
     "protobuf>=7.35.1",
     "steeleagle-protocol>=0.3.4",
-    "uriel>=0.2.0",
+    "uriel>=0.3.1",
 ]
 
 [project.scripts]
@@ -21,7 +21,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64", "linux-aarch64"]
+platforms = [
+    { name = "linux-64-glibc-2-27", platform = "linux-64", glibc = "2.27" },
+    { name = "linux-aarch64-glibc-2-27", platform = "linux-aarch64", glibc = "2.27" },
+]
 
 [tool.pixi.dependencies]
 python = "3.11.*"
@@ -48,7 +51,7 @@ gst-libav = "*"
 # to the directory holding the device's plugins; their libraries are found in
 # the system library directories.
 [tool.pixi.feature.native]
-platforms = ["linux-aarch64"]
+platforms = ["linux-aarch64-glibc-2-27"]
 
 [tool.pixi.feature.native.activation.env]
 GST_PLUGIN_PATH = "/usr/lib/aarch64-linux-gnu/gstreamer-1.0"
