@@ -27,7 +27,7 @@ The remote engine is unreachable when it disconnects, times out on an input,
 or answers an input after the grace period that started with the local answer
 (or has not answered when it ends, in remote-only). A remote engine that
 skips an input, because it was still busy with an earlier one, is not
-unreachable; in remote-only the input is then dropped with no result.
+unreachable; in remote-only the input then falls back to the local answer.
 
 A check compares the highest-confidence detection of the tracked class in each
 answer. They agree if both have one and the intersection over union of their
@@ -421,12 +421,10 @@ class CopTracking:
             return self._report(id, track, self.local, "remote was late")
         if self.remote in track.failed:
             why = track.failed[self.remote]
-            # A remote that skipped the input (it was busy) is reachable, and
-            # the local answer is not trusted. Otherwise (it timed out or
-            # disconnected, which already switched to local-only unless on a
-            # newer input, or its events were lost) fall back to local
-            if why == SKIPPED:
-                return self._report(id, track, None, f"remote {why}")
+            # Fall back to local when the remote has no answer: it skipped the
+            # input (it was busy, but is still reachable), timed out or
+            # disconnected (which already switched to local-only unless on a
+            # newer input), or its events were lost
             if local is not None:
                 return self._report(id, track, self.local, f"remote {why}")
             if self.local in track.failed or self.clock() >= self._timeout_at_ns:

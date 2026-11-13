@@ -247,8 +247,18 @@ def test_remote_skipping_is_not_unreachable(cop, clock):
     cop.begin(input_id(3))
     result(cop, LOCAL, 3, BAD)
     cop.on_event(make_event(K.SKIPPED, REMOTE, 3))
-    # Local is not trusted, and remote had nothing for this input
-    assert decided(cop, 3) == b"<drop>"
+    # Remote had nothing for this input, so fall back to local
+    assert decided(cop, 3) == BAD
+    assert cop.mode == Mode.REMOTE_ONLY
+
+
+def test_remote_skipping_waits_for_local(cop, clock):
+    to_remote_only(cop, clock)
+    cop.begin(input_id(3))
+    cop.on_event(make_event(K.SKIPPED, REMOTE, 3))
+    assert decided(cop, 3) is None
+    result(cop, LOCAL, 3, BAD)
+    assert decided(cop, 3) == BAD
     assert cop.mode == Mode.REMOTE_ONLY
 
 
