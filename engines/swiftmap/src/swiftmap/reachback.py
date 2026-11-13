@@ -1,38 +1,38 @@
-"""The reachback engine: stores frames, with where the camera was and where it
-looked, and forwards every frame. It subscribes to the swiftmap engine on the
-remote daemon, and for each weak target that engine asks about, transfers the
-stored frame that sees the target closest to the centre of its view to that
-daemon as a file (reachback-<n>.frame), outside the flow. Put it after the
-JPEG encoder and before the keyframe engine, so it sees every frame."""
+"""The reachback engine, on the vehicle: keyframe selection for SwiftMap, and
+reach back. It stores frames with where the camera was and where it looked,
+forwards keyframes (early_discard.KeyframeFilter) and drops the rest.
+
+It subscribes to the swiftmap engine on the remote daemon. When that engine
+asks for the frames covering the weak targets of a plan, keyframe selection
+pauses: each frame that comes in is only stored, and its place in the flow
+carries the next frame sent back (REACHBACK_FRAME_TYPE), then a
+REACHBACK_DONE_TYPE once all are sent. Then keyframe selection resumes. Put it
+right after the JPEG encoder."""
 
 import logging
 import math
-import queue
 import sqlite3
-import threading
 import time
 
-import grpc
 import numpy as np
 import uriel
 from google.protobuf.message import DecodeError
 
 from steeleagle_protocol.v1.messages.frame import frame_pb2
-from steeleagle_protocol.v1.services.daemon import transfer_pb2, transfer_pb2_grpc
-from swiftmap.engine import ENCODED_FRAME_TYPE, REQUEST_TYPE, decode_request, frame_filename, frame_gps
+from swiftmap.engine import (
+    ENCODED_FRAME_TYPE, REACHBACK_DONE_TYPE, REACHBACK_FRAME_TYPE, REQUEST_TYPE, FrameError,
+    decode_request, frame_gps,
+)
 
 logger = logging.getLogger("swiftmap.reachback")
 
 POLL_INTERVAL_S = 0.1
-MAX_OUTPUT_SIZE = 4096
-CHUNK_SIZE = 1 << 20
-ROUTE_HEADER = "x-route-key"
-TRANSFER_TIMEOUT_S = 120.0
 KEEP_FRAMES = 6000
 STORE_INTERVAL_S = 0.2
 HALF_FOV_DEG = 25.0
 MAX_DISTANCE_M = 50.0
 M_PER_DEG = 111_320.0
+FORWARD, DROP = "forward", "drop"
 
 
 def frame_pose(frame):
@@ -91,11 +91,12 @@ class FrameStore:
     def close(self):
         self._db.close()
 
-    def add(self, producer, session, number, pose, data):
+    def add(self, producer, session, number, pose, data, sent=False):
         with self._db:
             row = self._db.execute(
-                "INSERT INTO frames (producer, session, number, lat, lon, alt, yaw, pitch, data) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (producer, str(session), number, *pose, data),
+                "INSERT INTO frames (producer, session, number, lat, lon, alt, yaw, pitch, sent, "
+                "data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (producer, str(session), number, *pose, int(sent), data),
             ).lastrowid
             self._db.execute("DELETE FROM frames WHERE rowid <= ?", (row - self.keep,))
 
@@ -116,95 +117,66 @@ class FrameStore:
             return self._db.execute("SELECT data FROM frames WHERE rowid = ?", (rowid,)).fetchone()[0]
 
 
-def chunks(name, data, chunk_size=CHUNK_SIZE):
-    total = max(1, -(-len(data) // chunk_size))
-    for i in range(total):
-        yield transfer_pb2.TransferFileRequest(
-            chunk=data[i * chunk_size:(i + 1) * chunk_size], number=i + 1, total=total, filename=name,
-        )
-
-
-class Transfer:
-    """Sends files to the daemon `route` with the TransferService of the local
-    daemon at `socket_path`, one at a time on its own thread."""
-
-    def __init__(self, socket_path, route):
-        self.socket_path = socket_path
-        self.route = route
-        self._queue = queue.Queue()
-        self._thread = threading.Thread(target=self._run, name="transfer", daemon=True)
-
-    def __enter__(self):
-        self._thread.start()
-        return self
-
-    def __exit__(self, *_):
-        self._queue.put(None)
-        self._thread.join(TRANSFER_TIMEOUT_S)
-
-    def send(self, name, data):
-        self._queue.put((name, data))
-
-    def _run(self):
-        with grpc.insecure_channel(f"unix://{self.socket_path}") as channel:
-            stub = transfer_pb2_grpc.TransferServiceStub(channel)
-            while (item := self._queue.get()) is not None:
-                name, data = item
-                try:
-                    for _ in stub.TransferFile(chunks(name, data), timeout=TRANSFER_TIMEOUT_S,
-                                               metadata=[(ROUTE_HEADER, self.route)]):
-                        pass
-                    logger.info("transferred %s (%d bytes) to %s", name, len(data), self.route)
-                except grpc.RpcError as err:
-                    logger.warning("failed to transfer %s to %s: %s: %s",
-                                   name, self.route, err.code().name, err.details())
-
-
 class Reachback:
     """Stores a frame with a camera pose every `interval` seconds per camera,
-    and sends the frames covering the targets asked about with
-    `transfer(name, data)`."""
+    and every keyframe `keyframes` keeps, as sent. Sends the frames asked for
+    in place of the frames coming in, before any more keyframes."""
 
-    def __init__(self, store, transfer, interval=STORE_INTERVAL_S):
+    def __init__(self, store, keyframes, interval=STORE_INTERVAL_S):
         self.store = store
-        self.transfer = transfer
+        self.keyframes = keyframes
         self.interval = interval
+        self.queue = []
         self._last_stored = {}
 
+    def on_request(self, id, payload):
+        """Queues the frames covering the targets asked about, round-robin up
+        to the count asked for; ValueError if `payload` is not a request."""
+        targets, count = decode_request(payload)
+        rowids, numbers, poses = self.store.unsent(id.producer, id.session)
+        chosen, taken = [], set()
+        while len(chosen) < count:
+            before = len(chosen)
+            for target in targets[:count - len(chosen)]:
+                i = covering(poses, numbers, target, taken)
+                if i is not None:
+                    taken.add(int(numbers[i]))
+                    chosen.append(rowids[i])
+            if len(chosen) == before:
+                break
+        self.queue = ([(REACHBACK_FRAME_TYPE, self.store.take(r)) for r in chosen]
+                      + [(REACHBACK_DONE_TYPE, b"done")])
+        logger.info("sending %d frames back for %d targets", len(chosen), len(targets))
+
     def on_input(self, input, now):
+        """FORWARD, DROP, or (output type, payload) to send in place of `input`.
+        Raises FrameError if it is not a frame the keyframe filter reads."""
+        if self.queue:
+            self._store(input, now, sent=False)
+            return self.queue.pop(0)
+        keep = self.keyframes.keep(input)
+        self._store(input, now, sent=keep)
+        return FORWARD if keep else DROP
+
+    def _store(self, input, now, sent):
         stream = (input.id.producer, input.id.session)
-        if input.payload_type.replace(".", "/") != ENCODED_FRAME_TYPE or (
-                now - self._last_stored.get(stream, float("-inf")) < self.interval):
+        due = now - self._last_stored.get(stream, float("-inf")) >= self.interval
+        if not (sent or due) or input.payload_type.replace(".", "/") != ENCODED_FRAME_TYPE:
             return
         data = bytes(input.data)
         try:
             frame = frame_pb2.EncodedFrame.FromString(data)
-        except DecodeError as err:
-            logger.warning("input %d: bad EncodedFrame (%s); not stored", input.id.seq, err)
+        except DecodeError:
             return
         pose = frame_pose(frame)
         if pose is not None:
-            self.store.add(*stream, frame.id, pose, data)
+            self.store.add(*stream, frame.id, pose, data, sent)
             self._last_stored[stream] = now
 
-    def on_request(self, id, payload):
-        """Sends the frame covering each target asked about; ValueError if
-        `payload` is not a request."""
-        found, exclude = decode_request(payload)
-        rowids, numbers, poses = self.store.unsent(id.producer, id.session)
-        sent = []
-        for target in found:
-            i = covering(poses, numbers, target, exclude)
-            if i is not None:
-                self.transfer(frame_filename(numbers[i]), self.store.take(rowids[i]))
-                exclude.add(int(numbers[i]))
-                sent.append(int(numbers[i]))
-        logger.info("sending frames %s for %d targets", sent, len(found))
 
-
-def run(name, reachback, remote, *, stop, on_ready=None):
+def run(name, reachback, remote, *, max_output_size, stop, on_ready=None):
     """Serves the engine `name`, answering the engine `remote`, until `stop` is set."""
-    with uriel.Engine(name, max_output_size=MAX_OUTPUT_SIZE) as engine:
+    with uriel.Engine(name, max_output_size=max_output_size) as engine:
         engine.subscribe(remote)
         logger.info("engine %s ready; answering %s", name, remote)
         if on_ready is not None:
@@ -224,7 +196,18 @@ def run(name, reachback, remote, *, stop, on_ready=None):
             if input is None:
                 continue
             try:
-                reachback.on_input(input, time.monotonic())
+                action = reachback.on_input(input, time.monotonic())
+            except FrameError as err:
+                logger.warning("input %d: %s; dropping it", input.id.seq, err)
+                action = DROP
             except Exception:
-                logger.exception("input %d: failed to store it", input.id.seq)
-            engine.forward()
+                logger.exception("input %d: failed to handle it; dropping it", input.id.seq)
+                action = DROP
+            if action == FORWARD:
+                engine.forward()
+            elif action == DROP:
+                engine.drop()
+            else:
+                output_type, payload = action
+                engine.loan()[:len(payload)] = payload
+                engine.replace(len(payload), output_type=output_type)

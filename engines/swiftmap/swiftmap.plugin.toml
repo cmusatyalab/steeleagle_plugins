@@ -1,7 +1,7 @@
 [plugin]
 name = "SwiftMap"
 type = "engine"
-description = "Sends each camera frame, with the GPS fix it was taken at, to a SwiftMap mapping server, and reports the next-flight area it plans as a KML. For the weak target each viewpoint of that plan looks at, it asks the reachback engine for the frame already taken that covers it, and sends that frame to the server too"
+description = "Sends each camera frame, with the GPS fix it was taken at, to a SwiftMap mapping server, and reports the next-flight area it plans as a KML. For each plan, it asks the reachback engine for frames already taken that cover its weak targets, and sends those to the server too, marked as frames sent back"
 
 [[args]]
 name = "server"
@@ -32,6 +32,8 @@ type = "generic"
 inputs = [
     "steeleagle_protocol/v1/messages/frame/RawFrame",
     "steeleagle_protocol/v1/messages/frame/EncodedFrame",
+    "swiftmap/ReachbackFrame",
+    "swiftmap/ReachbackDone",
 ]
 # The frame is forwarded unchanged. Its result is empty, or the bare KML of the
 # next-flight area the server planned since the last frame, which the vehicle

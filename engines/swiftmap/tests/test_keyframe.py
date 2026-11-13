@@ -1,26 +1,21 @@
-"""Tests of the keyframe engine (early discard): the tracker ported from the
-SwiftMap server, the per-producer filter with its distance check, and the
-engine end to end through a real Uriel server."""
+"""Tests of the keyframe filter (early discard) the reachback engine runs: the
+tracker ported from the SwiftMap server, and the per-producer filter with its
+distance check."""
 
-import queue
-import threading
-import uuid
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
 import pytest
-import uriel
 
 from steeleagle_protocol.v1.common import common_pb2
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from steeleagle_protocol.v1.messages.telemetry import telemetry_pb2
 from swiftmap.early_discard import (
-    NO_FIX, NOT_KEYFRAME, TOO_CLOSE, KeyframeFilter, haversine_m, run, to_gray,
+    NO_FIX, NOT_KEYFRAME, TOO_CLOSE, KeyframeFilter, haversine_m, to_gray,
 )
 from swiftmap.engine import ENCODED_FRAME_TYPE, RAW_FRAME_TYPE, FrameError
 from swiftmap.keyframe import FrameTracker
-from swiftmap.main import KEYFRAME_PLUGIN, ConfigError, parse_args
 
 WIDTH, HEIGHT = 320, 240
 # A blurred-noise scene, larger than a frame; each frame is a crop of it, so
@@ -180,103 +175,3 @@ def test_payload_types_may_be_written_with_dots():
     f = KeyframeFilter(min_disparity=10, send_distance=0)
     assert f.keep(Input(RAW_FRAME_TYPE.replace("/", "."), raw_frame(view(0)), Id(1)))
 
-
-def test_keyframe_args_are_defaulted_and_checked():
-    args = parse_args(KEYFRAME_PLUGIN, "")
-    assert (args["min_disparity"], args["send_distance"]) == (40.0, 5.0)
-    args = parse_args(KEYFRAME_PLUGIN, '{"min_disparity": 0, "send_distance": 0}')
-    assert (args["min_disparity"], args["send_distance"]) == (0.0, 0.0)
-    with pytest.raises(ConfigError):
-        parse_args(KEYFRAME_PLUGIN, '{"min_disparity": -1}')
-    with pytest.raises(ConfigError):
-        parse_args(KEYFRAME_PLUGIN, '{"send_distance": -1}')
-
-
-MAX_BYTES = 1 << 20
-TIMEOUT_S = 10.0
-FLOW_SPEC = """
-[[producers]]
-name = "{producer}"
-tokens = 2
-
-[[engines]]
-name = "{keyframe}"
-location = "local"
-
-[[engines]]
-name = "{sink}"
-location = "local"
-
-[[edges]]
-from = "{producer}"
-to = "{keyframe}"
-timeout = "5s"
-
-[[edges]]
-from = "{keyframe}"
-to = "{sink}"
-timeout = "5s"
-"""
-
-
-def serve_sink(name, stop, ready, received):
-    with uriel.Engine(name, max_output_size=MAX_BYTES) as engine:
-        ready.set()
-        while not stop.is_set():
-            input = engine.next(0.05)
-            if input is not None:
-                received.put(frame_pb2.RawFrame.FromString(bytes(input.data)).id)
-                engine.drop()
-
-
-def outcome_of(subscription, seq):
-    """What the engine subscribed to did with the input `seq`."""
-    while (event := subscription.next(TIMEOUT_S)) is not None:
-        if event.kind == uriel.EventKind.RESULT and event.id.seq == seq:
-            return event.outcome
-    raise AssertionError(f"no result for input {seq}")
-
-
-def test_only_keyframes_reach_the_next_engine():
-    suffix = uuid.uuid4().hex[:8]
-    producer_name, keyframe_name, sink_name = f"camera-{suffix}", f"keyframe-{suffix}", f"sink-{suffix}"
-    stop = threading.Event()
-    received = queue.Queue()
-    sink_ready, keyframe_ready = threading.Event(), threading.Event()
-    threads = [
-        threading.Thread(target=serve_sink, args=(sink_name, stop, sink_ready, received), daemon=True),
-        threading.Thread(
-            target=run, args=(keyframe_name, KeyframeFilter(min_disparity=10, send_distance=0)),
-            kwargs={"stop": stop, "on_ready": keyframe_ready.set}, daemon=True,
-        ),
-    ]
-    for thread in threads:
-        thread.start()
-    assert sink_ready.wait(TIMEOUT_S) and keyframe_ready.wait(TIMEOUT_S)
-
-    with (
-        uriel.Server(f"server-{suffix}") as server,
-        uriel.Client(f"client-{suffix}", f"server-{suffix}") as client,
-        uriel.Producer(producer_name, input_type=RAW_FRAME_TYPE, max_input_size=MAX_BYTES) as producer,
-        uriel.Subscription.engine(keyframe_name) as events,
-    ):
-        server.add_engine(keyframe_name)
-        server.add_engine(sink_name)
-        client.add_producer(producer_name)
-        client.add_flow(
-            f"flow-{suffix}",
-            FLOW_SPEC.format(producer=producer_name, keyframe=keyframe_name, sink=sink_name),
-        )
-        try:
-            # One at a time, so none is skipped for a newer one
-            outcomes = [
-                outcome_of(events, producer.send(raw_frame(view(x), id)))
-                for id, x in enumerate([0, 4, 30])
-            ]
-            assert outcomes == [uriel.Outcome.FORWARD, uriel.Outcome.DROP, uriel.Outcome.FORWARD]
-            assert [received.get(timeout=TIMEOUT_S) for _ in range(2)] == [0, 2]
-            assert received.empty()
-        finally:
-            stop.set()
-            for thread in threads:
-                thread.join(TIMEOUT_S)

@@ -9,19 +9,20 @@ import pytest
 from steeleagle_protocol.v1.common import common_pb2
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from steeleagle_protocol.v1.messages.telemetry import telemetry_pb2
-from swiftmap.client import GPS_FMT, PAYLOAD_LEN_FMT, REPLY_FMT, SIZE_FMT
+from swiftmap.client import GPS_FMT, KIND_FMT, PAYLOAD_LEN_FMT, REPLY_FMT, SIZE_FMT
 from swiftmap.engine import ENCODED_FRAME_TYPE
 
 
 class FakeServer:
     """A stand-in SwiftMap server. It accepts one connection at a time,
-    records each (jpeg, gps) it gets, and replies with a keyframe status and
-    the KML queued for it, if any."""
+    records each (jpeg, gps) it gets and the kind of every message, and
+    replies with a keyframe status and the KML queued for it, if any."""
 
     def __init__(self):
         self.listener = socket.create_server(("127.0.0.1", 0))
         self.port = self.listener.getsockname()[1]
         self.received = []
+        self.kinds = []
         self.replies = []
         threading.Thread(target=self._serve, daemon=True).start()
 
@@ -45,7 +46,10 @@ class FakeServer:
                     (n,) = struct.unpack(SIZE_FMT, head)
                     jpeg = self._recv_exact(conn, n)
                     gps = struct.unpack(GPS_FMT, self._recv_exact(conn, 24))
-                    self.received.append((jpeg, gps))
+                    (kind,) = struct.unpack(KIND_FMT, self._recv_exact(conn, 1))
+                    self.kinds.append(kind)
+                    if jpeg:
+                        self.received.append((jpeg, gps))
                     kml = self.replies.pop(0) if self.replies else b""
                     conn.sendall(
                         struct.pack(REPLY_FMT, 1.0, len(self.received), len(self.received))
@@ -110,9 +114,10 @@ def numbered_input(number, seq=None, pose=None, **id):
     return Input(ENCODED_FRAME_TYPE, frame.SerializeToString(), Id(number if seq is None else seq, **id))
 
 
-def plan_kml(*views):
+def plan_kml(*views, count=0):
     """A next-flight KML as the SwiftMap server writes it, a pin for each
-    (position, target) and the area around them."""
+    (position, target), the area around them, and how many frames to send
+    back for them."""
     pins = "".join(
         f"<Placemark><name>v{i}</name><LookAt><longitude>{t[1]}</longitude>"
         f"<latitude>{t[0]}</latitude><altitude>{t[2]}</altitude>"
@@ -123,9 +128,10 @@ def plan_kml(*views):
     area = ("<Placemark><name>nfn_flight_area</name><Polygon><outerBoundaryIs><LinearRing>"
             "<coordinates>-79,40,0 -79.1,40,0 -79,40.1,0 -79,40,0</coordinates>"
             "</LinearRing></outerBoundaryIs></Polygon></Placemark>")
+    data = f'<ExtendedData><Data name="reachback"><value>{count}</value></Data></ExtendedData>'
     return ('<?xml version="1.0" encoding="UTF-8"?>'
-            f'<kml xmlns="http://www.opengis.net/kml/2.2"><Document>{area}{pins}</Document></kml>'
-            ).encode()
+            f'<kml xmlns="http://www.opengis.net/kml/2.2"><Document>{data}{area}{pins}'
+            '</Document></kml>').encode()
 
 
 def numbers_received(server):

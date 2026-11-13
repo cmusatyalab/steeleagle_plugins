@@ -1,9 +1,9 @@
-"""The keyframe engine: early discard for SwiftMap. A frame is forwarded
-unchanged if it was taken at least send_distance meters from the last frame
-forwarded, and is a keyframe by the optical-flow test the SwiftMap server
-applies (swiftmap.keyframe). Every other frame is dropped where it was taken,
-so it never crosses the network. Each producer (camera) is tracked on its own,
-and starts over with each new session."""
+"""Early discard for SwiftMap, which the reachback engine runs on the
+vehicle. A frame is kept if it was taken at least send_distance meters from
+the last frame kept, and is a keyframe by the optical-flow test the SwiftMap
+server applies (swiftmap.keyframe). Every other frame is dropped where it was
+taken, so it never crosses the network. Each producer (camera) is tracked on
+its own, and starts over with each new session."""
 
 import logging
 import math
@@ -12,7 +12,6 @@ from collections import Counter
 
 import cv2
 import numpy as np
-import uriel
 
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from swiftmap.engine import FrameError, frame_gps, jpeg_bytes, read_frame, rgb_pixels
@@ -20,13 +19,8 @@ from swiftmap.keyframe import FrameTracker
 
 logger = logging.getLogger("swiftmap.keyframe")
 
-# How long the engine waits for an input before it checks whether to stop.
-POLL_INTERVAL_S = 0.1
 # Seconds between stats log lines.
 STATS_INTERVAL_S = 5.0
-# The engine only forwards and drops inputs, with no result, so it never
-# writes an output; Uriel still needs a bound.
-MAX_OUTPUT_SIZE = 4096
 
 EARTH_RADIUS_M = 6_371_000.0
 
@@ -143,30 +137,3 @@ class KeyframeFilter:
             self._last_dropped = self.dropped.copy()
             self._last_stats = now
 
-
-def run(name, keyframes, *, stop, on_ready=None):
-    """Serves the engine `name` until the threading.Event `stop` is set,
-    forwarding the frames the KeyframeFilter `keyframes` keeps and dropping
-    the rest."""
-    with uriel.Engine(name, max_output_size=MAX_OUTPUT_SIZE) as engine:
-        logger.info("engine %s ready; forwarding one frame per %.1f m, if its disparity from "
-                    "the last keyframe is over %.1f px", name, keyframes.send_distance,
-                    keyframes.min_disparity)
-        if on_ready is not None:
-            on_ready()
-        while not stop.is_set():
-            input = engine.next(POLL_INTERVAL_S)
-            if input is None:
-                continue
-            try:
-                keep = keyframes.keep(input)
-            except FrameError as err:
-                logger.warning("input %d: %s; dropping it", input.id.seq, err)
-                keep = False
-            except Exception:
-                logger.exception("input %d: failed to handle it; dropping it", input.id.seq)
-                keep = False
-            if keep:
-                engine.forward()
-            else:
-                engine.drop()

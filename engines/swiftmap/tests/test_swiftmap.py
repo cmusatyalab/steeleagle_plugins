@@ -10,10 +10,10 @@ import pytest
 from conftest import Id, Input, numbered_frame, numbered_input, numbers_received, plan_kml, position
 
 from steeleagle_protocol.v1.messages.frame import frame_pb2
-from swiftmap.client import SwiftMapClient
+from swiftmap.client import FRAME, REACHBACK, REACHBACK_DONE, SwiftMapClient
 from swiftmap.engine import (
-    ENCODED_FRAME_TYPE, RAW_FRAME_TYPE, Sender, SwiftMap, decode_request, encode_request,
-    frame_filename, targets,
+    ENCODED_FRAME_TYPE, RAW_FRAME_TYPE, REACHBACK_DONE_TYPE, REACHBACK_FRAME_TYPE, Sender,
+    SwiftMap, decode_request, encode_request, read_plan,
 )
 from swiftmap.main import SWIFTMAP_PLUGIN, ConfigError, parse_args
 
@@ -39,17 +39,16 @@ def jpeg_input(seq, gps, codec=frame_pb2.CODEC_JPEG):
     return Input(ENCODED_FRAME_TYPE, frame.SerializeToString(), Id(seq)), jpeg
 
 
-def swiftmap(server, files_dir=None):
+def swiftmap(server):
     """The engine, sending each frame as it gets it, so the server has it
     when on_input returns."""
-    return SwiftMap(Sender(SwiftMapClient("127.0.0.1", server.port)), jpeg_quality=90,
-                    files_dir=files_dir)
+    return SwiftMap(Sender(SwiftMapClient("127.0.0.1", server.port)), jpeg_quality=90)
 
 
 def test_raw_frames_go_to_the_server_as_jpegs_with_their_gps(server):
     swiftmap(server).on_input(raw_input(1, (40.0, -79.0, 12.0)))
     [(jpeg, gps)] = server.received
-    assert gps == (40.0, -79.0, 12.0)
+    assert gps == (40.0, -79.0, 12.0) and server.kinds == [FRAME]
     assert cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR).shape == (24, 32, 3)
 
 
@@ -104,69 +103,41 @@ def test_a_started_sender_sends_on_its_own_thread(server):
     assert numbers_received(server) == [1, 2, 5, 3]
 
 
-def test_targets_are_read_from_the_viewpoints_of_a_plan():
-    assert targets(plan_kml(VIEW)) == [list(VIEW[1])]
-    assert targets(KML) == []
-    with pytest.raises(ValueError):
-        targets(b"not xml")
-
-
-def test_a_plan_asks_for_the_frames_covering_its_targets(server):
+def test_frames_sent_back_and_their_end_go_to_the_server_marked(server):
     engine = swiftmap(server)
-    for n in (1, 4):
-        engine.on_input(numbered_input(n))
-    engine.on_kml(Id(4), plan_kml(VIEW, VIEW))
-    engine.on_kml(Id(4), b"<kml>no viewpoints</kml>")
+    engine.on_input(numbered_input(1))
+    for n in (7, 3):
+        frame = numbered_frame(n).SerializeToString()
+        engine.on_input(Input(REACHBACK_FRAME_TYPE, frame, Id(9)))
+    engine.on_input(Input(REACHBACK_DONE_TYPE, b"", Id(9)))
+    assert numbers_received(server) == [1, 7, 3]
+    assert server.kinds == [FRAME, REACHBACK, REACHBACK, REACHBACK_DONE]
+
+
+def test_a_plan_has_targets_and_a_count():
+    assert read_plan(plan_kml(VIEW, count=4)) == ([list(VIEW[1])], 4)
+    assert read_plan(KML) == ([], 0)
+    with pytest.raises(ValueError):
+        read_plan(b"not xml")
+
+
+def test_a_plan_asks_for_frames_covering_its_targets(server):
+    engine = swiftmap(server)
+    engine.on_kml(Id(4), plan_kml(VIEW, VIEW, count=3))
+    engine.on_kml(Id(4), plan_kml(VIEW))
     engine.on_kml(Id(4), b"not xml")
     [(id, payload)] = engine.take_requests()
     assert id.seq == 4
-    assert decode_request(payload) == ([list(VIEW[1])] * 2, {1, 4})
+    assert decode_request(payload) == ([list(VIEW[1])] * 2, 3)
     assert engine.take_requests() == []
 
 
-def test_a_new_session_forgets_the_frames_sent(server):
-    engine = swiftmap(server)
-    engine.on_input(numbered_input(1))
-    engine.on_input(numbered_input(2, session=2))
-    engine.on_kml(Id(2), plan_kml(VIEW))
-    [(_, payload)] = engine.take_requests()
-    assert decode_request(payload)[1] == {2}
-
-
-def send_back(files_dir, *numbers):
-    """Puts the frames in `files_dir` as the reachback engine sends them."""
-    for n in numbers:
-        (files_dir / frame_filename(n)).write_bytes(numbered_frame(n).SerializeToString())
-
-
-def test_frames_sent_back_are_sent_in_order_once(server, tmp_path):
-    engine = swiftmap(server, tmp_path)
-    engine.on_input(numbered_input(1))
-    send_back(tmp_path, 7, 3, 1)
-    engine.poll(0.0)
-    send_back(tmp_path, 3)
-    engine.poll(0.0)
-    engine.poll(1.0)
-    assert numbers_received(server) == [1, 3, 7]
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_other_files_are_left_alone_and_bad_frames_removed(server, tmp_path):
-    engine = swiftmap(server, tmp_path)
-    (tmp_path / "mission.zip").write_bytes(b"zip")
-    (tmp_path / frame_filename(2)).write_bytes(numbered_frame(7).SerializeToString())
-    (tmp_path / frame_filename(3)).write_bytes(b"\xff\xff")
-    engine.poll(0.0)
-    assert server.received == []
-    assert [p.name for p in tmp_path.iterdir()] == ["mission.zip"]
-
-
-def test_requests_name_targets_and_frames_to_leave_out():
-    found = [list(VIEW[1])]
-    assert json.loads(encode_request(found, {3, 1})) == {"targets": found, "exclude": [1, 3]}
-    assert decode_request(encode_request(found, {3})) == (found, {3})
-    for bad in (b"[]", b"{}", b'{"targets": [[1, 2]], "exclude": []}',
-                b'{"targets": [], "exclude": ["a"]}', b"\xff"):
+def test_requests_name_targets_and_a_count():
+    targets = [list(VIEW[1])]
+    assert json.loads(encode_request(targets, 3)) == {"targets": targets, "count": 3}
+    assert decode_request(encode_request(targets, 3)) == (targets, 3)
+    for bad in (b"[]", b"{}", b'{"targets": [[1, 2]], "count": 1}',
+                b'{"targets": [], "count": -1}', b"\xff"):
         with pytest.raises(ValueError):
             decode_request(bad)
 

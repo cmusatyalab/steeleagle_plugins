@@ -2,8 +2,7 @@
 
 eagled names the plugin to run in STEELEAGLE_PLUGIN, its args in
 STEELEAGLE_PLUGIN_ARGS (a JSON object), and the name to serve the engine as in
-STEELEAGLE_ENGINE_ENDPOINT. Reachback also uses STEELEAGLE_CLIENT_SOCKET and
-STEELEAGLE_REMOTE_QUALIFIER; swiftmap, STEELEAGLE_FILES.
+STEELEAGLE_ENGINE_ENDPOINT. Reachback also uses STEELEAGLE_REMOTE_QUALIFIER.
 """
 
 import json
@@ -15,15 +14,14 @@ import tempfile
 import threading
 from pathlib import Path
 
-from swiftmap import early_discard, engine, reachback
+from swiftmap import engine, reachback
 from swiftmap.client import DEFAULT_PORT, SwiftMapClient
 from swiftmap.early_discard import KeyframeFilter
 from swiftmap.engine import Sender, SwiftMap
 from swiftmap.keyframe import DEFAULT_MIN_DISPARITY
-from swiftmap.reachback import FrameStore, Reachback, Transfer
+from swiftmap.reachback import FrameStore, Reachback
 
 SWIFTMAP_PLUGIN = "swiftmap.plugin.toml"
-KEYFRAME_PLUGIN = "keyframe.plugin.toml"
 REACHBACK_PLUGIN = "reachback.plugin.toml"
 
 # Defaults of the args of each plugin, matching its plugin.toml. The daemon
@@ -36,17 +34,15 @@ DEFAULTS = {
         "jpeg_quality": 95,
         "max_output_size": 1 << 20,
     },
-    KEYFRAME_PLUGIN: {
-        "min_disparity": DEFAULT_MIN_DISPARITY,
-        "send_distance": 5.0,
-    },
     REACHBACK_PLUGIN: {
         "remote": "swiftmap",
+        "min_disparity": DEFAULT_MIN_DISPARITY,
+        "send_distance": 5.0,
+        "max_output_size": 6237184,
     },
 }
 REQUIRED = {
     SWIFTMAP_PLUGIN: ("server",),
-    KEYFRAME_PLUGIN: (),
     REACHBACK_PLUGIN: ("remote",),
 }
 
@@ -67,17 +63,15 @@ def parse_args(plugin, content):
     for name in REQUIRED[plugin]:
         if not str(args[name]).strip():
             raise ConfigError(f"the {name!r} arg must be set")
-    if plugin == KEYFRAME_PLUGIN:
-        args["min_disparity"] = float(args["min_disparity"])
-        if args["min_disparity"] < 0:
-            raise ConfigError("min_disparity must not be negative")
-        args["send_distance"] = float(args["send_distance"])
-        if args["send_distance"] < 0:
-            raise ConfigError("send_distance must not be negative")
+    args["max_output_size"] = int(args["max_output_size"])
+    if args["max_output_size"] <= 0:
+        raise ConfigError("max_output_size must be positive")
+    if plugin == REACHBACK_PLUGIN:
+        for name in ("min_disparity", "send_distance"):
+            args[name] = float(args[name])
+            if args[name] < 0:
+                raise ConfigError(f"{name} must not be negative")
     if plugin == SWIFTMAP_PLUGIN:
-        args["max_output_size"] = int(args["max_output_size"])
-        if args["max_output_size"] <= 0:
-            raise ConfigError("max_output_size must be positive")
         args["server_port"] = int(args["server_port"])
         args["jpeg_quality"] = int(args["jpeg_quality"])
         if not 1 <= args["jpeg_quality"] <= 100:
@@ -86,27 +80,24 @@ def parse_args(plugin, content):
 
 
 def run_reachback(name, args, stop):
-    socket_path = os.environ.get("STEELEAGLE_CLIENT_SOCKET")
     remote_ip = os.environ.get("STEELEAGLE_REMOTE_QUALIFIER")
-    if not socket_path or not remote_ip:
-        sys.exit("reachback needs STEELEAGLE_CLIENT_SOCKET and STEELEAGLE_REMOTE_QUALIFIER")
-    remote = f"{remote_ip}.{args['remote']}"
+    if not remote_ip:
+        sys.exit("reachback needs STEELEAGLE_REMOTE_QUALIFIER")
     # One database per service: a restart replaces it, however the last run ended
     path = Path(tempfile.gettempdir()) / f"swiftmap-reachback-{name}.sqlite3"
     path.unlink(missing_ok=True)
     store = FrameStore(str(path))
+    keyframes = KeyframeFilter(min_disparity=args["min_disparity"],
+                               send_distance=args["send_distance"])
     try:
-        with Transfer(socket_path, remote_ip) as transfer:
-            reachback.run(name, Reachback(store, transfer.send), remote, stop=stop)
+        reachback.run(name, Reachback(store, keyframes), f"{remote_ip}.{args['remote']}",
+                      max_output_size=args["max_output_size"], stop=stop)
     finally:
         store.close()
         path.unlink(missing_ok=True)
 
 
 def run_swiftmap(name, args, stop):
-    files_dir = os.environ.get("STEELEAGLE_FILES")
-    if not files_dir:
-        logging.getLogger("swiftmap").warning("STEELEAGLE_FILES is not set; frames can't come back")
     client = SwiftMapClient(args["server"], args["server_port"])
     # The engine comes up without the server, and connects on the first frame
     # it sends
@@ -116,7 +107,7 @@ def run_swiftmap(name, args, stop):
             args["server"], args["server_port"],
         )
     with Sender(client) as sender:
-        swiftmap = SwiftMap(sender, jpeg_quality=args["jpeg_quality"], files_dir=files_dir)
+        swiftmap = SwiftMap(sender, jpeg_quality=args["jpeg_quality"])
         engine.run(name, swiftmap, max_output_size=args["max_output_size"], stop=stop)
 
 
@@ -139,12 +130,7 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
 
-    if plugin == KEYFRAME_PLUGIN:
-        keyframes = KeyframeFilter(
-            min_disparity=args["min_disparity"], send_distance=args["send_distance"]
-        )
-        early_discard.run(name, keyframes, stop=stop)
-    elif plugin == REACHBACK_PLUGIN:
+    if plugin == REACHBACK_PLUGIN:
         run_reachback(name, args, stop)
     else:
         run_swiftmap(name, args, stop)
