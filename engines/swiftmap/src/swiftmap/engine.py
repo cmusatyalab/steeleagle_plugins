@@ -1,8 +1,8 @@
 """The swiftmap engine: forwards each frame unchanged and sends it, with its
 GPS fix, to the SwiftMap server as it arrives. A planned next-flight KML is
-the next frame's result; its viewpoints, each a position and the target it
-looks at, ask reachback for the frames already taken closest to them. They
-come back as files in the daemon's files directory and are sent too."""
+the next frame's result; the weakly reconstructed targets its viewpoints look
+at ask reachback for the frames already taken that cover them. They come back
+as files in the daemon's files directory and are sent too."""
 
 import contextlib
 import json
@@ -43,38 +43,32 @@ def frame_filename(number):
     return f"reachback-{number}.frame"
 
 
-def viewpoints(kml):
-    """[lat, lon, alt, target lat, target lon, target alt] of each viewpoint
-    pin in `kml`; ValueError if it is not KML."""
+def targets(kml):
+    """[lat, lon, alt] of the target each viewpoint in `kml` looks at;
+    ValueError if it is not KML."""
     try:
         root = ET.fromstring(kml)
     except ET.ParseError as err:
         raise ValueError(f"not KML: {err}") from None
-    found = []
-    for pin in root.iter(f"{KML}Placemark"):
-        point, look = pin.findtext(f"{KML}Point/{KML}coordinates"), pin.find(f"{KML}LookAt")
-        if point and look is not None:
-            lon, lat, alt = map(float, point.split(","))
-            found.append([lat, lon, alt, *(float(look.findtext(f"{KML}{k}"))
-                                           for k in ("latitude", "longitude", "altitude"))])
-    return found
+    return [[float(look.findtext(f"{KML}{k}")) for k in ("latitude", "longitude", "altitude")]
+            for look in root.iter(f"{KML}LookAt")]
 
 
-def encode_request(viewpoints, exclude):
-    return json.dumps({"viewpoints": viewpoints, "exclude": sorted(exclude)}).encode()
+def encode_request(targets, exclude):
+    return json.dumps({"targets": targets, "exclude": sorted(exclude)}).encode()
 
 
 def decode_request(data):
-    """(viewpoints, exclude) of a request; ValueError if it is not one."""
+    """(targets, exclude) of a request; ValueError if it is not one."""
     try:
         request = json.loads(data)
-        views = [list(map(float, v)) for v in request["viewpoints"]]
+        found = [list(map(float, t)) for t in request["targets"]]
         exclude = set(map(int, request["exclude"]))
     except (KeyError, TypeError, ValueError) as err:
         raise ValueError(f"not a request: {err}") from None
-    if any(len(v) != 6 for v in views):
-        raise ValueError("a viewpoint is 6 numbers")
-    return views, exclude
+    if any(len(t) != 3 for t in found):
+        raise ValueError("a target is lat, lon, alt")
+    return found, exclude
 
 
 class FrameError(Exception):
@@ -192,7 +186,7 @@ class Sender:
 
 class SwiftMap:
     """Sends frames to the server as they come, and asks reachback for the
-    frames closest to each viewpoint the server plans. Frames sent back
+    frames covering each weak target the server plans for. Frames sent back
     arrive in `files_dir`. It follows one camera at a time."""
 
     def __init__(self, sender, *, jpeg_quality, files_dir=None):
@@ -224,15 +218,15 @@ class SwiftMap:
             logger.warning("input %d: %s", input.id.seq, err)
 
     def on_kml(self, id, kml):
-        """Asks for the frames closest to the viewpoints in `kml`, about the input `id`."""
+        """Asks for the frames covering the targets in `kml`, about the input `id`."""
         try:
-            views = viewpoints(kml)
+            found = targets(kml)
         except ValueError as err:
             logger.warning("can't read the planned KML: %s", err)
             return
-        if views:
-            logger.info("asking for the frames closest to %d viewpoints", len(views))
-            self.requests.append((id, encode_request(views, self.sent)))
+        if found:
+            logger.info("asking for the frames covering %d weak targets", len(found))
+            self.requests.append((id, encode_request(found, self.sent)))
 
     def take_requests(self):
         """The requests to publish, as (input id, payload)."""

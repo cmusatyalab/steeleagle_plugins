@@ -1,17 +1,17 @@
 # SwiftMap
 
-SteelEagle engine plugins for mapping with a [SwiftMap](https://github.com/cmusatyalab/swiftmap) server: `swiftmap` sends frames to the server, `keyframe` discards the frames the server would not keep before they are sent, and `reachback` sends back the frames already taken that best cover the weak regions the server finds.
+SteelEagle engine plugins for mapping with a [SwiftMap](https://github.com/cmusatyalab/swiftmap) server: `swiftmap` sends frames to the server, `keyframe` discards the frames the server would not keep before they are sent, and `reachback` sends back the frames already taken that cover the weak regions the server finds.
 
 ## Flow
 
 ```
 vehicle daemon:  camera → JPEG encoder → reachback → keyframe ──→ remote daemon:  swiftmap → SwiftMap server
                                             ↑                                         │
-                                            └──── viewpoints of the next-flight plan ─┘
+                                            └──── weak targets of the next-flight plan ┘
                                                   (reachback subscribes to swiftmap)
 ```
 
-`reachback` comes before `keyframe`, so it stores frames `keyframe` drops. After each batch, the server plans viewpoints over the weakly reconstructed regions (only those of the focus, if one is set in its viewer). For each viewpoint, `reachback` sends the stored frame that looks at its target from the closest angle, outside the flow, as a file on the remote daemon.
+`reachback` comes before `keyframe`, so it stores frames `keyframe` drops. After each batch, the server plans viewpoints over the regions VGGT reconstructed with low confidence. For the target each viewpoint looks at, `reachback` sends the stored frame that sees it closest to the centre of its view, outside the flow, as a file on the remote daemon.
 
 ## `swiftmap`
 
@@ -19,7 +19,7 @@ Forwards each camera frame (`RawFrame`, or `EncodedFrame` in JPEG) unchanged, an
 
 When the server plans a next flight, the KML it sends back is the result of the next frame, as it is. Every other result is empty. The engine's result type is `GenericResult`: the vehicle stores each non-empty result in a `ComputeResult` whose `generic_result.payload` is the KML, and missions read it with `GetGenericResult`.
 
-Each viewpoint pin in the KML holds its position and, in a `<LookAt>`, the target it looks at. For each plan, the engine asks `reachback` for the frames closest to its viewpoints with a derived result of type `swiftmap/ReachbackRequest`: the JSON `{"viewpoints": [[lat, lon, alt, target lat, target lon, target alt], ...], "exclude": [...]}`, where `exclude` holds the numbers of the frames already sent to the server. Frames come back as `reachback-<number>.frame` in the daemon's files directory (`STEELEAGLE_FILES`); the engine sends each one it has not sent yet, in order, and removes the file.
+Each viewpoint pin in the KML holds, in a `<LookAt>`, the weakly reconstructed target it looks at. For each plan, the engine asks `reachback` for the frames covering those targets with a derived result of type `swiftmap/ReachbackRequest`: the JSON `{"targets": [[lat, lon, alt], ...], "exclude": [...]}`, where `exclude` holds the numbers of the frames already sent to the server. Frames come back as `reachback-<number>.frame` in the daemon's files directory (`STEELEAGLE_FILES`); the engine sends each one it has not sent yet, in order, and removes the file.
 
 | Arg | Default | Description |
 | --- | --- | --- |
@@ -56,13 +56,7 @@ Run it on the daemon whose camera takes the frames, after `reachback` and before
 
 Stores frames and forwards every frame unchanged. It runs on the vehicle's daemon, after the JPEG encoder and before `keyframe`, and subscribes to the `swiftmap` engine on the remote daemon. It stores one `EncodedFrame` every 0.2 s per camera, with the camera's pose when it was taken: its GPS fix and the gimbal's absolute yaw and pitch (`gimbal_info.pose_neu`). A frame without both is not stored.
 
-For each viewpoint of a request, it sends the stored frame, of the producer and session the request is about, that:
-
-1. looks at the viewpoint's target, which lies within 30° of the camera's axis;
-2. sees it from within 30° of the viewpoint's angle, and from at most twice its distance;
-3. is not in `exclude`, and was not sent before.
-
-Of those, it sends the one seen from the closest angle; a viewpoint none fits gets no frame. Each is sent to the remote daemon as a file named `reachback-<number>.frame`, the `EncodedFrame` as it was stored.
+For each target of a request, it sends the stored frame, of the producer and session the request is about, that sees the target closest to the centre of its view. The target must lie within 25° of the camera's axis and 50 m of the camera, and the frame must not be in `exclude` or sent before; a target no frame covers gets none. Each is sent to the remote daemon as a file named `reachback-<number>.frame`, the `EncodedFrame` as it was stored.
 
 The files go outside the flow: through the local daemon's `TransferService` (`STEELEAGLE_CLIENT_SOCKET`), routed by the remote daemon's IP (`STEELEAGLE_REMOTE_QUALIFIER`), in 1 MiB chunks, one file at a time. The remote daemon saves them in its files directory. A transfer that fails is logged and not retried. The newest 6000 frames (20 minutes) are kept in a SQLite database, `swiftmap-reachback-<service>.sqlite3` in the temporary directory, which each start of the service replaces.
 

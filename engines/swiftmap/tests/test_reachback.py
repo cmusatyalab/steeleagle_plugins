@@ -1,5 +1,5 @@
 """Tests of the reachback engine: its store, the frames it picks for each
-viewpoint, its file transfers through a stand-in daemon, and frames sent back
+weak target, its file transfers through a stand-in daemon, and frames sent back
 to the swiftmap engine end to end through a real Uriel server."""
 
 import math
@@ -29,20 +29,20 @@ TIMEOUT_S = 10.0
 POSE = (40.0, -79.0, 10.0, 0.0, -90.0)
 
 
-def looking_at(east, north, up, target=TARGET):
-    """A frame's pose `east`, `north` and `up` metres from `target`, looking at it."""
+def looking_at(east, north, up, turn=0.0, target=TARGET):
+    """A frame's pose `east`, `north` and `up` metres from `target`, looking
+    at it, turned `turn` degrees away."""
     return {"gps": near(east, north, up, target),
-            "yaw": math.degrees(math.atan2(-east, -north)),
+            "yaw": math.degrees(math.atan2(-east, -north)) + turn,
             "pitch": math.degrees(math.atan2(-up, math.hypot(east, north)))}
 
 
-IDEAL = looking_at(0, -15, 10)
-VIEW = [*IDEAL["gps"], *TARGET]
+WEAK = list(TARGET)
 BEST = looking_at(0, -14, 10)
-GOOD = looking_at(8, -13, 10)
-AWAY = {**BEST, "yaw": 180.0}
-BEHIND = looking_at(0, 15, 10)
-FAR = looking_at(0, -40, 10)
+SLIGHT = looking_at(8, -13, 10, turn=10)
+OFF = looking_at(0, -14, 10, turn=40)
+AWAY = looking_at(0, -14, 10, turn=180)
+FAR = looking_at(0, -60, 10)
 
 
 @pytest.fixture
@@ -102,16 +102,16 @@ def test_a_frame_with_a_pose_is_stored_every_interval(store):
 def answering(store):
     sent = []
     rb = Reachback(store, lambda name, data: sent.append(name), interval=0)
-    for n, pose in enumerate((AWAY, BEHIND, FAR, GOOD, BEST)):
+    for n, pose in enumerate((AWAY, FAR, OFF, SLIGHT, BEST)):
         rb.on_input(numbered_input(n, pose=pose), 0.0)
     return rb, sent
 
 
-def test_each_viewpoint_gets_the_frame_looking_at_its_target_from_closest(store):
+def test_each_target_gets_the_frame_seeing_it_closest_to_the_centre(store):
     rb, sent = answering(store)
-    rb.on_request(Id(9), encode_request([VIEW, VIEW, VIEW], set()))
+    rb.on_request(Id(9), encode_request([WEAK, WEAK, WEAK], set()))
     assert sent == ["reachback-4.frame", "reachback-3.frame"]
-    rb.on_request(Id(9), encode_request([VIEW], set()))
+    rb.on_request(Id(9), encode_request([WEAK], set()))
     assert len(sent) == 2
     with pytest.raises(ValueError):
         rb.on_request(Id(9), b"{}")
@@ -119,7 +119,7 @@ def test_each_viewpoint_gets_the_frame_looking_at_its_target_from_closest(store)
 
 def test_frames_the_asker_has_are_left_out(store):
     rb, sent = answering(store)
-    rb.on_request(Id(9), encode_request([VIEW], {4}))
+    rb.on_request(Id(9), encode_request([WEAK], {4}))
     assert sent == ["reachback-3.frame"]
 
 
@@ -245,8 +245,8 @@ def outcome_of(subscription, seq):
     raise AssertionError(f"no result for input {seq}")
 
 
-def test_the_frame_closest_to_a_planned_viewpoint_is_sent_back_and_mapped(server, tmp_path):
-    server.replies.append(plan_kml((IDEAL["gps"], TARGET)))
+def test_the_frame_covering_a_weak_target_is_sent_back_and_mapped(server, tmp_path):
+    server.replies.append(plan_kml((near(0, -15, 10), TARGET)))
     suffix = uuid.uuid4().hex[:8]
     producer_name = f"camera-{suffix}"
     reachback_name, keyframe_name, swiftmap_name = (
@@ -262,7 +262,7 @@ def test_the_frame_closest_to_a_planned_viewpoint_is_sent_back_and_mapped(server
         threading.Thread(target=serve_reachback, daemon=True,
                          args=(reachback_name, swiftmap_name, tmp_path, stop, readies[2])),
     ]
-    poses = [BEST, AWAY, BEST, BEHIND, AWAY]
+    poses = [BEST, AWAY, BEST, OFF, AWAY]
     try:
         for thread, ready in zip(threads, readies):
             thread.start()

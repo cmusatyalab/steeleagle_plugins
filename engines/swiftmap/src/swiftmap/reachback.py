@@ -1,9 +1,9 @@
 """The reachback engine: stores frames, with where the camera was and where it
 looked, and forwards every frame. It subscribes to the swiftmap engine on the
-remote daemon, and for each viewpoint that engine asks about, transfers the
-stored frame that looks at the viewpoint's target from the closest angle to
-that daemon as a file (reachback-<n>.frame), outside the flow. Put it after
-the JPEG encoder and before the keyframe engine, so it sees every frame."""
+remote daemon, and for each weak target that engine asks about, transfers the
+stored frame that sees the target closest to the centre of its view to that
+daemon as a file (reachback-<n>.frame), outside the flow. Put it after the
+JPEG encoder and before the keyframe engine, so it sees every frame."""
 
 import logging
 import math
@@ -30,8 +30,8 @@ ROUTE_HEADER = "x-route-key"
 TRANSFER_TIMEOUT_S = 120.0
 KEEP_FRAMES = 6000
 STORE_INTERVAL_S = 0.2
-HALF_FOV_DEG = 30.0
-MAX_ANGLE_DEG = 30.0
+HALF_FOV_DEG = 25.0
+MAX_DISTANCE_M = 50.0
 M_PER_DEG = 111_320.0
 
 
@@ -55,20 +55,17 @@ def to_enu(lla, origin):
     ])
 
 
-def closest(poses, numbers, view, exclude):
-    """Index of the frame that looks at the target of `view` from closest to
-    its angle, within MAX_ANGLE_DEG and twice its distance; None if none does."""
-    cams = to_enu(poses[:, :3], view[3:])
-    ideal = to_enu(np.array([view[:3]]), view[3:])[0]
-    dist, reach = np.linalg.norm(cams, axis=1), np.linalg.norm(ideal)
+def covering(poses, numbers, target, exclude):
+    """Index of the frame that sees `target` closest to the centre of its view,
+    within HALF_FOV_DEG of it and MAX_DISTANCE_M away; None if none does."""
+    cams = to_enu(poses[:, :3], target)
+    dist = np.linalg.norm(cams, axis=1)
     yaw, pitch = np.radians(poses[:, 3]), np.radians(poses[:, 4])
     look = np.column_stack([np.sin(yaw) * np.cos(pitch), np.cos(yaw) * np.cos(pitch), np.sin(pitch)])
-    facing = -(look * cams).sum(1) / np.maximum(dist, 1e-9)
-    angle = cams @ ideal / np.maximum(dist * reach, 1e-9)
-    ok = ((facing >= math.cos(math.radians(HALF_FOV_DEG)))
-          & (angle >= math.cos(math.radians(MAX_ANGLE_DEG)))
-          & (dist <= 2 * reach) & ~np.isin(numbers, list(exclude)))
-    return int(np.flatnonzero(ok)[np.argmax(angle[ok])]) if ok.any() else None
+    centred = -(look * cams).sum(1) / np.maximum(dist, 1e-9)
+    ok = ((centred >= math.cos(math.radians(HALF_FOV_DEG))) & (dist <= MAX_DISTANCE_M)
+          & ~np.isin(numbers, list(exclude)))
+    return int(np.flatnonzero(ok)[np.argmax(centred[ok])]) if ok.any() else None
 
 
 class FrameStore:
@@ -165,7 +162,7 @@ class Transfer:
 
 class Reachback:
     """Stores a frame with a camera pose every `interval` seconds per camera,
-    and sends the frames closest to the viewpoints asked about with
+    and sends the frames covering the targets asked about with
     `transfer(name, data)`."""
 
     def __init__(self, store, transfer, interval=STORE_INTERVAL_S):
@@ -191,18 +188,18 @@ class Reachback:
             self._last_stored[stream] = now
 
     def on_request(self, id, payload):
-        """Sends the frame closest to each viewpoint asked about; ValueError if
+        """Sends the frame covering each target asked about; ValueError if
         `payload` is not a request."""
-        views, exclude = decode_request(payload)
+        found, exclude = decode_request(payload)
         rowids, numbers, poses = self.store.unsent(id.producer, id.session)
         sent = []
-        for view in views:
-            i = closest(poses, numbers, view, exclude)
+        for target in found:
+            i = covering(poses, numbers, target, exclude)
             if i is not None:
                 self.transfer(frame_filename(numbers[i]), self.store.take(rowids[i]))
                 exclude.add(int(numbers[i]))
                 sent.append(int(numbers[i]))
-        logger.info("sending frames %s for %d viewpoints", sent, len(views))
+        logger.info("sending frames %s for %d targets", sent, len(found))
 
 
 def run(name, reachback, remote, *, stop, on_ready=None):

@@ -13,7 +13,7 @@ from steeleagle_protocol.v1.messages.frame import frame_pb2
 from swiftmap.client import SwiftMapClient
 from swiftmap.engine import (
     ENCODED_FRAME_TYPE, RAW_FRAME_TYPE, Sender, SwiftMap, decode_request, encode_request,
-    frame_filename, viewpoints,
+    frame_filename, targets,
 )
 from swiftmap.main import SWIFTMAP_PLUGIN, ConfigError, parse_args
 
@@ -104,15 +104,14 @@ def test_a_started_sender_sends_on_its_own_thread(server):
     assert numbers_received(server) == [1, 2, 5, 3]
 
 
-def test_viewpoints_are_read_from_the_pins_of_a_plan():
-    [(lat, lon, alt, tlat, tlon, talt)] = viewpoints(plan_kml(VIEW))
-    assert (lat, lon, alt, tlat, tlon, talt) == (*VIEW[0], *VIEW[1])
-    assert viewpoints(KML) == []
+def test_targets_are_read_from_the_viewpoints_of_a_plan():
+    assert targets(plan_kml(VIEW)) == [list(VIEW[1])]
+    assert targets(KML) == []
     with pytest.raises(ValueError):
-        viewpoints(b"not xml")
+        targets(b"not xml")
 
 
-def test_a_plan_asks_for_the_frames_closest_to_its_viewpoints(server):
+def test_a_plan_asks_for_the_frames_covering_its_targets(server):
     engine = swiftmap(server)
     for n in (1, 4):
         engine.on_input(numbered_input(n))
@@ -121,7 +120,7 @@ def test_a_plan_asks_for_the_frames_closest_to_its_viewpoints(server):
     engine.on_kml(Id(4), b"not xml")
     [(id, payload)] = engine.take_requests()
     assert id.seq == 4
-    assert decode_request(payload) == ([[*VIEW[0], *VIEW[1]]] * 2, {1, 4})
+    assert decode_request(payload) == ([list(VIEW[1])] * 2, {1, 4})
     assert engine.take_requests() == []
 
 
@@ -162,12 +161,12 @@ def test_other_files_are_left_alone_and_bad_frames_removed(server, tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == ["mission.zip"]
 
 
-def test_requests_name_viewpoints_and_frames_to_leave_out():
-    views = [[*VIEW[0], *VIEW[1]]]
-    assert json.loads(encode_request(views, {3, 1})) == {"viewpoints": views, "exclude": [1, 3]}
-    assert decode_request(encode_request(views, {3})) == (views, {3})
-    for bad in (b"[]", b"{}", b'{"viewpoints": [[1, 2]], "exclude": []}',
-                b'{"viewpoints": [], "exclude": ["a"]}', b"\xff"):
+def test_requests_name_targets_and_frames_to_leave_out():
+    found = [list(VIEW[1])]
+    assert json.loads(encode_request(found, {3, 1})) == {"targets": found, "exclude": [1, 3]}
+    assert decode_request(encode_request(found, {3})) == (found, {3})
+    for bad in (b"[]", b"{}", b'{"targets": [[1, 2]], "exclude": []}',
+                b'{"targets": [], "exclude": ["a"]}', b"\xff"):
         with pytest.raises(ValueError):
             decode_request(bad)
 
