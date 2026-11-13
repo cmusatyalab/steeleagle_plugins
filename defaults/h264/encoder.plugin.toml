@@ -18,7 +18,7 @@ default = "x264enc tune=zerolatency speed-preset=ultrafast pass=quant quantizer=
 [[args]]
 name = "converter"
 type = "string"
-description = "Converts the RGB frames to a format the encoder takes, in gst-launch syntax: e.g. \"videoconvert n-threads=4\" in software, or \"qtivtransform ! video/x-raw(memory:GBM),format=NV12\" in Qualcomm hardware for qtic2venc. For encoders other than qtic2venc, its output is constrained to I420."
+description = "Converts the RGB frames to a format the encoder takes, in gst-launch syntax: e.g. \"videoconvert n-threads=4\" in software, or \"qtivtransform ! video/x-raw(memory:GBM),format=NV12\" in Qualcomm hardware for qtic2venc, or \"videoconvert n-threads=4 ! video/x-raw,format=NV12\" for omxh264enc. For x264enc, its output is constrained to I420, so that x264enc encodes 4:2:0, which browsers decode; for other encoders, it must output a 4:2:0 format itself."
 default = "videoconvert n-threads=4"
 
 [[args]]

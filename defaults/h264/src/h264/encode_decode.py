@@ -31,6 +31,9 @@ RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
 ENCODED_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
 DECODE_RESULT_TYPE = "h264/v1/DecodeResult"
 
+# The software encoder, whose input the encoder constrains to I420.
+X264_ENCODER = "x264enc"
+
 # Fields copied from a frame to what it is encoded or decoded to.
 _FRAME_FIELDS = ("timestamp", "gimbal_info", "position_info")
 
@@ -88,8 +91,12 @@ class EncodeStream:
     def __init__(self, encoder, converter, fps, width, height):
         uses_iframe_action = "qtic2venc" in encoder
         encoder_desc = encoder if " name=" in encoder else f"{encoder} name=enc"
-        # Browsers decode 4:2:0 only, which x264enc makes only from I420
-        convert = converter if uses_iframe_action else f"{converter} ! video/x-raw,format=I420"
+        # Browsers decode 4:2:0 only, which x264enc makes only from I420: given
+        # RGB, it encodes 4:4:4. Hardware encoders take 4:2:0 formats only,
+        # often other than I420 (omxh264enc takes NV12), so the converter sets
+        # their format itself.
+        uses_x264 = encoder.split(maxsplit=1)[0] == X264_ENCODER
+        convert = f"{converter} ! video/x-raw,format=I420" if uses_x264 else converter
         self.width = width
         self.height = height
         self.pipeline = Pipeline(
