@@ -47,7 +47,19 @@ func quantileQuery(q float64) func(string) string {
 	}
 }
 
+// meanQuery is the exact mean of a histogram's observations over the window,
+// from its sum and count, which the quantiles' bucket estimates are not:
+// histogram_quantile interpolates within a bucket, so every time in a wide
+// bucket gets nearly the same estimate. by groups the series, or "" for one.
+func meanQuery(histogram, selector, by, window string) string {
+	return fmt.Sprintf("sum%s (rate(%s_sum%s[%s])) / sum%s (rate(%s_count%s[%s]))",
+		by, histogram, selector, window, by, histogram, selector, window)
+}
+
 var engineQueries = []engineQuery{
+	{func(w string) string {
+		return meanQuery("uriel_engine_processing_latency_seconds", "", " by (engine_id)", w)
+	}, func(m *EngineMetrics) **float64 { return &m.Mean }},
 	{quantileQuery(QuantileMedian), func(m *EngineMetrics) **float64 { return &m.P50 }},
 	{quantileQuery(QuantileTail), func(m *EngineMetrics) **float64 { return &m.P95 }},
 	{func(w string) string {
@@ -64,6 +76,11 @@ var engineQueries = []engineQuery{
 	{func(w string) string {
 		return fmt.Sprintf("sum by (engine_id) (rate(uriel_engine_processing_latency_seconds_sum[%s]))", w)
 	}, func(m *EngineMetrics) **float64 { return &m.Busy }},
+}
+
+// endToEndMeanQuery is the exact mean age of the vehicle's frames.
+func endToEndMeanQuery(vehicle, window string) string {
+	return meanQuery("gcs_frame_age_seconds", fmt.Sprintf("{vehicle=%s}", strconv.Quote(vehicle)), "", window)
 }
 
 func endToEndQuery(q float64, vehicle, window string) string {
@@ -119,10 +136,14 @@ func Fill(ctx context.Context, q Querier, v *View, vehicle, window string) error
 	}
 	var e2e Latency
 	for _, part := range []struct {
-		quantile float64
-		field    **float64
-	}{{QuantileMedian, &e2e.P50}, {QuantileTail, &e2e.P95}} {
-		samples, err := vector(ctx, q, endToEndQuery(part.quantile, vehicle, window), now)
+		promql string
+		field  **float64
+	}{
+		{endToEndMeanQuery(vehicle, window), &e2e.Mean},
+		{endToEndQuery(QuantileMedian, vehicle, window), &e2e.P50},
+		{endToEndQuery(QuantileTail, vehicle, window), &e2e.P95},
+	} {
+		samples, err := vector(ctx, q, part.promql, now)
 		if err != nil {
 			return err
 		}
@@ -148,7 +169,7 @@ func Fill(ctx context.Context, q Querier, v *View, vehicle, window string) error
 			v.Nodes[i].Metrics = byEngine[v.Nodes[i].ID]
 		}
 	}
-	if e2e.P50 != nil || e2e.P95 != nil {
+	if e2e.Mean != nil || e2e.P50 != nil || e2e.P95 != nil {
 		v.EndToEnd = &e2e
 	}
 	v.ClockSkewShare = skew

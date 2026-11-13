@@ -1,12 +1,12 @@
 import { Handle, Position } from '@xyflow/react';
 import { ERROR_COLOR, NODE_COLOR } from './flowView.js';
-import { NODE_WIDTH, formatRate, formatSeconds, formatShare } from './metricsView.js';
+import { NODE_WIDTH, formatEstimate, formatRate, formatSeconds, formatShare } from './metricsView.js';
 
 const PERCENT = 100;
 
 // A producer or engine of a running flow, with the engine's numbers over the
-// window: time per input (p95 on hover), wait, rate, skipped share, and
-// whether it is a bottleneck.
+// window: mean time per input (the estimated median and p95 on hover), wait,
+// rate, skipped share, and whether it is a bottleneck.
 function MetricsNode({ data }) {
     const { kind, label, host, metrics, bottleneck } = data;
     const color = bottleneck ? ERROR_COLOR : NODE_COLOR;
@@ -36,9 +36,9 @@ function EngineNumbers({ metrics, bottleneck }) {
     const small = { fontSize: 10, color: 'var(--node-chip-text)' };
     return (
         <>
-            <div title={`p95 ${formatSeconds(metrics.p95_seconds)}`}
+            <div title={`mean; median ${formatEstimate(metrics.p50_seconds)} · p95 ${formatEstimate(metrics.p95_seconds)}`}
                 style={{ fontSize: 18, fontWeight: 'bold', color: bottleneck ? ERROR_COLOR : 'var(--node-text)' }}>
-                {formatSeconds(metrics.p50_seconds)}
+                {formatSeconds(metrics.mean_seconds)}
             </div>
             <div style={small}>wait {formatSeconds(metrics.wait_seconds)} · {formatRate(metrics.inputs_per_second)}</div>
             <div style={small}>skipped {formatShare(metrics.skipped_share)}</div>

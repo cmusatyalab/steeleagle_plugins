@@ -29,8 +29,11 @@ const (
 )
 
 // EngineMetrics are an engine's numbers over a window. Each is null when
-// Prometheus has no sample for it in the window.
+// Prometheus has no sample for it in the window. Mean is the exact mean time
+// per input; P50 and P95 are estimated from the histogram's buckets, so only
+// tell which bucket the time falls in when the buckets are wide.
 type EngineMetrics struct {
+	Mean            *float64 `json:"mean_seconds"`
 	P50             *float64 `json:"p50_seconds"`
 	P95             *float64 `json:"p95_seconds"`
 	Wait            *float64 `json:"wait_seconds"`
@@ -39,10 +42,12 @@ type EngineMetrics struct {
 	Busy            *float64 `json:"busy_fraction"`
 }
 
-// Latency is a time's median and 95th percentile, each null without data.
+// Latency is a time's exact mean, and its median and 95th percentile as
+// estimated from its histogram's buckets, each null without data.
 type Latency struct {
-	P50 *float64 `json:"p50_seconds"`
-	P95 *float64 `json:"p95_seconds"`
+	Mean *float64 `json:"mean_seconds"`
+	P50  *float64 `json:"p50_seconds"`
+	P95  *float64 `json:"p95_seconds"`
 }
 
 // Node is a producer or engine of a flow. An engine's ID is its qualified

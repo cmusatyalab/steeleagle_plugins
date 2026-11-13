@@ -21,10 +21,10 @@ const okView = {
     nodes: [
         { id: 'rgb', kind: 'producer', label: 'rgb', host: 'fermi', metrics: null, bottleneck: false },
         { id: 'enc', kind: 'engine', label: 'encoder', host: 'fermi', bottleneck: true,
-          metrics: { p50_seconds: 0.082, p95_seconds: 0.093, wait_seconds: 0.018, inputs_per_second: 12.2, skipped_share: 0.59, busy_fraction: 0.98 } },
+          metrics: { mean_seconds: 0.059, p50_seconds: 0.082, p95_seconds: 0.093, wait_seconds: 0.018, inputs_per_second: 12.2, skipped_share: 0.59, busy_fraction: 0.98 } },
     ],
     edges: [{ from: 'rgb', to: 'enc' }],
-    end_to_end: { p50_seconds: 0.144, p95_seconds: 0.181 },
+    end_to_end: { mean_seconds: 0.151, p50_seconds: 0.144, p95_seconds: 0.181 },
 };
 
 function respondWith(view) {
@@ -61,11 +61,20 @@ describe('MetricsPage', () => {
 
         const { container } = await render();
 
-        expect(container.textContent).toContain('82 ms');
+        expect(container.textContent).toContain('59 ms');
         expect(container.textContent).toContain('fermi');
         expect(container.textContent).toContain('bottleneck');
         expect(container.textContent).toContain('Capture → GCS');
-        expect(container.textContent).toContain('144 ms');
+        expect(container.textContent).toContain('mean 151 ms');
+        expect(container.textContent).toContain('p50 ≈144 ms');
+    });
+
+    it('shows each engine\'s mean, with its estimated median and p95 on hover', async () => {
+        respondWith(okView);
+
+        const { container } = await render();
+
+        expect(container.querySelector('[title="mean; median ≈82 ms · p95 ≈93 ms"]').textContent).toBe('59 ms');
     });
 
     it('shows the flow and a message when Prometheus is unreachable', async () => {
