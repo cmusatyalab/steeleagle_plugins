@@ -2,9 +2,10 @@
 
 Wire: the client sends [BE uint32 size][JPEG][24-byte GPS][uint8 kind]: a new
 frame, a frame sent back for the last plan, or, with no JPEG, the marker that
-every frame sent back for it is in. The server replies with 3 float64 (status,
-keyframe_count, total) followed by a big-endian uint32 length and an optional
-trailing payload (a next-flight area KML; length 0 for an ordinary ack).
+every frame sent back for it is in, or a poll for what the server has queued.
+The server replies with 3 float64 (status, keyframe_count, total) followed by
+a big-endian uint32 length and an optional trailing payload (a next-flight
+area KML, or an NFN hold or release notice; length 0 for an ordinary ack).
 """
 
 import logging
@@ -18,7 +19,7 @@ DEFAULT_PORT = 43322
 SIZE_FMT = "!I"  # image-size header
 GPS_FMT = "!3d"  # lat, lon, alt
 KIND_FMT = "!B"
-FRAME, REACHBACK, REACHBACK_DONE = 0, 1, 2
+FRAME, REACHBACK, REACHBACK_DONE, POLL = 0, 1, 2, 3
 REPLY_FMT = "3d"  # status, keyframe_count, total_frames
 REPLY_NBYTES = struct.calcsize(REPLY_FMT)
 PAYLOAD_LEN_FMT = "!I"  # length of the trailing reply payload

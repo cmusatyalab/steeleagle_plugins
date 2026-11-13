@@ -10,10 +10,11 @@ import pytest
 from conftest import Id, Input, numbered_frame, numbered_input, numbers_received, plan_kml, position
 
 from steeleagle_protocol.v1.messages.frame import frame_pb2
-from swiftmap.client import FRAME, REACHBACK, REACHBACK_DONE, SwiftMapClient
+from swiftmap.client import FRAME, POLL, REACHBACK, REACHBACK_DONE, SwiftMapClient
 from swiftmap.engine import (
-    ENCODED_FRAME_TYPE, RAW_FRAME_TYPE, REACHBACK_DONE_TYPE, REACHBACK_FRAME_TYPE, Sender,
-    SwiftMap, decode_request, encode_request, read_plan,
+    ENCODED_FRAME_TYPE, NFN_HOLD, NFN_RELEASE, POLL_S, RAW_FRAME_TYPE, REACHBACK_DONE_TYPE,
+    REACHBACK_FRAME_TYPE, Sender, SwiftMap, decode_request, encode_hold, encode_request,
+    read_plan,
 )
 from swiftmap.main import SWIFTMAP_PLUGIN, ConfigError, parse_args
 
@@ -64,12 +65,20 @@ def test_h264_frames_are_not_sent(server):
     assert server.received == []
 
 
-def test_a_planned_area_is_the_next_result(server):
-    server.replies.append(KML)
+def test_what_the_server_sends_back_is_kept_in_order(server):
+    server.replies.extend([NFN_HOLD, KML])
     engine = swiftmap(server)
-    engine.on_input(raw_input(1, (40.0, -79.0)))
-    assert engine.sender.take_kml() == KML
-    assert engine.sender.take_kml() == b""
+    for n in range(3):
+        engine.on_input(raw_input(n, (40.0, -79.0)))
+    assert engine.sender.take_replies() == [NFN_HOLD, KML]
+    assert engine.sender.take_replies() == []
+
+
+def test_a_planned_area_is_the_next_result(server):
+    engine = swiftmap(server)
+    engine.on_reply(KML)
+    assert engine.take_result() == KML
+    assert engine.take_result() == b""
 
 
 def test_a_frame_without_a_fix_is_sent_with_a_nan_one(server):
@@ -123,19 +132,35 @@ def test_a_plan_has_targets_and_a_count():
 
 def test_a_plan_asks_for_frames_covering_its_targets(server):
     engine = swiftmap(server)
-    engine.on_kml(Id(4), plan_kml(VIEW, VIEW, count=3))
-    engine.on_kml(Id(4), plan_kml(VIEW))
-    engine.on_kml(Id(4), b"not xml")
+    engine.on_input(numbered_input(4))
+    engine.on_reply(plan_kml(VIEW, VIEW, count=3))
+    engine.on_reply(plan_kml(VIEW))
+    engine.on_reply(b"not xml")
     [(id, payload)] = engine.take_requests()
     assert id.seq == 4
-    assert decode_request(payload) == ([list(VIEW[1])] * 2, 3)
+    assert decode_request(payload) == ([list(VIEW[1])] * 2, 3, None)
     assert engine.take_requests() == []
 
 
-def test_requests_name_targets_and_a_count():
+def test_a_hold_and_release_are_passed_on_and_it_polls_while_held(server):
+    engine = swiftmap(server)
+    engine.on_input(numbered_input(4))
+    engine.on_reply(NFN_HOLD)
+    assert engine.holding and engine.take_result() == b""
+    engine.poll(engine.sender.last_sent + POLL_S / 2)
+    engine.poll(engine.sender.last_sent + POLL_S)
+    engine.on_reply(NFN_RELEASE)
+    engine.poll(engine.sender.last_sent + POLL_S)
+    assert not engine.holding
+    assert server.kinds == [FRAME, POLL]
+    assert [decode_request(p)[2] for _, p in engine.take_requests()] == [True, False]
+
+
+def test_requests_name_targets_and_a_count_or_a_hold():
     targets = [list(VIEW[1])]
     assert json.loads(encode_request(targets, 3)) == {"targets": targets, "count": 3}
-    assert decode_request(encode_request(targets, 3)) == (targets, 3)
+    assert decode_request(encode_request(targets, 3)) == (targets, 3, None)
+    assert decode_request(encode_hold(True)) == ([], 0, True)
     for bad in (b"[]", b"{}", b'{"targets": [[1, 2]], "count": 1}',
                 b'{"targets": [], "count": -1}', b"\xff"):
         with pytest.raises(ValueError):

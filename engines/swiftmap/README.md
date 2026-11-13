@@ -11,7 +11,7 @@ vehicle daemon:  camera → JPEG encoder → reachback ══► remote daemon: 
                                                 (reachback subscribes to swiftmap)
 ```
 
-With NFN mode on in the server's viewer, the server plans after each batch: viewpoints over the regions VGGT reconstructed with low confidence, and how many frames to send back for them. `reachback` then sends the stored frames that cover those targets, in the flow, before any more keyframes; the server maps the batch again with them. With NFN mode off, the server plans nothing and `reachback` only selects keyframes.
+With NFN mode on in the server's viewer, the server says to hold as soon as a batch fills, and `reachback` stops forwarding keyframes. After reconstructing the batch, the server plans: viewpoints over the regions VGGT reconstructed with low confidence, and how many frames to send back for them. `reachback` sends the stored frames that cover those targets, in the flow; the server maps the old images again with them, for as many rounds as set, then says to release, and keyframes resume. With NFN mode off, the server plans nothing and `reachback` only selects keyframes.
 
 ## `reachback`
 
@@ -26,7 +26,9 @@ The distance is checked first, so the last keyframe is always the last frame for
 
 **The store.** It keeps one frame every 0.2 s per camera, and every keyframe it forwards, with the camera's pose when it was taken: its GPS fix and the gimbal's absolute yaw and pitch (`gimbal_info.pose_neu`). A frame without both is not stored. The newest 6000 frames are kept in a SQLite database, `swiftmap-reachback-<service>.sqlite3` in the temporary directory, which each start of the service replaces.
 
-**Reach back.** A request names the weak targets of a plan and how many frames to send. It picks, target by target in turn, the stored frame not yet sent (keyframes count as sent) that sees the target closest to the centre of its view, within 25° of the camera's axis and 50 m of the camera, until it has that many or none is left. Then keyframe selection pauses: each frame that comes in is only stored, and its place in the flow carries the next frame picked, as a `swiftmap/ReachbackFrame` (the stored `EncodedFrame`), then a `swiftmap/ReachbackDone`. After that, keyframe selection resumes.
+**Reach back.** A request names the weak targets of a plan and how many frames to send. It picks, target by target in turn, the stored frame not yet sent (keyframes count as sent) that sees the target closest to the centre of its view, within 25° of the camera's axis and 50 m of the camera, until it has that many or none is left. Then each frame that comes in is only stored, and its place in the flow carries the next frame picked, as a `swiftmap/ReachbackFrame` (the stored `EncodedFrame`), then a `swiftmap/ReachbackDone`.
+
+**Hold.** A request can instead say to hold or release (`{"hold": true}` / `{"hold": false}`). While holding, frames are only stored and none is forwarded, besides those sent back.
 
 | Arg | Default | Description |
 | --- | --- | --- |
@@ -43,6 +45,8 @@ When the server plans a next flight, the KML it sends back is the result of the 
 
 Each viewpoint pin in the KML holds, in a `<LookAt>`, the weakly reconstructed target it looks at, and the document's `reachback` data how many frames to send back. For each plan with targets and a count, the engine asks `reachback` for them with a derived result of type `swiftmap/ReachbackRequest`: the JSON `{"targets": [[lat, lon, alt], ...], "count": n}`.
 
+A reply can instead carry an NFN notice: `{"nfn": "hold"}`, when the server closes a batch in NFN mode, or `{"nfn": "release"}`, once its rounds are done. The engine passes each on to `reachback` as `{"hold": true}` or `{"hold": false}`, and does not report it as a result. While held, no new frames reach the engine, so it polls the server every second for its plans.
+
 | Arg | Default | Description |
 | --- | --- | --- |
 | `server` | `localhost` | Hostname or IP of the SwiftMap mapping server |
@@ -52,7 +56,7 @@ Each viewpoint pin in the KML holds, in a `<LookAt>`, the weakly reconstructed t
 
 ### Wire protocol
 
-The engine sends `[uint32 size][JPEG][3 × float64 lat, lon, alt][uint8 kind]`, big-endian. The kind is 0 for a new frame, 1 for a frame sent back, and 2, with no JPEG, once all frames sent back are in. The server replies with 3 native float64 (status, keyframe count, total frames; status 1 is a keyframe), then a big-endian uint32 length and that many bytes of KML (0 for an ordinary ack).
+The engine sends `[uint32 size][JPEG][3 × float64 lat, lon, alt][uint8 kind]`, big-endian. The kind is 0 for a new frame, 1 for a frame sent back, and, with no JPEG, 2 once all frames sent back are in, or 3 to poll for what the server has queued; queued payloads come back one per reply, in order. The server replies with 3 native float64 (status, keyframe count, total frames; status 1 is a keyframe), then a big-endian uint32 length and that many bytes of KML (0 for an ordinary ack).
 
 ## Development
 

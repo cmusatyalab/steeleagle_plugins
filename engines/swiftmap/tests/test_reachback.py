@@ -13,10 +13,10 @@ from conftest import TARGET, Id, Input, near, numbered_frame, numbered_input, nu
 
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from swiftmap import engine, reachback
-from swiftmap.client import FRAME, REACHBACK, REACHBACK_DONE, SwiftMapClient
+from swiftmap.client import FRAME, POLL, REACHBACK, REACHBACK_DONE, SwiftMapClient
 from swiftmap.engine import (
-    ENCODED_FRAME_TYPE, REACHBACK_DONE_TYPE, REACHBACK_FRAME_TYPE, Sender, SwiftMap,
-    encode_request,
+    ENCODED_FRAME_TYPE, NFN_HOLD, NFN_RELEASE, REACHBACK_DONE_TYPE, REACHBACK_FRAME_TYPE,
+    Sender, SwiftMap, encode_hold, encode_request,
 )
 from swiftmap.main import REACHBACK_PLUGIN, ConfigError, parse_args
 from swiftmap.reachback import DROP, FORWARD, STORE_INTERVAL_S, FrameStore, Reachback
@@ -130,6 +130,19 @@ def test_a_request_sends_at_most_its_count_and_the_end_even_with_none(store):
         rb.on_request(Id(9), b"{}")
 
 
+def test_a_hold_stops_keyframes_until_released_but_not_frames_sent_back(store):
+    rb = answering(store, keep={20})
+    rb.on_request(Id(9), encode_hold(True))
+    assert rb.on_input(numbered_input(20), 1.0) == DROP
+    assert 20 in store.unsent("camera", 1)[1]
+    rb.on_request(Id(9), encode_request([WEAK], 1))
+    assert rb.on_input(numbered_input(21), 1.0)[0] == REACHBACK_FRAME_TYPE
+    assert rb.on_input(numbered_input(22), 1.0)[0] == REACHBACK_DONE_TYPE
+    assert rb.on_input(numbered_input(20), 1.0) == DROP
+    rb.on_request(Id(9), encode_hold(False))
+    assert rb.on_input(numbered_input(20), 1.0) == FORWARD
+
+
 def test_reachback_args_are_defaulted_and_checked():
     args = parse_args(REACHBACK_PLUGIN, "")
     assert (args["remote"], args["send_distance"], args["min_disparity"]) == ("swiftmap", 5.0, 40.0)
@@ -182,14 +195,14 @@ def outcome_of(subscription, seq):
     raise AssertionError(f"no result for input {seq}")
 
 
-def test_frames_covering_a_weak_target_come_back_through_the_flow(server):
-    server.replies.append(plan_kml((near(0, -15, 10), TARGET), count=2))
+def test_an_nfn_round_holds_keyframes_and_sends_frames_back_through_the_flow(server):
+    server.replies.extend([NFN_HOLD, plan_kml((near(0, -15, 10), TARGET), count=2)])
     suffix = uuid.uuid4().hex[:8]
     producer_name, reachback_name, swiftmap_name = (
         f"camera-{suffix}", f"reachback-{suffix}", f"swiftmap-{suffix}"
     )
     store = FrameStore()
-    rb = Reachback(store, Keyframes({0, 6}), interval=0)
+    rb = Reachback(store, Keyframes({0, 2, 7}), interval=0)
     stop = threading.Event()
     readies = [threading.Event() for _ in range(2)]
     threads = [
@@ -198,7 +211,14 @@ def test_frames_covering_a_weak_target_come_back_through_the_flow(server):
         threading.Thread(target=serve_reachback, daemon=True,
                          args=(reachback_name, swiftmap_name, rb, stop, readies[1])),
     ]
-    poses = [AWAY, BEST, SLIGHT, OFF, AWAY, AWAY, AWAY, AWAY, AWAY, AWAY]
+    poses = [AWAY, BEST, SLIGHT, OFF, AWAY, AWAY, AWAY, AWAY]
+
+    def until(condition):
+        deadline = time.monotonic() + TIMEOUT_S
+        while not condition() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert condition()
+
     try:
         for thread, ready in zip(threads, readies):
             thread.start()
@@ -217,19 +237,25 @@ def test_frames_covering_a_weak_target_come_back_through_the_flow(server):
             client.add_flow(f"flow-{suffix}", FLOW_SPEC.format(
                 producer=producer_name, reachback=reachback_name, swiftmap=swiftmap_name,
             ))
-            for n, pose in enumerate(poses):
-                seq = producer.send(numbered_frame(n, **pose).SerializeToString())
-                if outcome_of(reachback_events, seq) != uriel.Outcome.DROP:
-                    outcome_of(swiftmap_events, seq)
-                if n == 6:
-                    deadline = time.monotonic() + TIMEOUT_S
-                    while not rb.queue and time.monotonic() < deadline:
-                        time.sleep(0.05)
-            deadline = time.monotonic() + TIMEOUT_S
-            while len(server.kinds) < 5 and time.monotonic() < deadline:
-                time.sleep(0.05)
-            assert numbers_received(server) == [0, 6, 1, 2]
-            assert server.kinds == [FRAME, FRAME, REACHBACK, REACHBACK, REACHBACK_DONE]
+            def send(numbers):
+                for n in numbers:
+                    seq = producer.send(numbered_frame(n, **poses[n]).SerializeToString())
+                    if outcome_of(reachback_events, seq) != uriel.Outcome.DROP:
+                        outcome_of(swiftmap_events, seq)
+
+            send([0])
+            until(lambda: rb.holding)
+            send([1, 2, 3])
+            until(lambda: rb.queue)
+            send([4, 5, 6])
+            server.replies.append(NFN_RELEASE)
+            until(lambda: not rb.holding)
+            send([7])
+            until(lambda: len(server.received) == 4)
+            assert numbers_received(server) == [0, 1, 2, 7]
+            assert [k for k in server.kinds if k != POLL] == [
+                FRAME, REACHBACK, REACHBACK, REACHBACK_DONE, FRAME]
+            assert POLL in server.kinds
     finally:
         stop.set()
         for thread in threads:

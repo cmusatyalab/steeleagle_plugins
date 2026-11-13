@@ -3,11 +3,12 @@ reach back. It stores frames with where the camera was and where it looked,
 forwards keyframes (early_discard.KeyframeFilter) and drops the rest.
 
 It subscribes to the swiftmap engine on the remote daemon. When that engine
-asks for the frames covering the weak targets of a plan, keyframe selection
-pauses: each frame that comes in is only stored, and its place in the flow
-carries the next frame sent back (REACHBACK_FRAME_TYPE), then a
-REACHBACK_DONE_TYPE once all are sent. Then keyframe selection resumes. Put it
-right after the JPEG encoder."""
+asks for the frames covering the weak targets of a plan, each frame that comes
+in is only stored, and its place in the flow carries the next frame sent back
+(REACHBACK_FRAME_TYPE), then a REACHBACK_DONE_TYPE once all are sent. When it
+says to hold (the server closed a batch in NFN mode), frames are only stored
+and none is forwarded, besides those sent back, until it says to release. Put
+it right after the JPEG encoder."""
 
 import logging
 import math
@@ -120,19 +121,26 @@ class FrameStore:
 class Reachback:
     """Stores a frame with a camera pose every `interval` seconds per camera,
     and every keyframe `keyframes` keeps, as sent. Sends the frames asked for
-    in place of the frames coming in, before any more keyframes."""
+    in place of the frames coming in, before any more keyframes, and forwards
+    no keyframes while holding."""
 
     def __init__(self, store, keyframes, interval=STORE_INTERVAL_S):
         self.store = store
         self.keyframes = keyframes
         self.interval = interval
+        self.holding = False
         self.queue = []
         self._last_stored = {}
 
     def on_request(self, id, payload):
-        """Queues the frames covering the targets asked about, round-robin up
-        to the count asked for; ValueError if `payload` is not a request."""
-        targets, count = decode_request(payload)
+        """Holds or releases keyframes, or queues the frames covering the
+        targets asked about, round-robin up to the count asked for; ValueError
+        if `payload` is not a request."""
+        targets, count, hold = decode_request(payload)
+        if hold is not None:
+            self.holding = hold
+            logger.info("%s keyframes", "holding" if hold else "releasing")
+            return
         rowids, numbers, poses = self.store.unsent(id.producer, id.session)
         chosen, taken = [], set()
         while len(chosen) < count:
@@ -151,9 +159,9 @@ class Reachback:
     def on_input(self, input, now):
         """FORWARD, DROP, or (output type, payload) to send in place of `input`.
         Raises FrameError if it is not a frame the keyframe filter reads."""
-        if self.queue:
+        if self.queue or self.holding:
             self._store(input, now, sent=False)
-            return self.queue.pop(0)
+            return self.queue.pop(0) if self.queue else DROP
         keep = self.keyframes.keep(input)
         self._store(input, now, sent=keep)
         return FORWARD if keep else DROP

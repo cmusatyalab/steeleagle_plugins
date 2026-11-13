@@ -3,7 +3,12 @@ GPS fix, to the SwiftMap server as it arrives. A planned next-flight KML is
 the next frame's result, and asks the reachback engine for frames already
 taken that cover the weak targets its viewpoints look at. Those come back in
 the flow, as REACHBACK_FRAME_TYPE inputs and then a REACHBACK_DONE_TYPE, and
-go to the server marked as such."""
+go to the server marked as such.
+
+In NFN mode the server holds new frames from when a batch closes until its
+rounds are done, and says so on its replies (NFN_HOLD, NFN_RELEASE). The
+engine passes both on to reachback, and while held, polls the server every
+POLL_S for its plans, since no new frames go to it."""
 
 import json
 import logging
@@ -19,7 +24,7 @@ import uriel
 from google.protobuf.message import DecodeError
 
 from steeleagle_protocol.v1.messages.frame import frame_pb2
-from swiftmap.client import ERROR, FRAME, REACHBACK, REACHBACK_DONE
+from swiftmap.client import ERROR, FRAME, POLL, REACHBACK, REACHBACK_DONE
 
 logger = logging.getLogger("swiftmap")
 
@@ -32,8 +37,11 @@ REQUEST_TYPE = "swiftmap/ReachbackRequest"
 RGB_CHANNELS = 3
 POLL_INTERVAL_S = 0.1
 STATS_INTERVAL_S = 5.0
+POLL_S = 1.0
 NO_GPS = (math.nan, math.nan, math.nan)
 KML = "{http://www.opengis.net/kml/2.2}"
+NFN_HOLD = b'{"nfn": "hold"}'
+NFN_RELEASE = b'{"nfn": "release"}'
 
 
 def read_plan(kml):
@@ -54,17 +62,25 @@ def encode_request(targets, count):
     return json.dumps({"targets": targets, "count": count}).encode()
 
 
+def encode_hold(hold):
+    return json.dumps({"hold": hold}).encode()
+
+
 def decode_request(data):
-    """(targets, count) of a request; ValueError if it is not one."""
+    """(targets, count, hold) of a request: a plan's targets and how many frames
+    to send back for them, with hold None; or no targets and whether to hold
+    keyframes. ValueError if it is not one."""
     try:
         request = json.loads(data)
+        if "hold" in request:
+            return [], 0, bool(request["hold"])
         targets = [list(map(float, t)) for t in request["targets"]]
         count = int(request["count"])
     except (KeyError, TypeError, ValueError) as err:
         raise ValueError(f"not a request: {err}") from None
     if any(len(t) != 3 for t in targets) or count < 0:
         raise ValueError("a target is lat, lon, alt, and the count is not negative")
-    return targets, count
+    return targets, count, None
 
 
 class FrameError(Exception):
@@ -134,7 +150,8 @@ class Sender:
     def __init__(self, client):
         self.client = client
         self.sent = 0
-        self._kml = b""
+        self.last_sent = time.monotonic()
+        self._replies = []
         self._lock = threading.Lock()
         self._queue = None
 
@@ -150,16 +167,17 @@ class Sender:
         self.client.close()
 
     def send(self, jpeg, gps, kind=FRAME):
+        self.last_sent = time.monotonic()
         if self._queue is None:
             self._send(jpeg, gps, kind)
         else:
             self._queue.put((jpeg, gps, kind))
 
-    def take_kml(self):
-        """The KML planned since the last call, or b""."""
+    def take_replies(self):
+        """The payloads the server sent back since the last call, in order."""
         with self._lock:
-            kml, self._kml = self._kml, b""
-        return kml
+            replies, self._replies = self._replies, []
+        return replies
 
     def _run(self):
         while (item := self._queue.get()) is not None:
@@ -169,25 +187,28 @@ class Sender:
                 logger.exception("failed to send a frame")
 
     def _send(self, jpeg, gps, kind):
-        status, kml = self.client.send_frame(jpeg, gps, kind)
+        status, payload = self.client.send_frame(jpeg, gps, kind)
         if status == ERROR:
             logger.warning("SwiftMap server unreachable; frame not mapped")
             return
-        self.sent += 1
-        if kml:
-            logger.info("SwiftMap planned a next-flight area (%d bytes of KML)", len(kml))
+        self.sent += kind != POLL
+        if payload:
             with self._lock:
-                self._kml = kml
+                self._replies.append(payload)
 
 
 class SwiftMap:
     """Sends frames to the server as they come, frames sent back marked as
     such, and asks reachback for the frames covering the weak targets of each
-    plan the server sends."""
+    plan the server sends. Passes the server's NFN hold and release on to
+    reachback, and polls the server while held."""
 
     def __init__(self, sender, *, jpeg_quality):
         self.sender = sender
         self.jpeg_quality = jpeg_quality
+        self.holding = False
+        self.last_id = None
+        self.result = b""
         self.requests = []
         self.received = self.sent_back = 0
         self._last_received = 0
@@ -195,6 +216,7 @@ class SwiftMap:
 
     def on_input(self, input):
         self._log_stats()
+        self.last_id = input.id
         kind = input.payload_type.replace(".", "/")
         if kind == REACHBACK_DONE_TYPE:
             logger.info("all %d frames sent back are in", self.sent_back)
@@ -210,21 +232,45 @@ class SwiftMap:
         except FrameError as err:
             logger.warning("input %d: %s", input.id.seq, err)
 
-    def on_kml(self, id, kml):
-        """Asks for the frames covering the targets of the plan `kml`, about the input `id`."""
+    def on_reply(self, payload):
+        """Handles a payload the server sent back: an NFN hold or release, passed
+        on to reachback, or a plan, the next result, whose targets it asks for."""
+        if payload in (NFN_HOLD, NFN_RELEASE):
+            self.holding = payload == NFN_HOLD
+            logger.info("NFN %s", "hold: polling for plans" if self.holding else "release")
+            self._ask(encode_hold(self.holding))
+            return
+        logger.info("SwiftMap planned a next-flight area (%d bytes of KML)", len(payload))
+        self.result = payload
         try:
-            targets, count = read_plan(kml)
+            targets, count = read_plan(payload)
         except ValueError as err:
             logger.warning("can't read the planned KML: %s", err)
             return
         if targets and count:
             logger.info("asking for %d frames covering %d weak targets", count, len(targets))
-            self.requests.append((id, encode_request(targets, count)))
+            self._ask(encode_request(targets, count))
+
+    def _ask(self, payload):
+        if self.last_id is None:
+            logger.warning("no input yet to ask reachback about")
+            return
+        self.requests.append((self.last_id, payload))
+
+    def take_result(self):
+        """The plan to report as the next result, or b""."""
+        result, self.result = self.result, b""
+        return result
 
     def take_requests(self):
         """The requests to publish, as (input id, payload)."""
         requests, self.requests = self.requests, []
         return requests
+
+    def poll(self, now):
+        """While held, asks the server every POLL_S for what it has queued."""
+        if self.holding and now - self.sender.last_sent >= POLL_S:
+            self.sender.send(b"", NO_GPS, POLL)
 
     def _log_stats(self):
         self.received += 1
@@ -259,17 +305,22 @@ def run(name, swiftmap, *, max_output_size, stop, on_ready=None):
                     swiftmap.on_input(input)
                 except Exception:
                     logger.exception("input %d: failed to handle it", input.id.seq)
-                result = swiftmap.sender.take_kml()
-                if result:
-                    swiftmap.on_kml(input.id, result)
+            for payload in swiftmap.sender.take_replies():
+                try:
+                    swiftmap.on_reply(payload)
+                except Exception:
+                    logger.exception("failed to handle what the server sent back")
+            if input is not None:
+                result = swiftmap.take_result()
                 if len(result) > max_output_size:
                     logger.warning("input %d: KML of %d bytes is over max_output_size",
                                    input.id.seq, len(result))
                     result = b""
                 engine.forward(result=result)
+            swiftmap.poll(time.monotonic())
             if flow is not None:
                 for id, payload in swiftmap.take_requests():
                     try:
                         engine.publish_derived(id, flow, payload, result_type=REQUEST_TYPE)
                     except Exception:
-                        logger.exception("failed to ask reachback for frames")
+                        logger.exception("failed to ask reachback")
