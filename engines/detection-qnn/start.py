@@ -15,6 +15,7 @@ DEFAULTS = {
     "log_level": "info",
     "max_output_size": 65536,
     "early_discard": False,
+    "letterbox_interpolation": "linear",
 }
 
 args = json.loads(os.environ.get("STEELEAGLE_PLUGIN_ARGS") or "{}")
@@ -95,6 +96,7 @@ server_args = [
     "--nms_iou_threshold", str(args["nms_iou_threshold"]),
     "--log_level", str(args["log_level"]),
     "--uriel_max_result_size", str(args["max_output_size"]),
+    "--letterbox_interpolation", str(args["letterbox_interpolation"]),
 ]
 if labels:
     server_args += ["--labels", labels]

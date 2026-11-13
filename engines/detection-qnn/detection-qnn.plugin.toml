@@ -63,6 +63,12 @@ type = "boolean"
 description = "Drop frames with no detections instead of forwarding them to the next engines"
 default = false
 
+[[args]]
+name = "letterbox_interpolation"
+type = "string"
+description = "How frames are resized to the model's input: \"linear\" (bilinear, as Ultralytics resizes) or \"area\" (area averaging, slower)"
+default = "linear"
+
 [engine]
 type = "detection"
 inputs = [
