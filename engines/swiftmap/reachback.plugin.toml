@@ -1,7 +1,7 @@
 [plugin]
 name = "SwiftMap Reachback"
 type = "engine"
-description = "Keyframe selection and reach back for SwiftMap, on the vehicle. Stores frames with where the camera was and where it looked, and forwards only keyframes. When the swiftmap engine on the remote daemon asks for frames covering the weak targets of a plan, keyframe selection pauses and the stored frames that cover them are sent in the flow instead, then keyframe selection resumes. Put it right after the JPEG encoder"
+description = "Keyframe selection and reach back for SwiftMap, on the vehicle. Stores frames with where the camera was and where it looked, and forwards only keyframes. When the swiftmap engine on the remote daemon asks for frames covering the weak targets of a plan, keyframe selection pauses and the stored frames that cover them are sent in the flow instead, each sent again if it does not arrive, then keyframe selection resumes. Put it right after the JPEG encoder"
 
 [[args]]
 name = "remote"
@@ -32,4 +32,5 @@ type = "filter"
 inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]
 # No result: a keyframe is forwarded unchanged and any other frame dropped;
 # while frames are sent back, each frame's place carries one of them
-# (swiftmap/ReachbackFrame, an EncodedFrame), then a swiftmap/ReachbackDone
+# (swiftmap/ReachbackFrame, an EncodedFrame stamped with the request), then a
+# swiftmap/ReachbackDone

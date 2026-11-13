@@ -1,22 +1,30 @@
 """The swiftmap engine: forwards each frame unchanged and sends it, with its
 GPS fix, to the SwiftMap server as it arrives. A planned next-flight KML is
-the next frame's result, and asks the reachback engine for frames already
-taken that cover the weak targets its viewpoints look at. Those come back in
-the flow, as REACHBACK_FRAME_TYPE inputs and then a REACHBACK_DONE_TYPE, and
-go to the server marked as such.
+the next frame's result.
 
 In NFN mode the server holds new frames from when a batch closes until its
-rounds are done, and says so on its replies (NFN_HOLD, NFN_RELEASE). The
-engine passes both on to reachback, and while held, polls the server every
-POLL_S for its plans, since no new frames go to it."""
+rounds are done, and says so on its replies (NFN_HOLD, NFN_RELEASE); while
+held, the engine polls it every POLL_S for its plans, since no new frames go
+to it. Each plan with weak targets is a request, with an id of its own, for
+frames already taken that cover them.
+
+The engine tells the reachback engine the NFN status, whether the server
+holds and the current request, at once when it changes and every STATUS_S
+after, so a status lost on the way is soon made good. Reachback sends the
+frames back in the flow, as REACHBACK_FRAME_TYPE inputs and then a
+REACHBACK_DONE_TYPE, each stamped with the request it answers, and sends
+again whatever does not arrive. The engine passes each on to the server once,
+and drops anything for another request."""
 
 import json
 import logging
 import math
 import queue
+import struct
 import threading
 import time
 import xml.etree.ElementTree as ET
+from typing import NamedTuple
 
 import cv2
 import numpy as np
@@ -33,15 +41,20 @@ ENCODED_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
 REACHBACK_FRAME_TYPE = "swiftmap/ReachbackFrame"
 REACHBACK_DONE_TYPE = "swiftmap/ReachbackDone"
 GENERIC_RESULT_TYPE = "steeleagle_protocol/v1/messages/result/GenericResult"
-REQUEST_TYPE = "swiftmap/ReachbackRequest"
+STATUS_TYPE = "swiftmap/NfnStatus"
 RGB_CHANNELS = 3
 POLL_INTERVAL_S = 0.1
 STATS_INTERVAL_S = 5.0
 POLL_S = 1.0
+STATUS_S = 1.0
 NO_GPS = (math.nan, math.nan, math.nan)
 KML = "{http://www.opengis.net/kml/2.2}"
 NFN_HOLD = b'{"nfn": "hold"}'
 NFN_RELEASE = b'{"nfn": "release"}'
+# Before each frame sent back: the request it answers and its number in the
+# reply; before the end, the request and how many frames there are
+STAMP_FMT = "!QI"
+STAMP_NBYTES = struct.calcsize(STAMP_FMT)
 
 
 def read_plan(kml):
@@ -58,33 +71,58 @@ def read_plan(kml):
     return targets, count
 
 
-def encode_request(targets, count):
-    return json.dumps({"targets": targets, "count": count}).encode()
+class Request(NamedTuple):
+    """A plan's request for `count` frames covering its `targets`, each
+    [lat, lon, alt]. Its `id` is never reused, across restarts too."""
+
+    id: int
+    targets: list
+    count: int
 
 
-def encode_hold(hold):
-    return json.dumps({"hold": hold}).encode()
+def encode_status(hold, request):
+    """The NFN status: whether the server holds new frames, and the current
+    Request or None."""
+    return json.dumps(
+        {"hold": hold, "request": None if request is None else request._asdict()}
+    ).encode()
 
 
-def decode_request(data):
-    """(targets, count, hold) of a request: a plan's targets and how many frames
-    to send back for them, with hold None; or no targets and whether to hold
-    keyframes. ValueError if it is not one."""
+def decode_status(data):
+    """(hold, Request or None) of an NFN status; ValueError if it is not one."""
     try:
-        request = json.loads(data)
-        if "hold" in request:
-            return [], 0, bool(request["hold"])
-        targets = [list(map(float, t)) for t in request["targets"]]
-        count = int(request["count"])
+        status = json.loads(data)
+        hold, request = status["hold"], status["request"]
+        if not isinstance(hold, bool):
+            raise ValueError("hold is not true or false")
+        if request is not None:
+            request = Request(int(request["id"]),
+                              [list(map(float, t)) for t in request["targets"]],
+                              int(request["count"]))
     except (KeyError, TypeError, ValueError) as err:
-        raise ValueError(f"not a request: {err}") from None
-    if any(len(t) != 3 for t in targets) or count < 0:
-        raise ValueError("a target is lat, lon, alt, and the count is not negative")
-    return targets, count, None
+        raise ValueError(f"not an NFN status: {err}") from None
+    if request is not None and (request.id < 0 or request.count < 0
+                                or any(len(t) != 3 for t in request.targets)):
+        raise ValueError("a target is lat, lon, alt, and the id and count are not negative")
+    return hold, request
 
 
 class FrameError(Exception):
     pass
+
+
+def stamp(request_id, number, data=b""):
+    """`data` stamped with the request it answers and `number`: a frame's
+    number in the reply, or on the end, how many frames there are."""
+    return struct.pack(STAMP_FMT, request_id, number) + data
+
+
+def unstamp(data):
+    """(request id, number, data) of a stamped payload."""
+    if len(data) < STAMP_NBYTES:
+        raise FrameError(f"{len(data)} bytes is too short to be stamped")
+    request_id, number = struct.unpack_from(STAMP_FMT, data)
+    return request_id, number, data[STAMP_NBYTES:]
 
 
 def frame_gps(frame):
@@ -100,12 +138,12 @@ def frame_gps(frame):
 
 def read_frame(payload_type, data):
     """The RawFrame or EncodedFrame `data`. Its type may be written with
-    slashes or dots; a frame sent back is an EncodedFrame."""
+    slashes or dots."""
     kind = payload_type.replace(".", "/")
     try:
         if kind == RAW_FRAME_TYPE:
             return frame_pb2.RawFrame.FromString(data)
-        if kind in (ENCODED_FRAME_TYPE, REACHBACK_FRAME_TYPE):
+        if kind == ENCODED_FRAME_TYPE:
             return frame_pb2.EncodedFrame.FromString(data)
     except DecodeError as err:
         raise FrameError(f"bad {payload_type}: {err}") from None
@@ -198,19 +236,29 @@ class Sender:
 
 
 class SwiftMap:
-    """Sends frames to the server as they come, frames sent back marked as
-    such, and asks reachback for the frames covering the weak targets of each
-    plan the server sends. Passes the server's NFN hold and release on to
-    reachback, and polls the server while held."""
+    """Sends frames to the server as they come, and frames sent back for the
+    current request once each, marked as such. Keeps the NFN status: whether
+    the server holds, which it says on its replies, and the request of its
+    last plan. Polls the server while held."""
 
     def __init__(self, sender, *, jpeg_quality):
         self.sender = sender
         self.jpeg_quality = jpeg_quality
+        # Whether the server has said anything of NFN yet; until then there
+        # is no status to tell
+        self.nfn = False
         self.holding = False
+        self.request = None
         self.last_id = None
         self.result = b""
-        self.requests = []
-        self.received = self.sent_back = 0
+        self.received = 0
+        # Request ids go up from the time the engine started, so a restart
+        # never reuses one reachback has seen
+        self._last_request_id = time.time_ns()
+        self._sent_back = set()
+        self._done = False
+        self._status_due = False
+        self._last_status = float("-inf")
         self._last_received = 0
         self._last_stats = time.monotonic()
 
@@ -218,27 +266,51 @@ class SwiftMap:
         self._log_stats()
         self.last_id = input.id
         kind = input.payload_type.replace(".", "/")
-        if kind == REACHBACK_DONE_TYPE:
-            logger.info("all %d frames sent back are in", self.sent_back)
-            self.sender.send(b"", NO_GPS, REACHBACK_DONE)
-            self.sent_back = 0
-            return
         try:
-            frame = read_frame(input.payload_type, bytes(input.data))
-            reachback = kind == REACHBACK_FRAME_TYPE
-            self.sender.send(to_jpeg(frame, self.jpeg_quality), frame_gps(frame) or NO_GPS,
-                             REACHBACK if reachback else FRAME)
-            self.sent_back += reachback
+            if kind == REACHBACK_DONE_TYPE:
+                request_id, count, _ = unstamp(bytes(input.data))
+                self._on_done(request_id, count)
+            elif kind == REACHBACK_FRAME_TYPE:
+                self._on_sent_back(*unstamp(bytes(input.data)))
+            else:
+                frame = read_frame(input.payload_type, bytes(input.data))
+                self.sender.send(to_jpeg(frame, self.jpeg_quality), frame_gps(frame) or NO_GPS,
+                                 FRAME)
         except FrameError as err:
             logger.warning("input %d: %s", input.id.seq, err)
 
+    def _current(self, request_id):
+        """Whether `request_id` is the current request, whose end is not in."""
+        return self.request is not None and request_id == self.request.id and not self._done
+
+    def _on_sent_back(self, request_id, number, data):
+        if not self._current(request_id) or number in self._sent_back:
+            logger.info("dropping frame %d of request %d: sent twice, late, or for an old request",
+                        number, request_id)
+            return
+        frame = read_frame(ENCODED_FRAME_TYPE, data)
+        self.sender.send(to_jpeg(frame, self.jpeg_quality), frame_gps(frame) or NO_GPS, REACHBACK)
+        self._sent_back.add(number)
+
+    def _on_done(self, request_id, count):
+        if not self._current(request_id):
+            logger.info("dropping the end of request %d: sent twice or for an old request",
+                        request_id)
+            return
+        self._done = True
+        logger.info("request %d: all frames sent back are in, %d of the %d picked",
+                    request_id, len(self._sent_back), count)
+        self.sender.send(b"", NO_GPS, REACHBACK_DONE)
+
     def on_reply(self, payload):
-        """Handles a payload the server sent back: an NFN hold or release, passed
-        on to reachback, or a plan, the next result, whose targets it asks for."""
+        """Handles a payload the server sent back: an NFN hold or release, or a
+        plan, the next result, which is the next request if it has weak
+        targets and a count."""
         if payload in (NFN_HOLD, NFN_RELEASE):
+            self.nfn = True
             self.holding = payload == NFN_HOLD
             logger.info("NFN %s", "hold: polling for plans" if self.holding else "release")
-            self._ask(encode_hold(self.holding))
+            self._set_request(None)
             return
         logger.info("SwiftMap planned a next-flight area (%d bytes of KML)", len(payload))
         self.result = payload
@@ -246,26 +318,38 @@ class SwiftMap:
             targets, count = read_plan(payload)
         except ValueError as err:
             logger.warning("can't read the planned KML: %s", err)
+            targets, count = [], 0
+        if not (targets and count):
+            self._set_request(None)
             return
-        if targets and count:
-            logger.info("asking for %d frames covering %d weak targets", count, len(targets))
-            self._ask(encode_request(targets, count))
+        self.nfn = True
+        self._last_request_id += 1
+        logger.info("request %d: %d frames covering %d weak targets",
+                    self._last_request_id, count, len(targets))
+        self._set_request(Request(self._last_request_id, targets, count))
 
-    def _ask(self, payload):
-        if self.last_id is None:
-            logger.warning("no input yet to ask reachback about")
-            return
-        self.requests.append((self.last_id, payload))
+    def _set_request(self, request):
+        self.request = request
+        self._sent_back = set()
+        self._done = False
+        self._status_due = True
+
+    def take_status(self, now):
+        """The NFN status to tell reachback, or None if none is due: one is at
+        once when it changes, and every STATUS_S from the server's first NFN
+        notice or plan on."""
+        if not self.nfn or self.last_id is None:
+            return None
+        if not self._status_due and now - self._last_status < STATUS_S:
+            return None
+        self._status_due = False
+        self._last_status = now
+        return encode_status(self.holding, self.request)
 
     def take_result(self):
         """The plan to report as the next result, or b""."""
         result, self.result = self.result, b""
         return result
-
-    def take_requests(self):
-        """The requests to publish, as (input id, payload)."""
-        requests, self.requests = self.requests, []
-        return requests
 
     def poll(self, now):
         """While held, asks the server every POLL_S for what it has queued."""
@@ -318,9 +402,8 @@ def run(name, swiftmap, *, max_output_size, stop, on_ready=None):
                     result = b""
                 engine.forward(result=result)
             swiftmap.poll(time.monotonic())
-            if flow is not None:
-                for id, payload in swiftmap.take_requests():
-                    try:
-                        engine.publish_derived(id, flow, payload, result_type=REQUEST_TYPE)
-                    except Exception:
-                        logger.exception("failed to ask reachback")
+            if flow is not None and (status := swiftmap.take_status(time.monotonic())) is not None:
+                try:
+                    engine.publish_derived(swiftmap.last_id, flow, status, result_type=STATUS_TYPE)
+                except Exception:
+                    logger.exception("failed to tell reachback the NFN status")

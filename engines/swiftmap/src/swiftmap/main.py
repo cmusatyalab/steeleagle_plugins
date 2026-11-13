@@ -90,7 +90,8 @@ def run_reachback(name, args, stop):
     keyframes = KeyframeFilter(min_disparity=args["min_disparity"],
                                send_distance=args["send_distance"])
     try:
-        reachback.run(name, Reachback(store, keyframes), f"{remote_ip}.{args['remote']}",
+        reachback.run(name, Reachback(store, keyframes, max_size=args["max_output_size"]),
+                      f"{remote_ip}.{args['remote']}",
                       max_output_size=args["max_output_size"], stop=stop)
     finally:
         store.close()
