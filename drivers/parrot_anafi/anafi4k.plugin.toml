@@ -41,8 +41,8 @@ type = "copter"
 [[driver.cameras]] # Driver cameras (can be empty)
 # Name of the camera
 name = "rgb"
-# Type of input it creates
-type = "steeleagle_protocol/v1/messages/frame/RawFrame"
+# Type of output it creates
+output = "steeleagle_protocol/v1/messages/frame/RawFrame"
 # Description of which camera it is on the device (optional)
 description = "Main RGB camera on the gimbal, as its 720p live stream"
 # Resolution and frame rate of the live stream (recording is up to 4K, but
