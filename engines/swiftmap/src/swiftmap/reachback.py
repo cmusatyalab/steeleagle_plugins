@@ -170,8 +170,8 @@ class Reachback:
 
     def on_status(self, id, payload, now):
         """Holds or releases keyframes, and starts a request not seen yet by
-        picking covering frames target by target up to its count. A status
-        without a request drops what is left of the last."""
+        picking, for each of its first `count` targets, the best covering frame,
+        if any. A status without a request drops what is left of the last."""
         hold, request = decode_status(payload)
         self._heard = now
         if hold != self.holding:
@@ -188,15 +188,10 @@ class Reachback:
         self.request_id = request.id
         rowids, numbers, poses = self.store.unsent(id.producer, id.session)
         chosen, taken = [], set()
-        while len(chosen) < request.count:
-            before = len(chosen)
-            for target in request.targets[:request.count - len(chosen)]:
-                i = covering(poses, numbers, target, taken)
-                if i is not None:
-                    taken.add(int(numbers[i]))
-                    chosen.append(rowids[i])
-            if len(chosen) == before:
-                break
+        for target in request.targets[:request.count]:
+            if (i := covering(poses, numbers, target, taken)) is not None:
+                taken.add(int(numbers[i]))
+                chosen.append(rowids[i])
         for rowid in chosen:
             data = self.store.read(rowid)
             payload = None if data is None else stamp(request.id, len(self.todo), data)

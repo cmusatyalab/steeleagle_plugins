@@ -178,15 +178,22 @@ def test_a_skipped_frame_is_not_given_up_while_frames_go_one_at_a_time(store):
     assert rb.on_input(numbered_input(40), 1.0) not in (DROP, first)
 
 
-def test_a_request_sends_at_most_its_count_and_the_end_even_with_none(store):
+def test_a_request_sends_one_frame_per_coverable_target_up_to_its_count_and_the_end_even_with_none(store):
     rb = answering(store)
+    # One target, though the count allows more: only its best frame
     tell(rb, True, Request(1, [WEAK], 5))
-    assert [out.output_type for out in rb.todo] == [REACHBACK_FRAME_TYPE] * 2
-    for out in rb.todo:
-        store.mark_sent(out.rowid)
-    tell(rb, True, Request(2, [WEAK], 5))
+    assert [number_of(unstamp(out.payload)[2]) for out in rb.todo] == [4]
+    # The count caps the targets served
+    tell(rb, True, Request(2, [WEAK, WEAK], 1))
+    assert len(rb.todo) == 1
+    # A target no stored frame covers gets none; the end still goes
+    tell(rb, True, Request(3, [[41.0, -80.0, 0.0], WEAK], 5))
+    assert [number_of(unstamp(out.payload)[2]) for out in rb.todo] == [4]
+    for rowid in store.unsent("camera", 1)[0]:
+        store.mark_sent(rowid)
+    tell(rb, True, Request(4, [WEAK], 5))
     assert not rb.todo
-    assert unstamped(rb.on_input(numbered_input(20), 1.0)) == (REACHBACK_DONE_TYPE, 2, 0, None)
+    assert unstamped(rb.on_input(numbered_input(20), 1.0)) == (REACHBACK_DONE_TYPE, 4, 0, None)
     with pytest.raises(ValueError):
         rb.on_status(Id(9), b"{}", 1.0)
 
@@ -323,7 +330,8 @@ to = "{swiftmap}"
 timeout = "{timeout}"
 """
 POSES = [AWAY, BEST, SLIGHT, OFF]
-PLAN = plan_kml((near(0, -15, 10), TARGET), count=2)
+# Two weak targets at the same spot: one frame each, the best then the next best
+PLAN = plan_kml((near(0, -15, 10), TARGET), (near(0, -15, 10), TARGET), count=2)
 
 
 class StallingSwiftMap(SwiftMap):

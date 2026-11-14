@@ -34,7 +34,7 @@ Does VGGT-Omega's preprocessing on board: center-crop an aspect ratio outside [0
 
 **Store.** One frame every 0.2 s per camera, plus every keyframe, with its GPS and gimbal yaw/pitch, in SQLite (newest 6000).
 
-**Reach back.** For each new request in the NFN status, it picks per target the unsent stored frame seeing it nearest the view's centre (within 25° and 50 m), up to the count, and sends them in place of incoming frames as `swiftmap/ReachbackFrame`, then a `swiftmap/ReachbackDone`. While the status says hold, nothing is forwarded.
+**Reach back.** For each new request in the NFN status, it picks one frame per target, for up to `count` targets: the unsent stored frame seeing it nearest the view's centre, within 25° and 50 m. A target no frame covers gets none. It sends them one at a time, in place of incoming frames as `swiftmap/ReachbackFrame`, then a `swiftmap/ReachbackDone`. While the status says hold, nothing is forwarded.
 
 | Arg | Default | |
 | --- | --- | --- |
