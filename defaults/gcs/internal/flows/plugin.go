@@ -35,17 +35,37 @@ type Event struct {
 	Type  *string `json:"type"`
 }
 
+// EngineProducer is a producer an engine advertises, as
+// {engine full name}/{Name} in a flow, of inputs of Type.
+type EngineProducer struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
 // Engine is an engine service. Name is its full service name and Bare the
-// part after its daemon's IP.
+// part after its daemon's IP. Forwards is the input type it passes along its
+// output edges, or "*" for whichever of its inputs arrive.
 type Engine struct {
-	Name     string   `json:"name"`
-	Bare     string   `json:"bare"`
-	Category *string  `json:"category"`
-	Accepts  []string `json:"accepts"`
-	Result   string   `json:"result"`
-	Events   []Event  `json:"events"`
-	Typed    bool     `json:"typed"`
-	Problem  string   `json:"problem,omitempty"`
+	Name      string           `json:"name"`
+	Bare      string           `json:"bare"`
+	Category  *string          `json:"category"`
+	Accepts   []string         `json:"accepts"`
+	Forwards  string           `json:"forwards"`
+	Result    string           `json:"result"`
+	Events    []Event          `json:"events"`
+	Producers []EngineProducer `json:"producers"`
+	Typed     bool             `json:"typed"`
+	Problem   string           `json:"problem,omitempty"`
+}
+
+// Producer returns the engine's producer called name.
+func (e Engine) Producer(name string) (EngineProducer, bool) {
+	for _, p := range e.Producers {
+		if p.Name == name {
+			return p, true
+		}
+	}
+	return EngineProducer{}, false
 }
 
 // telemetryStream is the stream every vehicle has, whatever its driver declares.
@@ -78,13 +98,13 @@ func ParseDriver(conf []byte) (streams []Stream, problems []string, err error) {
 		switch {
 		case c.Name == "":
 			problems = append(problems, "a camera has no name; skipped")
-		case c.Type == "":
-			problems = append(problems, fmt.Sprintf("camera %q has no type; skipped", c.Name))
+		case c.Output == "":
+			problems = append(problems, fmt.Sprintf("camera %q has no output type; skipped", c.Name))
 		case hasStream(streams, c.Name):
 			problems = append(problems, fmt.Sprintf("camera %q duplicates the %s stream; skipped", c.Name, c.Name))
 		default:
 			streams = append(streams, Stream{
-				Name: c.Name, Kind: "camera", Type: c.Type, Primary: c.Primary,
+				Name: c.Name, Kind: "camera", Type: c.Output, Primary: c.Primary,
 				Description: c.Description,
 				HRes:        optInt(c.HRes), VRes: optInt(c.VRes), FPS: optInt(c.Fps),
 			})
@@ -122,11 +142,17 @@ func ParseEngine(conf []byte) (Engine, error) {
 			return Engine{}, errors.New("[engine] inputs must be a list of message types")
 		}
 	}
+	// Parsing defaulted forwards to "*" and checked it is one of the inputs.
 	out := Engine{
-		Accepts: append([]string(nil), e.Inputs...),
-		Result:  e.Result,
-		Events:  []Event{resultEvent(e.Result)},
-		Typed:   true,
+		Accepts:   append([]string(nil), e.Inputs...),
+		Forwards:  e.Forwards,
+		Result:    e.Result,
+		Events:    []Event{resultEvent(e.Result)},
+		Producers: make([]EngineProducer, 0, len(e.Producers)),
+		Typed:     true,
+	}
+	for _, p := range e.Producers {
+		out.Producers = append(out.Producers, EngineProducer{Name: p.Name, Type: p.Output})
 	}
 	if e.Type != "" {
 		t := e.Type
@@ -143,10 +169,11 @@ func resultEvent(result string) Event {
 }
 
 // untypedEngine is an engine whose plugin config can't be read: it accepts
-// anything and emits an untyped result.
+// anything, forwards what it gets, emits an untyped result, and advertises no
+// producers.
 func untypedEngine(problem string) Engine {
 	return Engine{
-		Accepts: []string{"*"}, Events: []Event{resultEvent("")},
-		Problem: problem,
+		Accepts: []string{"*"}, Forwards: config.ForwardsAll, Events: []Event{resultEvent("")},
+		Producers: []EngineProducer{}, Problem: problem,
 	}
 }

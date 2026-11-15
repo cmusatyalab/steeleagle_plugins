@@ -37,7 +37,7 @@ func get(t *testing.T, h http.HandlerFunc, query string) (*httptest.ResponseReco
 }
 
 func TestRejectsAnUnknownWindowOrNoVehicle(t *testing.T) {
-	h := NewFlowHandler(flowOf(gcsFlow, nil), twoDaemons, &fakeProm{}, zerolog.Nop())
+	h := NewFlowHandler(flowOf(gcsFlow, nil), twoDaemons, &fakeProm{}, lambda2IP, zerolog.Nop())
 
 	if rec, _ := get(t, h, "vehicle="+fakeDrone+"&window=2m"); rec.Code != http.StatusBadRequest {
 		t.Errorf("window=2m: %d, want 400", rec.Code)
@@ -48,7 +48,7 @@ func TestRejectsAnUnknownWindowOrNoVehicle(t *testing.T) {
 }
 
 func TestWindowDefaultsToOneMinute(t *testing.T) {
-	h := NewFlowHandler(flowOf(gcsFlow, nil), twoDaemons, &fakeProm{}, zerolog.Nop())
+	h := NewFlowHandler(flowOf(gcsFlow, nil), twoDaemons, &fakeProm{}, lambda2IP, zerolog.Nop())
 
 	rec, v := get(t, h, "vehicle="+fakeDrone)
 
@@ -58,7 +58,7 @@ func TestWindowDefaultsToOneMinute(t *testing.T) {
 }
 
 func TestUnknownVehicleIsNotFound(t *testing.T) {
-	h := NewFlowHandler(flowOf("", status.Error(codes.NotFound, "no such vehicle")), twoDaemons, &fakeProm{}, zerolog.Nop())
+	h := NewFlowHandler(flowOf("", status.Error(codes.NotFound, "no such vehicle")), twoDaemons, &fakeProm{}, lambda2IP, zerolog.Nop())
 
 	if rec, _ := get(t, h, "vehicle=ghost"); rec.Code != http.StatusNotFound {
 		t.Errorf("got %d, want 404", rec.Code)
@@ -66,7 +66,7 @@ func TestUnknownVehicleIsNotFound(t *testing.T) {
 }
 
 func TestNoFlowState(t *testing.T) {
-	h := NewFlowHandler(flowOf("", nil), twoDaemons, &fakeProm{}, zerolog.Nop())
+	h := NewFlowHandler(flowOf("", nil), twoDaemons, &fakeProm{}, lambda2IP, zerolog.Nop())
 
 	rec, v := get(t, h, "vehicle="+fakeDrone)
 
@@ -76,7 +76,7 @@ func TestNoFlowState(t *testing.T) {
 }
 
 func TestOKStateMarksTheBottleneck(t *testing.T) {
-	h := NewFlowHandler(flowOf(gcsFlow, nil), twoDaemons, &fakeProm{answers: encoderAnswers()}, zerolog.Nop())
+	h := NewFlowHandler(flowOf(gcsFlow, nil), twoDaemons, &fakeProm{answers: encoderAnswers()}, lambda2IP, zerolog.Nop())
 
 	rec, v := get(t, h, "vehicle="+fakeDrone+"&window=5m")
 
@@ -89,7 +89,7 @@ func TestOKStateMarksTheBottleneck(t *testing.T) {
 }
 
 func TestPrometheusDownStillReturnsTheFlow(t *testing.T) {
-	h := NewFlowHandler(flowOf(gcsFlow, nil), twoDaemons, &fakeProm{err: errors.New("connection refused")}, zerolog.Nop())
+	h := NewFlowHandler(flowOf(gcsFlow, nil), twoDaemons, &fakeProm{err: errors.New("connection refused")}, lambda2IP, zerolog.Nop())
 
 	rec, v := get(t, h, "vehicle="+fakeDrone)
 
@@ -104,7 +104,7 @@ func TestPrometheusDownStillReturnsTheFlow(t *testing.T) {
 }
 
 func TestFlowThatCantBeReadIsABadGateway(t *testing.T) {
-	h := NewFlowHandler(flowOf("", status.Error(codes.Unavailable, "daemon down")), twoDaemons, &fakeProm{}, zerolog.Nop())
+	h := NewFlowHandler(flowOf("", status.Error(codes.Unavailable, "daemon down")), twoDaemons, &fakeProm{}, lambda2IP, zerolog.Nop())
 
 	if rec, _ := get(t, h, "vehicle="+fakeDrone); rec.Code != http.StatusBadGateway {
 		t.Errorf("got %d, want 502", rec.Code)
@@ -121,7 +121,7 @@ func (h *hungProm) Query(ctx context.Context, query string, ts time.Time, opts .
 }
 
 func TestHungPrometheusTimesOutAsUnreachable(t *testing.T) {
-	h := NewFlowHandler(flowOf(gcsFlow, nil), twoDaemons, &hungProm{}, zerolog.Nop())
+	h := NewFlowHandler(flowOf(gcsFlow, nil), twoDaemons, &hungProm{}, lambda2IP, zerolog.Nop())
 	started := time.Now()
 
 	rec, v := get(t, h, "vehicle="+fakeDrone)

@@ -15,7 +15,7 @@ type = "copter"
 
 [[driver.cameras]]
 name = "rgb"
-type = "steeleagle_protocol/v1/messages/frame/RawFrame"
+output = "steeleagle_protocol/v1/messages/frame/RawFrame"
 description = "Main"
 hres = 1080
 vres = 720
@@ -24,7 +24,7 @@ primary = true
 
 [[driver.cameras]]
 name = "thermal"
-type = "steeleagle_protocol/v1/messages/frame/RawFrame"
+output = "steeleagle_protocol/v1/messages/frame/RawFrame"
 `
 
 func TestParseDriverStreams(t *testing.T) {
@@ -58,19 +58,19 @@ func TestParseDriverSkipsBadCameras(t *testing.T) {
 [driver]
 type = "copter"
 [[driver.cameras]]
-type = "t"
+output = "t"
 [[driver.cameras]]
 name = "notype"
 [[driver.cameras]]
 name = "telemetry"
-type = "t"
+output = "t"
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
 		"a camera has no name; skipped",
-		`camera "notype" has no type; skipped`,
+		`camera "notype" has no output type; skipped`,
 		`camera "telemetry" duplicates the telemetry stream; skipped`,
 	}
 	if strings.Join(problems, "|") != strings.Join(want, "|") {

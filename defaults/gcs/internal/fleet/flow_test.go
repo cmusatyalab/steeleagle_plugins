@@ -41,13 +41,14 @@ func TestBuildFlowLocal(t *testing.T) {
 	if noVideo != "" {
 		t.Errorf("noVideo = %q, want empty", noVideo)
 	}
-	checkFlow(t, flow, []config.Producer{{Name: "telemetry"}, {Name: "front", Tokens: &one}}, []config.Engine{
-		{Name: "100.64.1.5.encoder", Location: config.LocationLocal},
-		{Name: "100.64.1.5.gcs", Location: config.LocationLocal},
+	// The GCS engine is on the vehicle's daemon, so it is local too
+	checkFlow(t, flow, []config.Producer{{Name: "vehicle.telemetry"}, {Name: "vehicle.front", Tokens: &one}}, []config.Engine{
+		{Name: "local.encoder", Location: config.LocationLocal},
+		{Name: "local.gcs", Location: config.LocationLocal},
 	}, []config.Edge{
-		{From: "telemetry", To: "100.64.1.5.gcs", Timeout: "2s"},
-		{From: "front", To: "100.64.1.5.encoder", Timeout: "2s"},
-		{From: "100.64.1.5.encoder", To: "100.64.1.5.gcs", Timeout: "2s"},
+		{From: "vehicle.telemetry", To: "local.gcs", Timeout: "2s"},
+		{From: "vehicle.front", To: "local.encoder", Timeout: "2s"},
+		{From: "local.encoder", To: "local.gcs", Timeout: "2s"},
 	})
 }
 
@@ -59,13 +60,13 @@ func TestBuildFlowRemote(t *testing.T) {
 	if noVideo != "" {
 		t.Errorf("noVideo = %q, want empty", noVideo)
 	}
-	checkFlow(t, flow, []config.Producer{{Name: "telemetry"}, {Name: "front", Tokens: &one}}, []config.Engine{
-		{Name: "100.64.2.9.encoder", Location: config.LocationLocal},
-		{Name: "100.64.1.5.gcs", Location: config.LocationRemote},
+	checkFlow(t, flow, []config.Producer{{Name: "vehicle.telemetry"}, {Name: "vehicle.front", Tokens: &one}}, []config.Engine{
+		{Name: "local.encoder", Location: config.LocationLocal},
+		{Name: "remote.gcs", Location: config.LocationRemote},
 	}, []config.Edge{
-		{From: "telemetry", To: "100.64.1.5.gcs", Timeout: "2s"},
-		{From: "front", To: "100.64.2.9.encoder", Timeout: "2s"},
-		{From: "100.64.2.9.encoder", To: "100.64.1.5.gcs", Timeout: "2s"},
+		{From: "vehicle.telemetry", To: "remote.gcs", Timeout: "2s"},
+		{From: "vehicle.front", To: "local.encoder", Timeout: "2s"},
+		{From: "local.encoder", To: "remote.gcs", Timeout: "2s"},
 	})
 }
 
@@ -102,9 +103,9 @@ func TestBuildFlowNoVideo(t *testing.T) {
 			if noVideo != tt.want {
 				t.Errorf("noVideo = %q, want %q", noVideo, tt.want)
 			}
-			checkFlow(t, flow, []config.Producer{{Name: "telemetry"}},
-				[]config.Engine{{Name: gcs, Location: config.LocationRemote}},
-				[]config.Edge{{From: "telemetry", To: gcs, Timeout: "2s"}})
+			checkFlow(t, flow, []config.Producer{{Name: "vehicle.telemetry"}},
+				[]config.Engine{{Name: "remote.gcs", Location: config.LocationRemote}},
+				[]config.Edge{{From: "vehicle.telemetry", To: "remote.gcs", Timeout: "2s"}})
 		})
 	}
 }

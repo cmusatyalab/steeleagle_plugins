@@ -250,7 +250,7 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	if conn != nil {
 		flowOf = func(ctx context.Context, vehicle string) ([]byte, error) { return fleet.GetFlow(ctx, conn, vehicle) }
 	}
-	metricsRoutes["GET /api/metrics/flow"] = metrics.NewFlowHandler(flowOf, daemonConfigs, promv1.NewAPI(prom), log)
+	metricsRoutes["GET /api/metrics/flow"] = metrics.NewFlowHandler(flowOf, daemonConfigs, promv1.NewAPI(prom), gcsIP, log)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

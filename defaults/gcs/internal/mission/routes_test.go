@@ -580,13 +580,13 @@ func TestCompileWithFlow(t *testing.T) {
 	if b.Arch != "amd64" || b.Plugin != nil {
 		t.Errorf("arch %q plugin %q", b.Arch, b.Plugin)
 	}
-	if !strings.Contains(string(b.Flow), "100.64.0.1.yolo") {
+	if !strings.Contains(string(b.Flow), `name = "local.yolo"`) {
 		t.Errorf("flow %s", b.Flow)
 	}
-	if got := manifestEngines(t, b.Manifest); !reflect.DeepEqual(got, []string{"100.64.0.1.yolo"}) {
+	if got := manifestEngines(t, b.Manifest); !reflect.DeepEqual(got, []string{"local.yolo"}) {
 		t.Errorf("manifest engines %v", got)
 	}
-	eq(t, engineIdent(t, b.Ast), "DetectionEngine_100_64_0_1_yolo")
+	eq(t, engineIdent(t, b.Ast), "DetectionEngine_local_yolo")
 }
 
 func TestCompileFlowUnknownVehicleResolvesOnOrchestrator(t *testing.T) {
@@ -600,7 +600,8 @@ func TestCompileFlowUnknownVehicleResolvesOnOrchestrator(t *testing.T) {
 	if rec.Code != 200 || len(f.builds) != 1 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
-	if !strings.Contains(string(f.builds[0].Flow), testGCSIP+".yolo") {
+	// Resolved for a target on the orchestrator's daemon, where yolo is local
+	if !strings.Contains(string(f.builds[0].Flow), `name = "local.yolo"`) {
 		t.Errorf("flow %s", f.builds[0].Flow)
 	}
 }
@@ -612,7 +613,7 @@ func TestCompileFlowDesignedForNamedHost(t *testing.T) {
 	if rec.Code != 200 || !reflect.DeepEqual(decodeMap(t, rec), map[string]any{"ok": true}) {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
-	eq(t, engineIdent(t, f.builds[0].Ast), "DetectionEngine_100_64_0_2_yolo")
+	eq(t, engineIdent(t, f.builds[0].Ast), "DetectionEngine_local_yolo")
 }
 
 func TestCompileFlowCheckFailure(t *testing.T) {
@@ -680,13 +681,13 @@ func TestBuildWithFlow(t *testing.T) {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
 	b := f.builds[0]
-	if b.Arch != "arm64" || !strings.Contains(string(b.Flow), "100.64.0.1.yolo") {
+	if b.Arch != "arm64" || !strings.Contains(string(b.Flow), `name = "local.yolo"`) {
 		t.Errorf("arch %q flow %s", b.Arch, b.Flow)
 	}
-	if got := manifestEngines(t, b.Manifest); !reflect.DeepEqual(got, []string{"100.64.0.1.yolo"}) {
+	if got := manifestEngines(t, b.Manifest); !reflect.DeepEqual(got, []string{"local.yolo"}) {
 		t.Errorf("manifest engines %v", got)
 	}
-	eq(t, engineIdent(t, b.Ast), "DetectionEngine_100_64_0_1_yolo")
+	eq(t, engineIdent(t, b.Ast), "DetectionEngine_local_yolo")
 }
 
 func TestBuildFlowCheckFailureIs422(t *testing.T) {

@@ -291,9 +291,11 @@ func (f *Flows) otherFlow(toml []byte, v Vehicle, snap Snapshot) string {
 	if err != nil {
 		return fmt.Sprintf("vehicle runs a flow that can't be parsed: %v", err)
 	}
+	gcs, _ := FlowEngine(f.spec.Engine, v.DaemonIP)
 	encoder, hasEncoder := snap.Encoders[v.DaemonIP]
+	enc, _ := FlowEngine(encoder, v.DaemonIP)
 	for _, e := range flow.Engines {
-		if e.Name != f.spec.Engine && (!hasEncoder || e.Name != encoder) {
+		if e.Name != gcs && (!hasEncoder || e.Name != enc) {
 			return "vehicle runs another flow, with engine " + e.Name
 		}
 	}

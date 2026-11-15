@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	vehicleConf = "[driver]\ntype=\"copter\"\n[[driver.cameras]]\nname=\"rgb\"\ntype=\"RawFrame\"\nprimary=true\n"
+	vehicleConf = "[driver]\ntype=\"copter\"\n[[driver.cameras]]\nname=\"rgb\"\noutput=\"RawFrame\"\nprimary=true\n"
 	yoloResult  = "steeleagle_protocol/v1/messages/result/DetectionResult"
 	yoloConf    = "[engine]\ntype=\"detection\"\ninputs=[\"RawFrame\"]\nresult=\"" + yoloResult + "\"\n"
 	encoderConf = "[engine]\ntype=\"generic\"\ninputs=[\"RawFrame\"]\n"

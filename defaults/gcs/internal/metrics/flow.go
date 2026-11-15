@@ -3,6 +3,7 @@ package metrics
 import (
 	"github.com/cmusatyalab/steeleagle/config"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
+	"strings"
 )
 
 // Node kinds.
@@ -98,10 +99,14 @@ type View struct {
 }
 
 // BuildView makes the view of flowTOML, the flow vehicle runs, without
-// numbers. Each engine's host is the hostname of its daemon, from hostnames
-// by IP; producers run on the vehicle's daemon. An unknown hostname falls
-// back to the IP. An empty flowTOML makes a view without nodes.
-func BuildView(flowTOML []byte, vehicle string, hostnames map[string]string) (View, error) {
+// numbers. A flow names its nodes relative to the vehicle (see
+// fleet/flownames.go); each node's ID is the name the vehicle qualifies it to,
+// which Uriel's metrics label it by: the vehicle's streams and its local
+// engines (and their producers) are on the vehicle's daemon, its remote
+// engines on the orchestrator's, orchestratorIP. Each node's host is the
+// hostname of its daemon, from hostnames by IP, falling back to the IP. An
+// empty flowTOML makes a view without nodes.
+func BuildView(flowTOML []byte, vehicle, orchestratorIP string, hostnames map[string]string) (View, error) {
 	v := View{Vehicle: vehicle, Nodes: []Node{}, Edges: []Edge{}}
 	if len(flowTOML) == 0 {
 		return v, nil
@@ -117,20 +122,36 @@ func BuildView(flowTOML []byte, vehicle string, hostnames map[string]string) (Vi
 		return ip
 	}
 	vehicleIP, _ := fleet.SplitName(vehicle)
-	// Where each node runs: producers on the vehicle, engines where the flow
-	// places them
+	id := func(name string) string { return fleet.QualifyFlowName(name, vehicle, vehicleIP, orchestratorIP) }
+	// The node's label, its name without its location prefix, and the IP of
+	// the daemon it runs on
+	place := func(name string) (label, ip string) {
+		for _, prefix := range []string{fleet.VehiclePrefix, fleet.LocalPrefix} {
+			if rest, ok := strings.CutPrefix(name, prefix); ok {
+				return rest, vehicleIP
+			}
+		}
+		if rest, ok := strings.CutPrefix(name, fleet.RemotePrefix); ok {
+			return rest, orchestratorIP
+		}
+		return name, vehicleIP
+	}
+	// Where each node runs, by ID: producers on the vehicle, engines where the
+	// flow places them
 	location := make(map[string]string, len(flow.Producers)+len(flow.Engines))
 	for _, p := range flow.Producers {
-		v.Nodes = append(v.Nodes, Node{ID: p.Name, Kind: KindProducer, Label: p.Name, Host: host(vehicleIP)})
-		location[p.Name] = config.LocationLocal
+		label, ip := place(p.Name)
+		v.Nodes = append(v.Nodes, Node{ID: id(p.Name), Kind: KindProducer, Label: label, Host: host(ip)})
+		location[id(p.Name)] = config.LocationLocal
 	}
 	for _, e := range flow.Engines {
-		ip, bare := fleet.SplitName(e.Name)
-		v.Nodes = append(v.Nodes, Node{ID: e.Name, Kind: KindEngine, Label: bare, Host: host(ip)})
-		location[e.Name] = e.Location
+		label, ip := place(e.Name)
+		v.Nodes = append(v.Nodes, Node{ID: id(e.Name), Kind: KindEngine, Label: label, Host: host(ip)})
+		location[id(e.Name)] = e.Location
 	}
 	for _, e := range flow.Edges {
-		v.Edges = append(v.Edges, Edge{From: e.From, To: e.To, CrossesNetwork: location[e.From] != location[e.To]})
+		from, to := id(e.From), id(e.To)
+		v.Edges = append(v.Edges, Edge{From: from, To: to, CrossesNetwork: location[from] != location[to]})
 	}
 	return v, nil
 }

@@ -69,7 +69,7 @@ func TestPushFlowSetsResolvedFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fc.Engines) != 1 || fc.Engines[0].Name != "100.64.0.1.yolo" || fc.Engines[0].Location != config.LocationLocal {
+	if len(fc.Engines) != 1 || fc.Engines[0].Name != "local.yolo" || fc.Engines[0].Location != config.LocationLocal {
 		t.Errorf("engines = %+v, want the local yolo", fc.Engines)
 	}
 }

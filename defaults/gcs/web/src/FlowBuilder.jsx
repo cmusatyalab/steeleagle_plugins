@@ -6,7 +6,7 @@ import { ConfirmDialog, confirmDialog } from 'primereact/confirmdialog';
 import { createCatalogLoader } from './flowCatalog.js';
 import { displayName } from './vehicleNames.js';
 import {
-    addEdge, addEngine, addProducer, availableStreams, canConnect, emptyFlow, fileBaseName,
+    addEdge, addEngine, addEngineProducer, addProducer, availableStreams, canConnect, emptyFlow, fileBaseName,
     importFlowToml, parseFlowJson, removeEdge, removeNode, serializeFlow, toFlowToml, updateEdge, updateNode, validateFlow,
 } from './flowModel.js';
 import {
@@ -140,6 +140,8 @@ function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog,
                 const [stream] = availableStreams(flow, catalog);
                 if (!stream) throw new Error(`Every stream of ${displayName(flow.vehicle)} is already on the canvas`);
                 setFlow(addProducer(flow, catalog, stream, position));
+            } else if (item.kind === 'engineProducer') {
+                setFlow(addEngineProducer(flow, catalog, item.engine, item.producer, position));
             } else {
                 setFlow(addEngine(flow, catalog, item.engine, position));
             }

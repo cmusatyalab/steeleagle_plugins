@@ -14,7 +14,8 @@ function VehiclePicker({ group, flow, setFlow, catalog, onPicked }) {
 
     function pick(vehicle) {
         if (!vehicle || vehicle === flow.vehicle) return;
-        const producers = flow.nodes.filter((n) => n.kind === 'producer').length;
+        // Engine producers stay, like their engines (flowModel.setVehicle).
+        const producers = flow.nodes.filter((n) => n.kind === 'producer' && !n.engine).length;
         const apply = () => { setFlow((f) => setVehicle(f, vehicle)); onPicked?.(); };
         if (!producers) {
             apply();

@@ -36,3 +36,5 @@ default = "patchcore_retrain"
 [engine]
 type = "filter"
 inputs = ["steeleagle_protocol/v1/messages/result/FrameWithEmbedding"]
+# Each input is converted, so this is what the engine sends on
+forwards = "steeleagle_protocol/v1/messages/frame/RawFrame"

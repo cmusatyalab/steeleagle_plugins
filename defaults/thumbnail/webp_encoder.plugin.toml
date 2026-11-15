@@ -36,5 +36,7 @@ default = false
 [engine]
 type = "filter"
 inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# Each input is converted, so this is what the engine sends on
+forwards = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
 # No result: each frame is replaced with an EncodedFrame of WebP, sent as
 # CODEC_UNSPECIFIED until the protocol has a WebP codec

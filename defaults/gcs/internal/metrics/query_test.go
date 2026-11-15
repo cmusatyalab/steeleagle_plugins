@@ -66,7 +66,7 @@ func encoderAnswers() []answer {
 
 func filled(t *testing.T, prom *fakeProm, window string) View {
 	t.Helper()
-	v, err := BuildView([]byte(gcsFlow), fakeDrone, testHostnames)
+	v, err := BuildView([]byte(gcsFlow), fakeDrone, lambda2IP, testHostnames)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestFillLeavesNaNAndMissingSamplesNull(t *testing.T) {
 	if got := nodeByID(t, v, gcs).Metrics; got != nil {
 		t.Errorf("gcs metrics = %+v, want null with no samples", got)
 	}
-	if got := nodeByID(t, v, "rgb").Metrics; got != nil {
+	if got := nodeByID(t, v, rgb).Metrics; got != nil {
 		t.Errorf("producer metrics = %+v, want null", got)
 	}
 }
@@ -164,7 +164,7 @@ func TestFillReadsEndToEndForTheVehicle(t *testing.T) {
 }
 
 func TestFillReportsAnUnreachablePrometheus(t *testing.T) {
-	v, _ := BuildView([]byte(gcsFlow), fakeDrone, testHostnames)
+	v, _ := BuildView([]byte(gcsFlow), fakeDrone, lambda2IP, testHostnames)
 
 	err := Fill(context.Background(), &fakeProm{err: errors.New("connection refused")}, &v, fakeDrone, "1m")
 
@@ -218,18 +218,18 @@ func TestNoNetworkWithoutRoundTripSamples(t *testing.T) {
 func TestNoNetworkWhenNoEdgeCrossesIt(t *testing.T) {
 	const localFlow = `
 [[producers]]
-name = "rgb"
+name = "vehicle.rgb"
 
 [[engines]]
-name = "100.101.84.40.encoder"
+name = "local.encoder"
 location = "local"
 
 [[edges]]
-from = "rgb"
-to = "100.101.84.40.encoder"
+from = "vehicle.rgb"
+to = "local.encoder"
 timeout = "1s"
 `
-	v, err := BuildView([]byte(localFlow), fakeDrone, testHostnames)
+	v, err := BuildView([]byte(localFlow), fakeDrone, lambda2IP, testHostnames)
 	if err != nil {
 		t.Fatal(err)
 	}

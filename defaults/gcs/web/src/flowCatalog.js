@@ -164,9 +164,33 @@ export function engineLocation(catalog, vehicleName, engineTemplate) {
 }
 
 // Every resolution has these keys, resolved or not: `output` is a producer's
-// stream type and `stream` its catalog entry; `accepts`, `events` (labels),
+// type and `stream` a vehicle producer's catalog entry; `accepts`,
+// `forwards` ('*' for whichever arrive, an input type, or the type it converts
+// its inputs to), `events` (labels),
 // `eventTypes` ({label: message type}) and `category` are an engine's.
-const EMPTY = { output: null, stream: null, accepts: [], events: [], eventTypes: {}, category: null, typed: true, problem: null };
+// `location` is an engine's, or an engine producer's engine's.
+const EMPTY = {
+    output: null, stream: null, accepts: [], forwards: '*', events: [], eventTypes: {}, category: null,
+    typed: true, problem: null,
+};
+
+// A producer node is either a stream of the flow's vehicle ({stream}) or a
+// producer an engine advertises ({engine: template name, producer}).
+export function isEngineProducer(node) {
+    return node?.kind === 'producer' && typeof node.engine === 'string';
+}
+
+// The engine a template engine name resolves to, or why it doesn't.
+// Returns {engine, reason}.
+function resolveEngine(catalog, template) {
+    const parts = splitTemplateName(template);
+    if (!parts) return { engine: null, reason: `flow name ${template} has no host` };
+    const { daemon, error } = resolveHost(catalog, parts.host);
+    if (!daemon) return { engine: null, reason: error };
+    const engine = findEngine(catalog, `${daemon.ip}.${parts.bare}`);
+    if (!engine) return { engine: null, reason: `${template}: no such engine on ${parts.host}` };
+    return { engine, reason: null };
+}
 
 function unresolved(reason) {
     return { resolved: false, reason, ...EMPTY };
@@ -181,9 +205,20 @@ function missingReason(catalog, fullName, what) {
     return `${displayName(fullName)}: no such ${what}${ip ? ` on ${ip}` : ''}`;
 }
 
-// Producer nodes are the flow vehicle's {stream}; engine nodes' `engine` is a
-// template name.
+// Vehicle producer nodes are the flow vehicle's {stream}; an engine producer
+// node's `engine`, like an engine node's, is a template name.
 export function resolveNode(flow, catalog, node) {
+    if (isEngineProducer(node)) {
+        const { engine, reason } = resolveEngine(catalog, node.engine);
+        if (!engine) return unresolved(reason);
+        const producer = (engine.producers ?? []).find((p) => p.name === node.producer);
+        if (!producer) return unresolved(`${node.engine} has no producer ${node.producer}`);
+        return {
+            resolved: true, reason: null, ...EMPTY, output: producer.type,
+            typed: engine.typed, problem: engine.problem ?? null,
+            location: engineLocation(catalog, flow.vehicle, node.engine),
+        };
+    }
     if (node.kind === 'producer') {
         if (!flow.vehicle) return unresolved('no vehicle selected');
         const vehicle = findVehicle(catalog, flow.vehicle);
@@ -192,19 +227,17 @@ export function resolveNode(flow, catalog, node) {
         if (!stream) return unresolved(`${displayName(flow.vehicle)} has no stream ${node.stream}`);
         return { resolved: true, reason: null, ...EMPTY, output: stream.type, stream, typed: vehicle.typed, problem: vehicle.problem ?? null };
     }
-    const parts = splitTemplateName(node.engine);
-    if (!parts) return unresolved(`flow name ${node.engine} has no host`);
-    const { daemon, error } = resolveHost(catalog, parts.host);
-    if (!daemon) return unresolved(error);
-    const engine = findEngine(catalog, `${daemon.ip}.${parts.bare}`);
-    if (!engine) return unresolved(`${node.engine}: no such engine on ${parts.host}`);
-    // Engines have no output type: they forward the source data they receive
-    // (flowModel.forwardedTypes).
+    const { engine, reason } = resolveEngine(catalog, node.engine);
+    if (!engine) return unresolved(reason);
+    // Engines have no output type: they forward source data they receive,
+    // all of it or only their `forwards` type, or convert it to their
+    // `forwards` type (flowModel.forwardedTypes).
     return {
         resolved: true,
         reason: null,
         ...EMPTY,
         accepts: engine.accepts,
+        forwards: engine.forwards || '*',
         events: engine.events.map((e) => e.label),
         eventTypes: Object.fromEntries(engine.events.map((e) => [e.label, e.type])),
         category: engine.category ?? null,

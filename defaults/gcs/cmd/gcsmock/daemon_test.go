@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -186,26 +187,26 @@ func TestRouting(t *testing.T) {
 
 const gcsFlow = `
 [[producers]]
-name = "telemetry"
+name = "vehicle.telemetry"
 [[producers]]
-name = "front"
+name = "vehicle.front"
 [[engines]]
-name = "100.64.0.1.h264_encoder"
-location = "remote"
+name = "local.h264_encoder"
+location = "local"
 [[engines]]
-name = "100.64.0.9.gcs"
+name = "remote.gcs"
 location = "remote"
 [[edges]]
-from = "front"
-to = "100.64.0.1.h264_encoder"
+from = "vehicle.front"
+to = "local.h264_encoder"
 timeout = "2s"
 [[edges]]
-from = "100.64.0.1.h264_encoder"
-to = "100.64.0.9.gcs"
+from = "local.h264_encoder"
+to = "remote.gcs"
 timeout = "2s"
 [[edges]]
-from = "telemetry"
-to = "100.64.0.9.gcs"
+from = "vehicle.telemetry"
+to = "remote.gcs"
 timeout = "2s"
 `
 
@@ -285,7 +286,8 @@ func TestStartMissionReplacesFlow(t *testing.T) {
 	}
 	g, _ := dc.GetFlow(routed(alphaName), &vehiclepb.GetFlowRequest{})
 	parsed, err := config.ParseFlowConfigFromBytes(g.GetToml())
-	if err != nil || len(parsed.Engines) != 2 || parsed.Engines[0].Name != "100.64.0.1.mission_sink" {
+	// The vehicle keeps the flow as it was set, named relative to it
+	if err != nil || len(parsed.Engines) != 2 || parsed.Engines[0].Name != "local.mission_sink" || parsed.Engines[1].Name != "remote.gcs" {
 		t.Errorf("GetFlow = %q, %v", g.GetToml(), err)
 	}
 }
@@ -582,5 +584,31 @@ func TestStopService(t *testing.T) {
 	}
 	if _, err := d.StopService(ctx, daemonpb.StopServiceRequest_builder{ServiceName: "nope"}.Build()); status.Code(err) != codes.NotFound {
 		t.Errorf("stop nope: %v", err)
+	}
+}
+
+// TestSetDataflowQualifiesEngines checks that the mock qualifies local and
+// remote engines as a vehicle does, and refuses a remote engine's producer.
+func TestSetDataflowQualifiesEngines(t *testing.T) {
+	h := newHarness(t)
+	dc := vehiclepb.NewDataServiceClient(h.conn)
+	if _, err := dc.SetDataflow(routed(alphaName), vehiclepb.SetDataflowRequest_builder{Toml: []byte(gcsFlow)}.Build()); err != nil {
+		t.Fatal(err)
+	}
+	f := h.flows.snapshot()[0].flow
+	if len(f.Engines) != 2 || f.Engines[0].Name != "100.64.0.1.h264_encoder" || f.Engines[1].Name != "100.64.0.9.gcs" {
+		t.Errorf("engines = %+v, want alpha's encoder and the GCS's gcs", f.Engines)
+	}
+	if e := f.Edges[1]; e.From != "100.64.0.1.h264_encoder" || e.To != "100.64.0.9.gcs" {
+		t.Errorf("edge = %+v, want between the qualified engines", e)
+	}
+
+	remote := strings.ReplaceAll(gcsFlow, `"vehicle.front"`, `"remote.gcs.frames"`)
+	_, err := dc.SetDataflow(routed(alphaName), vehiclepb.SetDataflowRequest_builder{Toml: []byte(remote)}.Build())
+	if status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "remote engine") {
+		t.Errorf("remote producer: err = %v, want InvalidArgument", err)
+	}
+	if n := len(h.flows.snapshot()); n != 1 {
+		t.Errorf("flows applied = %d, want only the first", n)
 	}
 }

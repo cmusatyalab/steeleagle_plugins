@@ -3,7 +3,7 @@ import { Sidebar } from 'primereact/sidebar';
 import { Dropdown } from 'primereact/dropdown';
 import { InputNumber } from 'primereact/inputnumber';
 import { InputText } from 'primereact/inputtext';
-import { daemonLabel, resolveHost, resolveNode, shortType, splitTemplateName } from './flowCatalog.js';
+import { daemonLabel, isEngineProducer, resolveHost, resolveNode, shortType, splitTemplateName } from './flowCatalog.js';
 import { forwardedTypes, nodeById, nodeLabel } from './flowModel.js';
 
 function Row({ label, children }) {
@@ -42,10 +42,12 @@ function FlowPanel({ flow, catalog, selection, onUpdateNode, onUpdateEdge, onDel
     let header;
     if (node?.kind === 'producer') {
         const r = resolution(node);
-        header = 'Producer';
+        const onEngine = isEngineProducer(node);
+        header = onEngine ? 'Engine producer' : 'Producer';
         body = (
             <>
-                <Row label="Stream"><b>{nodeLabel(flow, node)}</b></Row>
+                <Row label={onEngine ? 'Name' : 'Stream'}><b>{nodeLabel(flow, node)}</b></Row>
+                {onEngine && <Row label="Engine">{node.engine} <span className="text-xs text-color-secondary">({r ? (r.location ?? 'unreachable') : '—'})</span></Row>}
                 <Row label="Type"><TypeName type={r?.output} /></Row>
                 {r?.stream?.kind === 'camera' && (
                     <Row label="Camera">

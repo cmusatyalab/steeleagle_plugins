@@ -36,4 +36,6 @@ default = 6237184
 [engine]
 type = "filter"
 inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# Each input is converted, so this is what the engine sends on
+forwards = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
 # No result: each frame is replaced by its WebP EncodedFrame at the model input size

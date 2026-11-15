@@ -166,7 +166,7 @@ func driverConfig() ([]byte, error) {
 		Driver: &config.DriverCap{
 			Type: "copter",
 			Cameras: []config.DriverCamera{{
-				Name: "front", Type: "steeleagle_protocol/v1/messages/frame/RawFrame", HRes: 1280, VRes: 720, HFov: 90, VFov: 60,
+				Name: "front", Output: "steeleagle_protocol/v1/messages/frame/RawFrame", HRes: 1280, VRes: 720, HFov: 90, VFov: 60,
 				Fps: 30, Gimbal: true, Primary: true, Encode: true,
 			}},
 			Supported: config.DriverSupported{Services: []string{
@@ -387,7 +387,10 @@ func (d *Daemon) setFlow(st *vehicleState, name string, spec []byte) error {
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "invalid dataflow: %v", err)
 	}
-	qualified := d.qualify(name, flow)
+	qualified, err := d.qualify(name, flow)
+	if err != nil {
+		return err
+	}
 	if d.top.Detector != "" {
 		qualified = withDetector(qualified, d.top.Detector)
 	}
@@ -398,26 +401,28 @@ func (d *Daemon) setFlow(st *vehicleState, name string, spec []byte) error {
 	return nil
 }
 
-// qualify returns flow with producers named as the real vehicle does and
-// remote engines made local, as the mock has one process.
-func (d *Daemon) qualify(vehicle string, flow *config.FlowConfig) *config.FlowConfig {
+// qualify returns flow with its names qualified as the real vehicle does
+// (see fleet/flownames.go): vehicle.<stream> with the vehicle's name,
+// local.<...> with its daemon's IP, and remote.<engine> with the GCS's. Like
+// the vehicle, it refuses a producer of a remote engine. Remote engines are
+// made local, as the mock runs every engine in one process.
+func (d *Daemon) qualify(vehicle string, flow *config.FlowConfig) (*config.FlowConfig, error) {
+	vehicleIP, _ := fleet.SplitName(vehicle)
+	name := func(n string) string { return fleet.QualifyFlowName(n, vehicle, vehicleIP, d.top.GCSIP) }
 	out := &config.FlowConfig{
 		Producers: make([]config.Producer, len(flow.Producers)),
 		Engines:   make([]config.Engine, len(flow.Engines)),
 		Edges:     make([]config.Edge, len(flow.Edges)),
 	}
-	copy(out.Producers, flow.Producers)
-	copy(out.Engines, flow.Engines)
-	copy(out.Edges, flow.Edges)
-	for i, p := range out.Producers {
-		out.Producers[i].Name = vehicle + "." + p.Name
-		for j, e := range out.Edges {
-			if e.From == p.Name {
-				out.Edges[j].From = out.Producers[i].Name
-			}
+	for i, p := range flow.Producers {
+		if strings.HasPrefix(p.Name, fleet.RemotePrefix) {
+			return nil, status.Errorf(codes.InvalidArgument,
+				"producer %q is of a remote engine; only the vehicle's streams and local engines' producers can be used", p.Name)
 		}
+		out.Producers[i] = config.Producer{Name: name(p.Name), Tokens: p.Tokens}
 	}
-	for i, e := range out.Engines {
+	for i, e := range flow.Engines {
+		out.Engines[i] = config.Engine{Name: name(e.Name), Location: e.Location}
 		if e.Location == config.LocationRemote {
 			d.remoteOnce.Do(func() {
 				d.log.Info().Msg("rewriting remote engines to local: the mock runs everything in one process")
@@ -425,7 +430,10 @@ func (d *Daemon) qualify(vehicle string, flow *config.FlowConfig) *config.FlowCo
 			out.Engines[i].Location = config.LocationLocal
 		}
 	}
-	return out
+	for i, e := range flow.Edges {
+		out.Edges[i] = config.Edge{From: name(e.From), To: name(e.To), Timeout: e.Timeout}
+	}
+	return out, nil
 }
 
 // TakeOff takes off.
@@ -503,18 +511,21 @@ func (d *Daemon) SetGimbalAngleTarget(
 // missionFlow is the flow of a started mission: telemetry only, to a sink
 // and to gcsEngine, so the GCS still sees the vehicle while it flies the
 // mission. Being a mission's flow, the GCS leaves it as it is.
+// Its names are relative to the vehicle, as a mission's are.
 func missionFlow(vehicle, gcsEngine string) []byte {
 	ip, _ := fleet.SplitName(vehicle)
-	sink := ip + ".mission_sink"
+	sink, _ := fleet.FlowEngine(ip+".mission_sink", ip)
+	gcs, gcsLoc := fleet.FlowEngine(gcsEngine, ip)
+	telemetry := fleet.VehicleStream("telemetry")
 	b, _ := (&config.FlowConfig{
-		Producers: []config.Producer{{Name: "telemetry"}},
+		Producers: []config.Producer{{Name: telemetry}},
 		Engines: []config.Engine{
 			{Name: sink, Location: config.LocationLocal},
-			{Name: gcsEngine, Location: config.LocationRemote},
+			{Name: gcs, Location: gcsLoc},
 		},
 		Edges: []config.Edge{
-			{From: "telemetry", To: sink, Timeout: "2s"},
-			{From: "telemetry", To: gcsEngine, Timeout: "2s"},
+			{From: telemetry, To: sink, Timeout: "2s"},
+			{From: telemetry, To: gcs, Timeout: "2s"},
 		},
 	}).ToBytes()
 	return b
