@@ -196,7 +196,11 @@ class Stream(StreamServiceServicer):
                 failed_reads += 1
                 continue
             failed_reads = 0
-            source += 1
+            # The frame's number in the video (or image order), from its
+            # time: a capture skips frames when the reader falls behind, so
+            # counting reads would misnumber every frame after a skip
+            index = cap.frame_index(pts) if hasattr(cap, 'frame_index') else None
+            source = index if index is not None else source + 1
             self._frame_shape = frame.shape[:2]
             self._update_publisher()
             if self._raw_frames is None:

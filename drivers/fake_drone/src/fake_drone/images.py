@@ -62,6 +62,10 @@ class ImageCapture:
     def isOpened(self):
         return self._opened
 
+    def frame_index(self, pts):
+        """The index of the image read at `pts` (index * period)."""
+        return None if pts is None else round(pts / self._period)
+
     def read(self):
         if not self._opened:
             return False, None, None

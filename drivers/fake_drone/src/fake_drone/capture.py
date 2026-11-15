@@ -127,6 +127,9 @@ end, after which `ended` is set and reads fail. It reads like an OpenCV
         )
         self._opened = False
         self._logged_format = None
+        # (fps, frames, first timestamp) of the video, to number the frames
+        # read by their timestamp
+        self._frame_rate = mp4.video_frame_rate(path)
         # Unless looping, the video stops at its end, and ended is set
         self._loop = loop
         self.ended = False
@@ -150,6 +153,15 @@ end, after which `ended` is set and reads fail. It reads like an OpenCV
 
     def isOpened(self):
         return self._opened
+
+    def frame_index(self, pts):
+        """The number of the video's frame with timestamp `pts` (as read
+        returns it), counting from 0 in presentation order, or None if it
+        can't be known. A slow reader skips frames (see the class), so frames
+        are numbered by their time, not by counting reads."""
+        if pts is None or self._frame_rate is None:
+            return None
+        return mp4.frame_index(*self._frame_rate, pts)
 
     def read(self):
         """(True, an RGB frame, its presentation time in seconds into the
