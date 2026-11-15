@@ -46,6 +46,7 @@ DEFAULTS = {
     "confirmations": 2,
     "max_learned": 32,
     "log_sent": "",
+    "log_scored": "",
 }
 # Defaults of the args of verifier.plugin.toml
 VERIFIER_DEFAULTS = {
@@ -127,9 +128,10 @@ def parse_args(content):
     for name in ("quantized", "npu", "log_scores", "log_tiles", "learn"):
         if not isinstance(args[name], bool):
             raise ConfigError(f"{name} must be true or false")
-    if not isinstance(args["log_sent"], str):
-        raise ConfigError("log_sent must be a file name")
-    args["log_sent"] = args["log_sent"].strip()
+    for name in ("log_sent", "log_scored"):
+        if not isinstance(args[name], str):
+            raise ConfigError(f"{name} must be a file name")
+        args[name] = args[name].strip()
     return args
 
 
@@ -218,7 +220,7 @@ def build(args, verifier, *, image=None, tile_log=None):
     selector = Selector(t, b, k=args["k"], ema=args["ema"], margin=args["margin"], max_send=args["max_send"],
                         learn=args["learn"], similarity=args["learn_similarity"],
                         confirmations=args["confirmations"], max_learned=args["max_learned"])
-    from cliped.sent_log import SentLog
+    from cliped.sent_log import ScoredLog, SentLog
 
     queue = SendQueue(max_size=args["max_queue"], resend_after_s=args["resend_after_ms"] / 1000)
     return Cliped(
@@ -232,6 +234,7 @@ def build(args, verifier, *, image=None, tile_log=None):
         log_scores=args["log_scores"],
         tile_log=tile_log,
         sent_log=SentLog(args["log_sent"]) if args.get("log_sent") else None,
+        scored_log=ScoredLog(args["log_scored"]) if args.get("log_scored") else None,
     )
 
 

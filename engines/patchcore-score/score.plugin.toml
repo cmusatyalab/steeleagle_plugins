@@ -57,6 +57,12 @@ type = "string"
 description = "CSV file to log each anomalous frame forwarded to, as producer, session and seq (of the camera input it was scored from), timestamp_ns (the timestamp this engine stamps on it), score and threshold; a relative path is in the daemon's files directory. Empty for none"
 default = ""
 
+[[args]]
+name = "log_scored"
+type = "string"
+description = "CSV file to log each frame scored to, anomalous or not, as producer, session and seq (of the camera input), score, threshold, anomalous (1 or 0) and ms (time to score it); the frames missing from it were never scored. A relative path is in the daemon's files directory. Empty for none"
+default = ""
+
 [engine]
 type = "filter"
 inputs = ["steeleagle_protocol/v1/messages/result/FrameWithEmbedding"]

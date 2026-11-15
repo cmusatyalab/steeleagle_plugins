@@ -237,6 +237,7 @@ def run_engine(name, args, remote_qualifier=None):
     verifier = qualify(remote_qualifier, args["verifier"]) if args["verifier"] else None
     retrain_engine = qualify(remote_qualifier, args["retrain_name"]) if remote_qualifier else None
     sent_log = SentLog(args["log_sent"]) if args["log_sent"] else None
+    scored_log = ScoredLog(args["log_scored"]) if args["log_scored"] else None
 
     with contextlib.ExitStack() as stack:
         stack.enter_context(torch.no_grad())
@@ -287,7 +288,7 @@ def run_engine(name, args, remote_qualifier=None):
 
             input = engine.poll()
             if input is not None:
-                process(engine, input, model, faiss_index, threshold, args, queue, sent_log)
+                process(engine, input, model, faiss_index, threshold, args, queue, sent_log, scored_log)
             if reintegration is not None:
                 try:
                     reintegration.step(time.monotonic(), publish)
@@ -295,7 +296,7 @@ def run_engine(name, args, remote_qualifier=None):
                     logger.exception("reintegration failed to send a frame")
 
 
-def process(engine, input, model, faiss_index, threshold, args, queue, sent_log):
+def process(engine, input, model, faiss_index, threshold, args, queue, sent_log, scored_log=None):
     """Scores the held `input`, and drops it if it is normal, or replaces it
     with its frame, as a RawFrame, if it is anomalous, queuing that too if
     there is a `queue`."""
@@ -312,6 +313,8 @@ def process(engine, input, model, faiss_index, threshold, args, queue, sent_log)
 
     is_anomalous = anomaly_score > threshold
     elapsed_ms = (time.perf_counter() - t0) * 1000
+    if scored_log is not None:
+        scored_log.write(input.id, anomaly_score, threshold, is_anomalous, elapsed_ms)
 
     if not is_anomalous:
         engine.drop()
@@ -359,6 +362,35 @@ def qualify(qualifier, name):
     """`name` qualified with a daemon's IP, as eagled names its services, or
     as is if there is no qualifier."""
     return f"{qualifier}.{name}" if qualifier else name
+
+
+def open_log(path, header):
+    """A line-buffered CSV writer on `path` (relative: in the daemon's files
+    directory), replacing it, with `header` written; and its file."""
+    path = Path(path)
+    files = os.environ.get("STEELEAGLE_FILES")
+    if not path.is_absolute() and files:
+        path = Path(files) / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "w", newline="", buffering=1)
+    writer = csv.writer(f)
+    writer.writerow(header)
+    return writer, f
+
+
+class ScoredLog:
+    """One CSV row per frame scored, anomalous or not: the camera input's
+    producer, session and seq (which the fake drone's frame log also has), its
+    anomaly score, the threshold, whether it was anomalous, and the
+    milliseconds scoring took. The frames missing from it were never scored."""
+
+    def __init__(self, path):
+        self._writer, self._file = open_log(
+            path, ("producer", "session", "seq", "score", "threshold", "anomalous", "ms"))
+
+    def write(self, input_id, anomaly_score, threshold, anomalous, ms):
+        self._writer.writerow((input_id.producer, input_id.session, input_id.seq, f"{anomaly_score:.4f}",
+                               f"{threshold:.4f}", int(anomalous), f"{ms:.1f}"))
 
 
 class SentLog:

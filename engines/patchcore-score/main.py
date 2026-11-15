@@ -32,6 +32,7 @@ DEFAULTS = {
         "max_queue": 32,
         "resend_after_ms": 5000,
         "log_sent": "",
+        "log_scored": "",
     },
 }
 

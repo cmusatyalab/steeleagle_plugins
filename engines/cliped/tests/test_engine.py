@@ -269,3 +269,21 @@ def test_each_tile_queued_is_logged_with_its_box(cliped, tmp_path, monkeypatch):
 def test_log_sent_defaults_to_off():
     args = main.parse_args(json.dumps({"prompt": "person", "verifier": "v"}))
     assert args["log_sent"] == ""
+
+
+def test_each_frame_scored_is_logged_whether_or_not_a_tile_is_picked(cliped, tmp_path, monkeypatch):
+    import csv
+
+    from cliped.sent_log import ScoredLog
+
+    monkeypatch.setenv("STEELEAGLE_FILES", str(tmp_path))
+    cliped.scored_log = ScoredLog("t/scored.csv")
+    frame = make_frame(bright=(150, 0, 350, 200), id=40)
+    cliped.on_input(make_input(1, frame), now=0)
+    cliped.on_input(make_input(2, make_frame(id=41)), now=1)
+    cliped.scored_log.close()
+    rows = list(csv.DictReader(open(tmp_path / "t" / "scored.csv")))
+    assert [int(r["frame_id"]) for r in rows] == [40, 41]
+    assert int(rows[0]["timestamp_ns"]) == frame_pb2.RawFrame.FromString(frame).timestamp.ToNanoseconds()
+    assert [int(r["picked"]) for r in rows] == [1, 0]
+    assert all(int(r["tiles"]) > 0 for r in rows)

@@ -36,6 +36,9 @@ def log_path(path):
     return path
 
 
+SCORED_HEADER = ("frame_id", "timestamp_ns", "tiles", "best_score", "threshold", "picked", "ms")
+
+
 class SentLog:
     """Writes the rows to the CSV file `path`, replacing it. Line-buffered,
     so the rows are on disk even if the plugin is killed."""
@@ -52,6 +55,28 @@ class SentLog:
         x0, y0, x1, y1 = tile.box
         self._writer.writerow((frame.id, frame.timestamp.ToNanoseconds(), tile.index, x0, y0, x1, y1,
                                width, height, f"{tile.score:.4f}", class_name))
+
+    def close(self):
+        self._file.close()
+
+
+class ScoredLog:
+    """One CSV row per frame the engine scores, whether or not it picks a
+    tile from it: its id and capture timestamp (as in the sent log), how many
+    tiles it was cut into, the best tile's score, the adaptive threshold, how
+    many tiles were picked, and the milliseconds scoring took. The frames
+    missing from it were never scored (dropped upstream while the engine was
+    busy), which is what effective recall leaves out. Line-buffered."""
+
+    def __init__(self, path):
+        self.path = log_path(path)
+        self._file = open(self.path, "w", newline="", buffering=1)
+        self._writer = csv.writer(self._file)
+        self._writer.writerow(SCORED_HEADER)
+
+    def write(self, frame, tiles, best_score, threshold, picked, ms):
+        self._writer.writerow((frame.id, frame.timestamp.ToNanoseconds(), tiles, f"{best_score:.4f}",
+                               f"{threshold:.4f}", picked, f"{ms:.1f}"))
 
     def close(self):
         self._file.close()
