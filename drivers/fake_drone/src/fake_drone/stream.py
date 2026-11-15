@@ -10,6 +10,7 @@ for. With telemetry on, each frame carries the position and gimbal
 pose a Parrot drone recorded with it (see vmeta.py). There's no vehicle, so
 there's no telemetry stream: StreamTelemetry starts nothing.
 """
+import csv
 import logging
 import threading
 import time
@@ -57,8 +58,16 @@ class Stream(StreamServiceServicer):
     stopped."""
 
     def __init__(self, video_path, decoder, telemetry=None, loop=True, on_end=None,
-                 pad_after=False):
+                 pad_after=False, open_capture=None, frame_log=None):
         self.video_path = video_path
+        # Path of the CSV each published frame is logged to, or None
+        self.frame_log = frame_log
+        self._frame_log_writer = None
+        # Opens the source as a capture (isOpened, read, release, ended):
+        # by default the video, through GStreamer; for a directory of
+        # images, an ImageCapture
+        self._open_capture = open_capture or (
+            lambda loop: GstCapture(self.video_path, self.decoder, loop=loop))
         # H.264 decoder of the video, in gst-launch syntax
         self.decoder = decoder
         self.telemetry = telemetry
@@ -105,7 +114,7 @@ class Stream(StreamServiceServicer):
         padded = False
         try:
             while not stop.is_set():
-                cap = GstCapture(self.video_path, self.decoder, loop=self.loop)
+                cap = self._open_capture(self.loop)
                 if cap.isOpened():
                     logger.info('playing the video from its start')
                     self._read_frames(cap, stop)
@@ -128,12 +137,33 @@ class Stream(StreamServiceServicer):
             if self._raw_frames is not None:
                 self._raw_frames.close()
                 self._raw_frames = None
+            self._close_frame_log()
         if not ended or padded:
             logger.info('video stopped')
             return
         logger.info('video ended')
         if self.on_end is not None:
             self.on_end()
+
+    def _log_frame(self, published, source):
+        """Logs a published frame, (id, capture timestamp ns, Uriel seq or
+        None if it was not sent), with
+        `source` (its index in the video or image order, or "pad"), to the
+        frame log, if there is one."""
+        if self.frame_log is None or published is None:
+            return
+        if self._frame_log_writer is None:
+            # Line-buffered, so the rows are on disk even if the plugin is killed
+            self._frame_log_file = open(self.frame_log, 'w', newline='', buffering=1)
+            self._frame_log_writer = csv.writer(self._frame_log_file)
+            self._frame_log_writer.writerow(('frame_id', 'timestamp_ns', 'seq', 'source'))
+        frame_id, timestamp_ns, seq = published
+        self._frame_log_writer.writerow((frame_id, timestamp_ns, '' if seq is None else seq, source))
+
+    def _close_frame_log(self):
+        if self._frame_log_writer is not None:
+            self._frame_log_file.close()
+            self._frame_log_writer = None
 
     def _update_publisher(self):
         """Replaces the publisher if the vehicle asked for another camera
@@ -157,6 +187,7 @@ class Stream(StreamServiceServicer):
         a row fail, or `stop` is set.
         """
         failed_reads = 0
+        source = -1
         while failed_reads < MAX_FAILED_READS and not stop.is_set():
             ret, frame, pts = cap.read()
             if not ret:
@@ -165,6 +196,7 @@ class Stream(StreamServiceServicer):
                 failed_reads += 1
                 continue
             failed_reads = 0
+            source += 1
             self._frame_shape = frame.shape[:2]
             self._update_publisher()
             if self._raw_frames is None:
@@ -173,7 +205,7 @@ class Stream(StreamServiceServicer):
             if self.telemetry is not None and pts is not None:
                 position_info, gimbal_info = self.telemetry.pose(pts)
             try:
-                self._raw_frames.publish(frame, position_info, gimbal_info)
+                self._log_frame(self._raw_frames.publish(frame, position_info, gimbal_info), source)
             except Exception as e:
                 logger.warning(f'raw frame could not be published, reason: {e}')
 
@@ -189,7 +221,7 @@ class Stream(StreamServiceServicer):
             self._update_publisher()
             if self._raw_frames is not None:
                 try:
-                    self._raw_frames.publish(blank)
+                    self._log_frame(self._raw_frames.publish(blank), 'pad')
                 except Exception as e:
                     logger.warning(f'blank frame could not be published, reason: {e}')
             deadline += period

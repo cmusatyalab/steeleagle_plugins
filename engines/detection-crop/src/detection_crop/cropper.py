@@ -33,6 +33,7 @@ from detection_crop.crop import (
     crop,
     parse_frame,
     parse_result,
+    pixel_box,
 )
 from detection_crop.send_queue import Crop
 
@@ -74,6 +75,7 @@ class Cropper:
         max_output_size,
         clock,
         summary_interval_ns=SUMMARY_INTERVAL_NS,
+        sent_log=None,
     ):
         self.detector = detector
         self.class_name = class_name
@@ -85,6 +87,8 @@ class Cropper:
         self.max_output_size = max_output_size
         self.clock = clock
         self.summary_interval_ns = summary_interval_ns
+        # A sent_log.SentLog each crop queued is logged to, or None
+        self.sent_log = sent_log
         # Per input id: the detector's DetectionResult, or why it has none
         self._outcomes = OrderedDict()
         self._disconnected = False
@@ -163,6 +167,7 @@ class Cropper:
         except FrameError as err:
             logger.warning("input %d: %s", id.seq, err)
             return self._drop(id, UNREADABLE)
+        width, height = frame.h_res, frame.v_res
         out = crop(frame, pixels, detection.bbox)
         if out is None:
             return self._drop(id, OUTSIDE)
@@ -178,6 +183,9 @@ class Cropper:
             )
             return self._drop(id, TOO_BIG)
         self._count(CROPPED)
+        if self.sent_log is not None:
+            box = pixel_box(detection.bbox, width, height)
+            self.sent_log.write(frame, box, width, height, detection.score, detection.class_name)
         sent = Crop(score=detection.score, payload=out, frame_id=frame.id)
         self.queue.push(sent)
         self.queue.sent(sent, id, now)

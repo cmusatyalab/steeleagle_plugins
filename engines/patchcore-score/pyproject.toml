@@ -17,7 +17,7 @@ dependencies = [
 # Regenerate and re-copy them in if/when that's resolved.
 
 [tool.setuptools]
-py-modules = ["main", "score"]
+py-modules = ["main", "score", "reintegration"]
 
 [tool.setuptools.packages.find]
 include = ["steeleagle_protocol*"]

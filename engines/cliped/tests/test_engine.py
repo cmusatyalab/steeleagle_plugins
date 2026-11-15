@@ -242,3 +242,30 @@ def test_an_image_prompt_is_embedded_by_the_tile_encoder():
     encoder = BrightnessEncoder()
     white = np.full((50, 80, 3), 255, dtype=np.uint8)
     assert image_vector(encoder, white) == pytest.approx([1.0, 0.0])
+
+
+def test_each_tile_queued_is_logged_with_its_box(cliped, tmp_path, monkeypatch):
+    import csv
+
+    from cliped.sent_log import SentLog
+
+    monkeypatch.setenv("STEELEAGLE_FILES", str(tmp_path))
+    cliped.sent_log = SentLog("t/sent.csv")
+    frame = make_frame(bright=(150, 0, 350, 200), id=40)
+    cliped.on_input(make_input(1, frame), now=0)
+    cliped.on_input(make_input(2, make_frame(id=41)), now=1)
+    cliped.sent_log.close()
+    rows = list(csv.DictReader(open(tmp_path / "t" / "sent.csv")))
+    assert len(rows) == 1
+    row = rows[0]
+    assert int(row["frame_id"]) == 40
+    parsed = frame_pb2.RawFrame.FromString(frame)
+    assert int(row["timestamp_ns"]) == parsed.timestamp.ToNanoseconds()
+    assert [int(row[k]) for k in ("left", "top", "right", "bottom")] == [150, 0, 350, 200]
+    assert (int(row["frame_width"]), int(row["frame_height"])) == (400, 300)
+    assert row["class"] == "a white square"
+
+
+def test_log_sent_defaults_to_off():
+    args = main.parse_args(json.dumps({"prompt": "person", "verifier": "v"}))
+    assert args["log_sent"] == ""

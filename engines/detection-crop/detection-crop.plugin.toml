@@ -51,6 +51,12 @@ type = "number"
 description = "Milliseconds a sent crop waits for the verifier's RESULT, with no other word, before it is sent again; keep it above the verifier's edge timeout plus its processing time"
 default = 5000
 
+[[args]]
+name = "log_sent"
+type = "string"
+description = "CSV file to log each crop cut and queued to send to, as frame_id, timestamp_ns (the frame's capture timestamp, which the crop keeps), the crop's left, top, right and bottom in pixels of its frame_width x frame_height frame, score and class; a relative path is in the daemon's files directory (STEELEAGLE_FILES). Replaced when the plugin starts. Empty for none"
+default = ""
+
 [engine]
 type = "classification"
 inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]

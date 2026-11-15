@@ -21,6 +21,7 @@ def test_defaults():
         "max_height": 1080,
         "max_queue": 64,
         "resend_after_ms": 5000,
+        "log_sent": "",
     }
 
 

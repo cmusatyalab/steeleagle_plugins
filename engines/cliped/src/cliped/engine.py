@@ -130,7 +130,7 @@ class Cliped:
     has them; Reintegration sends the ones waiting."""
 
     def __init__(self, encoder, selector, queue, *, prompt, verifier, tile_size, stride, log_scores=False,
-                 tile_log=None):
+                 tile_log=None, sent_log=None):
         self.encoder = encoder
         self.selector = selector
         self.queue = queue
@@ -141,6 +141,8 @@ class Cliped:
         self.log_scores = log_scores
         # A files.TileLog, which gets each input and each tile sent, or None
         self.tile_log = tile_log
+        # A sent_log.SentLog each tile queued is logged to, or None
+        self.sent_log = sent_log
         self._boxes = {}  # (width, height) -> tile boxes
         self.frames = 0
         self.picked = 0
@@ -200,6 +202,8 @@ class Cliped:
         ]
         for tile in tiles:
             self.queue.push(tile)
+            if self.sent_log is not None:
+                self.sent_log.write(frame, tile, width, height, self.prompt)
         self.picked += len(tiles)
 
         tile = max(tiles, key=lambda t: t.priority, default=None)

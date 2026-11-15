@@ -20,6 +20,7 @@ from detection_crop.crop import max_output_size, normalize_class
 from detection_crop.cropper import Cropper
 from detection_crop.engine import run
 from detection_crop.send_queue import SendQueue
+from detection_crop.sent_log import SentLog
 
 PLUGIN_FILE = "detection-crop.plugin.toml"
 # Defaults of the args, matching the plugin.toml. The daemon passes only the
@@ -33,6 +34,7 @@ DEFAULTS = {
     "max_height": 1080,
     "max_queue": 64,
     "resend_after_ms": 5000,
+    "log_sent": "",
 }
 
 
@@ -65,6 +67,7 @@ def parse_args(content):
     args["max_height"] = _positive_int(args, "max_height", "pixels")
     args["max_queue"] = _positive_int(args, "max_queue", "crops")
     args["resend_after_ms"] = _positive_int(args, "resend_after_ms", "milliseconds")
+    args["log_sent"] = str(args["log_sent"]).strip()
     return args
 
 
@@ -102,8 +105,13 @@ def main():
         timeout_ns=args["timeout"] * 1_000_000,
         max_output_size=max_output_size(args["max_width"], args["max_height"]),
         clock=time.monotonic_ns,
+        sent_log=SentLog(args["log_sent"]) if args["log_sent"] else None,
     )
-    run(name, cropper, stop=stop)
+    try:
+        run(name, cropper, stop=stop)
+    finally:
+        if cropper.sent_log is not None:
+            cropper.sent_log.close()
 
 
 if __name__ == "__main__":

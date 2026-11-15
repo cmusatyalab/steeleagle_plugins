@@ -20,7 +20,7 @@ from detection_crop.send_queue import SendQueue
 FRAME = make_frame(64, 48, color=None).SerializeToString()
 
 
-def make_cropper(clock=None, max_output_size=1 << 20):
+def make_cropper(clock=None, max_output_size=1 << 20, sent_log=None):
     return Cropper(
         detector=DETECTOR,
         class_name="person",
@@ -29,6 +29,7 @@ def make_cropper(clock=None, max_output_size=1 << 20):
         timeout_ns=2_000_000_000,
         max_output_size=max_output_size,
         clock=clock or Clock(),
+        sent_log=sent_log,
     )
 
 
@@ -147,3 +148,30 @@ def test_a_crop_over_the_output_size_is_dropped():
     assert cropper.apply(input_id(0), FRAME, outcome) == (None, b"")
     assert cropper._counts[TOO_BIG] == 1
     assert len(cropper.queue) == 0
+
+
+def test_each_crop_is_logged_with_its_box_in_the_frame(tmp_path, monkeypatch):
+    import csv
+
+    from detection_crop.sent_log import SentLog
+
+    monkeypatch.setenv("STEELEAGLE_FILES", str(tmp_path))
+    log = SentLog("crops/sent.csv")
+    cropper = make_cropper(sent_log=log)
+    cropper.on_event(result_event(0, (0.5, 0.5, 1.0, 1.0), score=0.75))
+    outcome = cropper.outcome(input_id(0), cropper.deadline())
+    cropper.apply(input_id(0), FRAME, outcome, now=0)
+    # Nothing of the class: nothing logged
+    cropper.on_event(result_event(1, (0, 0, 1, 1), class_name="car"))
+    cropper.apply(input_id(1), FRAME, cropper.outcome(input_id(1), cropper.deadline()), now=0)
+    log.close()
+    rows = list(csv.DictReader(open(tmp_path / "crops" / "sent.csv")))
+    assert len(rows) == 1
+    frame = frame_pb2.RawFrame.FromString(FRAME)
+    row = rows[0]
+    assert int(row["frame_id"]) == frame.id
+    assert int(row["timestamp_ns"]) == frame.timestamp.ToNanoseconds()
+    assert [int(row[k]) for k in ("left", "top", "right", "bottom")] == [32, 24, 64, 48]
+    assert (int(row["frame_width"]), int(row["frame_height"])) == (64, 48)
+    assert float(row["score"]) == pytest.approx(0.75)
+    assert row["class"] == "person"

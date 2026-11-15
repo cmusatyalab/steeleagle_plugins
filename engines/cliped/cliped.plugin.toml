@@ -129,6 +129,12 @@ type = "number"
 description = "Most yes and most no answers kept learned, each; past it, the oldest is forgotten"
 default = 32
 
+[[args]]
+name = "log_sent"
+type = "string"
+description = "CSV file to log each tile picked and queued to send to, as frame_id, timestamp_ns (the frame's capture timestamp, which the tile keeps), tile (its number in the frame), the tile's left, top, right and bottom in pixels of its frame_width x frame_height frame, score and class (the prompt); a relative path is in the daemon's files directory (STEELEAGLE_FILES). Replaced when the plugin starts. Empty for none"
+default = ""
+
 [engine]
 type = "classification"
 inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
