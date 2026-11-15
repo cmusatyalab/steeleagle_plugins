@@ -1,7 +1,7 @@
 [plugin]
 name = "Detection Crop"
 type = "engine"
-description = "Crops each camera frame to the highest-scoring detection of a class that a local detection engine found in it, and sends the crop on; drops the frames with no such detection"
+description = "Crops each camera frame to the highest-scoring detection of a class that a local detection engine found in it, sends the crop on to the remote verifier with the detection's class and confidence, and resends the crops it doesn't have yet, best first, on its reintegration producer"
 
 [[args]]
 name = "detector"
@@ -13,6 +13,12 @@ default = ""
 name = "class"
 type = "string"
 description = "Class of the detection to crop to, as the detector names it (e.g. \"person\"), ignoring case; required"
+default = ""
+
+[[args]]
+name = "verifier"
+type = "string"
+description = "Service name of the engine on the remote daemon that the crops go to; a crop stays queued until its RESULT event for it shows it has the crop. Required"
 default = ""
 
 [[args]]
@@ -33,9 +39,32 @@ type = "number"
 description = "Tallest crop sent, in pixels; a taller one is dropped"
 default = 1080
 
+[[args]]
+name = "max_queue"
+type = "number"
+description = "Most crops waiting for the verifier; past it, the one of the least confident detection is dropped"
+default = 64
+
+[[args]]
+name = "resend_after_ms"
+type = "number"
+description = "Milliseconds a sent crop waits for the verifier's RESULT, with no other word, before it is sent again; keep it above the verifier's edge timeout plus its processing time"
+default = 5000
+
 [engine]
-type = "filter"
+type = "classification"
 inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
-# No result: each frame is replaced with its crop, an RGB RawFrame with the
-# id, timestamp and pose of the frame, or dropped if the detector skipped it,
-# timed out, or found nothing of the class in it
+# Each frame is replaced with its crop, an RGB RawFrame with the id, timestamp
+# and pose of the frame, or dropped if the detector skipped it, timed out, or
+# found nothing of the class in it. Encode it (e.g. with the thumbnail
+# plugin's WebP encoder) before it crosses to the verifier.
+forwards = "steeleagle_protocol/v1/messages/frame/RawFrame"
+# The crop sent: class the detection's class, as the detector names it, score
+# its confidence
+result = "steeleagle_protocol/v1/messages/result/ClassificationResult"
+
+[[engine.producers]]
+# Sends the queued crops the verifier doesn't have yet, best first, whether or
+# not frames come in. Route it to the same engine as the engine's output.
+name = "reintegration"
+output = "steeleagle_protocol/v1/messages/frame/RawFrame"

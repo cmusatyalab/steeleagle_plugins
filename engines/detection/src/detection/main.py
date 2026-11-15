@@ -37,6 +37,9 @@ def main():
     if config.geofence:
         geofence = Geofence.from_kml(paths.resolve(paths.files_dir(), config.geofence))
     predictor = load_predictor(config, paths.models_dir())
+    if config.letterbox:
+        size = predictor.input_size
+        logging.getLogger("detection").info("letterboxing frames to %dx%d", size, size)
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())

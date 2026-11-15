@@ -3,11 +3,12 @@ so a tile sent while the link is down is not lost. Tiles the selector must
 send (like one the verifier said yes to) go first, then the rest; each group
 best score first.
 
-An engine can only send something as the outcome of an input, so a tile goes
-out in place of an input (its carrier), and keeps that input's id: the
-verifier's events name the carrier. Each input carries the best tile that is
-not already in flight. A tile leaves the queue only on the verifier's RESULT
-event for a carrier it went out as: the verifier finished it.
+A tile goes out in two ways, each as an input with an id the verifier's
+events name (its carrier): in place of the camera frame it was cut from, by
+the engine, and on the engine's reintegration producer, which sends the
+queue's waiting tiles best first (engine.Reintegration). A tile leaves the
+queue only on the verifier's RESULT event for one of its carriers: the
+verifier finished it.
 
 ACCEPTED is not enough. For a remote verifier it means only that the remote
 server received the tile; if the verifier then never takes it (it is busy or
@@ -108,10 +109,13 @@ class SendQueue:
         logger.debug("queue full; dropped the tile of frame %d (score %.3f)", worst.frame_id, worst.score)
         return worst
 
-    def next(self, carrier, now):
-        """The highest-priority tile not in flight, marked as sent in place of the input
-        `carrier` at `now`; or None if every tile is in flight or there are
-        none."""
+    def __contains__(self, tile):
+        return tile in self._tiles
+
+    def best(self, now):
+        """The highest-priority tile not in flight, or None if every tile is in
+        flight or there are none. Tiles in flight for `resend_after_s` (at
+        `now`) with no word go back to wait first."""
         best = None
         for tile in self._tiles:
             if tile.in_flight and now - tile.sent_at >= self.resend_after_s:
@@ -119,10 +123,30 @@ class SendQueue:
                 tile.sent_at = None
             if not tile.in_flight and (best is None or tile.priority > best.priority):
                 best = tile
+        return best
+
+    def sent(self, tile, carrier, now):
+        """Marks `tile` as sent as the input `carrier` at `now`. A tile no
+        longer queued (confirmed or dropped) is not tracked."""
+        if tile not in self._tiles:
+            return
+        tile.carriers.append(carrier)
+        tile.sent_at = now
+        self._carried[carrier] = tile
+
+    def unsend(self, tile, carrier):
+        """Puts `tile` back to wait if its latest carrier is `carrier`, which
+        will never reach the verifier, e.g. one replaced before it left."""
+        if tile in self._tiles and tile.carriers and tile.carriers[-1] == carrier:
+            tile.sent_at = None
+
+    def next(self, carrier, now):
+        """The highest-priority tile not in flight, marked as sent as the input
+        `carrier` at `now`; or None if every tile is in flight or there are
+        none."""
+        best = self.best(now)
         if best is not None:
-            best.carriers.append(carrier)
-            best.sent_at = now
-            self._carried[carrier] = best
+            self.sent(best, carrier, now)
         return best
 
     def on_event(self, event):

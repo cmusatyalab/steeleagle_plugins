@@ -3,8 +3,9 @@
 
 eagled names the plugin to run in STEELEAGLE_PLUGIN, its args in
 STEELEAGLE_PLUGIN_ARGS (a JSON object), the name to serve the engine as in
-STEELEAGLE_ENGINE_ENDPOINT, and the IP of the local daemon, which qualifies
-the names of its engines, in STEELEAGLE_LOCAL_QUALIFIER.
+STEELEAGLE_ENGINE_ENDPOINT, the IP of the local daemon, which qualifies the
+detector's name, in STEELEAGLE_LOCAL_QUALIFIER, and the IP of the remote
+daemon, which qualifies the verifier's name, in STEELEAGLE_REMOTE_QUALIFIER.
 """
 
 import json
@@ -18,11 +19,21 @@ import time
 from detection_crop.crop import max_output_size, normalize_class
 from detection_crop.cropper import Cropper
 from detection_crop.engine import run
+from detection_crop.send_queue import SendQueue
 
 PLUGIN_FILE = "detection-crop.plugin.toml"
 # Defaults of the args, matching the plugin.toml. The daemon passes only the
 # args set in its config, so any arg left unset is defaulted here.
-DEFAULTS = {"detector": "", "class": "", "timeout": 2000, "max_width": 1920, "max_height": 1080}
+DEFAULTS = {
+    "detector": "",
+    "class": "",
+    "verifier": "",
+    "timeout": 2000,
+    "max_width": 1920,
+    "max_height": 1080,
+    "max_queue": 64,
+    "resend_after_ms": 5000,
+}
 
 
 class ConfigError(Exception):
@@ -45,13 +56,15 @@ def parse_args(content):
     for name, default in DEFAULTS.items():
         if args.get(name) is None:
             args[name] = default
-    for name in ("detector", "class"):
+    for name in ("detector", "class", "verifier"):
         args[name] = str(args[name]).strip()
         if not args[name]:
             raise ConfigError(f"the {name!r} arg must be set")
     args["timeout"] = _positive_int(args, "timeout", "milliseconds")
     args["max_width"] = _positive_int(args, "max_width", "pixels")
     args["max_height"] = _positive_int(args, "max_height", "pixels")
+    args["max_queue"] = _positive_int(args, "max_queue", "crops")
+    args["resend_after_ms"] = _positive_int(args, "resend_after_ms", "milliseconds")
     return args
 
 
@@ -76,6 +89,7 @@ def main():
     except (ConfigError, ValueError, TypeError) as err:
         sys.exit(f"Bad args for {PLUGIN_FILE}: {err}")
     detector = qualify(os.environ.get("STEELEAGLE_LOCAL_QUALIFIER", ""), args["detector"])
+    verifier = qualify(os.environ.get("STEELEAGLE_REMOTE_QUALIFIER", ""), args["verifier"])
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -83,6 +97,8 @@ def main():
     cropper = Cropper(
         detector=detector,
         class_name=normalize_class(args["class"]),
+        verifier=verifier,
+        queue=SendQueue(max_size=args["max_queue"], resend_after_s=args["resend_after_ms"] / 1000),
         timeout_ns=args["timeout"] * 1_000_000,
         max_output_size=max_output_size(args["max_width"], args["max_height"]),
         clock=time.monotonic_ns,

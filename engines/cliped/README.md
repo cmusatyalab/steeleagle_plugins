@@ -2,19 +2,22 @@
 
 SteelEagle engine plugins for prompt-guided edge filtering:
 
-- `cliped.plugin.toml`, the edge filter: each camera frame (`RawFrame`) is cut into overlapping square tiles, every tile is scored against a text or image prompt with MobileCLIP2-S0, and the tiles worth sending wait in a prioritized send queue until the remote verifier has them.
+- `cliped.plugin.toml`, the edge filter: each camera frame (`RawFrame`) is cut into overlapping square tiles, every tile is scored against a text or image prompt with MobileCLIP2-S0, the frame's best tile is sent to the remote verifier, and the tiles worth sending wait in a prioritized send queue until the verifier has them, sent again by the engine's `reintegration` producer.
 - `verifier.plugin.toml`, the verifier: asks a vision-language model on Ollama (Qwen3-VL 8B Instruct by default) whether each tile matches the prompt, and forwards it if so, dropping it if not. Its answer goes back to cliped, which learns from it.
 
 eagled picks one with `STEELEAGLE_PLUGIN`; unset runs the edge filter.
 
 A tile's score is `s = v·t − max_j v·b_j`: how much more its embedding `v` looks like the prompt `t` than like the closest background `b_j`. A tile is queued when `s > max(0, thr + margin · std(s))`, where `thr` is an EMA of each frame's `k`-th best score and `std(s)` is taken over the frame's tiles. At most `max_send` tiles of a frame are queued.
 
-Each input is replaced with the best queued tile that is not in flight: an RGB `RawFrame` at the tile's native resolution, with the id, timestamp and pose of the frame it was cut from. If no tile waits, the input is dropped. The result is a `DetectionResult` of the tiles the input picked (class = the prompt, score = `s`, box in the frame), which may not be the tile it carries.
+Each input is replaced with the best tile cut from it: an RGB `RawFrame` at the tile's native resolution, with the id, timestamp and pose of the frame. If it has none, the input is dropped. The result is a `ClassificationResult` of that tile: `class` is the prompt (the text, or the image's file name) and `score` is `s`. Every tile the input picked (up to `max_send`) is queued, the one sent included.
 
-cliped does not compress tiles. Put an encoder after it, e.g. the thumbnail plugin's WebP encoder, and its decoder before the verifier:
+The engine's `reintegration` producer (`[[engine.producers]]` in `cliped.plugin.toml`) sends the queued tiles the verifier doesn't have yet, best first, whenever the flow has room for them. An engine can send only in answer to an input, so before it, a tile that was lost, timed out or found while the link was down waited for a later frame to carry it, and none came when frames stopped or when their tokens were all taken. A flow names the producer `local.<cliped>.reintegration`; it runs in the engine's process, publishing on `STEELEAGLE_ENGINE_ENDPOINT.reintegration`.
+
+cliped does not compress tiles. Put an encoder after it and after its producer, e.g. the thumbnail plugin's WebP encoder, and its decoder before the verifier:
 
 ```
-camera → rescale (720p) → cliped → webp encoder ══ link ══ webp decoder → verifier
+camera → rescale (720p) → cliped ─────────┐
+                     cliped.reintegration ─┴→ webp encoder ══ link ══ webp decoder → verifier
 ```
 
 `tile_size` and `stride` are tuned for 720p frames, so rescale them first.
@@ -37,13 +40,15 @@ Replayed over the logged tiles of the normal-network runs (3 scenes × 3 trials)
 
 ## The send queue
 
+A tile goes out in two ways: in place of the frame it was cut from, and on the `reintegration` producer, which sends the waiting tiles best first. Uriel's client keeps only a producer's newest input until the flow has room for it, and one it replaces there never enters the flow, so the producer has one tile at a time waiting to be admitted: the next goes once an event shows the last one entered the flow, unless a better tile is queued first, which takes its place.
+
 A tile leaves the queue only on the verifier's `RESULT` event for an input it went out as: the verifier finished it. `ACCEPTED` is not enough: for a remote verifier it means only that the remote server got the tile, and a busy or stuck verifier then produces `ACCEPTED`, `SENT`, `TIMED_OUT` without ever taking it. Until its `RESULT`:
 
 | Event or condition | Effect |
 | --- | --- |
 | `SKIPPED` / `TIMED_OUT` for the tile's latest carrier | the tile waits to be sent again |
 | `DISCONNECTED`, or `LOST` (its `RESULT` may be among the lost) | every tile in flight waits to be sent again |
-| `resend_after_ms` without word, e.g. dropped by the encoder before reaching the verifier | the tile waits to be sent again |
+| `resend_after_ms` without word, e.g. dropped by the encoder before reaching the verifier, or never admitted | the tile waits to be sent again |
 | more than `max_queue` tiles | the lowest-priority tile is dropped, in flight or not: not a must-send, lowest score |
 
 A tile sent again may reach the verifier twice; that is the price of never losing one.
@@ -59,7 +64,7 @@ A tile sent again may reach the verifier twice; that is the price of never losin
 | `tile_size` | `200` | Side of the square tiles, in pixels |
 | `stride` | `150` | Distance between neighboring tiles, in pixels |
 | `margin` | `0.25` | How far above the threshold a tile must be, in std(s) |
-| `max_send` | `1` | Most tiles of one frame queued |
+| `max_send` | `1` | Most tiles of one frame queued; the best one replaces the frame |
 | `backgrounds` | `["grass", "dirt", "rocks", "trees", "a road", "a roof"]` | Background prompts |
 | `k` | `2` | The threshold follows each frame's k-th best score |
 | `ema` | `0.9` | Weight of the threshold's old value at each frame |
@@ -76,7 +81,7 @@ A tile sent again may reach the verifier twice; that is the price of never losin
 
 ## The verifier
 
-The verifier takes RGB `RawFrame`s (a tile from cliped, decoded) and asks the model, through Ollama's `/api/chat`, whether the frame shows the `prompt`; with an `image`, it shows the model the reference image, shrunk to at most 448 px on its longer side, first and asks whether the frame, seen from above, contains that same target (same appearance, not merely the same category). The model answers yes or no. A yes forwards the frame unchanged; a no, any other answer, or a failure to reach Ollama drops it. Every input the model judged gets a `GenericResult` holding `{"match": true|false}`, so cliped sees a `RESULT` for every tile it sent and learns from it.
+The verifier takes RGB `RawFrame`s (a tile from cliped, decoded) and asks the model, through Ollama's `/api/chat`, whether the frame shows the `prompt`; with an `image`, it shows the model the reference image, shrunk to at most 448 px on its longer side, first and asks whether the frame, seen from above, contains that same target (same appearance, not merely the same category). The model answers yes or no. A yes forwards the frame unchanged; a no, any other answer, or a failure to reach Ollama drops it. Every input the model judged gets a `GenericResult` holding `{"match": true|false}`, so cliped sees a `RESULT` for every tile it sent, from the engine or its producer, and learns from it.
 
 It needs an Ollama server (`ollama serve`); at startup it pulls the model if the server does not have it. It does not load torch or the CLIP models.
 

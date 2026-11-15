@@ -6,6 +6,7 @@ from steeleagle_protocol.v1.messages.result import result_pb2
 PRODUCER = "camera"
 SESSION = 0xDEADBEEF_CAFEF00D  # above 2**63, as uint64 sessions can be
 DETECTOR = "100.64.0.1.detection"
+VERIFIER = "10.0.0.2.verifier"
 DETECTION_RESULT_TYPE = "steeleagle_protocol/v1/messages/result/DetectionResult"
 RGB_CHANNELS = 3
 

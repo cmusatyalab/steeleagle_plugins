@@ -6,26 +6,33 @@ from detection_crop.main import ConfigError, parse_args, qualify
 
 
 def args(**kwargs):
-    return json.dumps({"detector": "detection", "class": "person", **kwargs})
+    return json.dumps(
+        {"detector": "detection", "class": "person", "verifier": "verifier", **kwargs}
+    )
 
 
 def test_defaults():
     assert parse_args(args()) == {
         "detector": "detection",
         "class": "person",
+        "verifier": "verifier",
         "timeout": 2000,
         "max_width": 1920,
         "max_height": 1080,
+        "max_queue": 64,
+        "resend_after_ms": 5000,
     }
 
 
-@pytest.mark.parametrize("missing", ["detector", "class"])
-def test_detector_and_class_are_required(missing):
+@pytest.mark.parametrize("missing", ["detector", "class", "verifier"])
+def test_detector_class_and_verifier_are_required(missing):
     with pytest.raises(ConfigError):
         parse_args(args(**{missing: " "}))
 
 
-@pytest.mark.parametrize("name", ["timeout", "max_width", "max_height"])
+@pytest.mark.parametrize(
+    "name", ["timeout", "max_width", "max_height", "max_queue", "resend_after_ms"]
+)
 @pytest.mark.parametrize("value", [0, -1, 1.5, True])
 def test_numbers_must_be_positive_whole_numbers(name, value):
     with pytest.raises(ConfigError):

@@ -9,10 +9,11 @@ from steeleagle_protocol.v1.messages.result import result_pb2
 
 RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
 DETECTION_RESULT_TYPE = "steeleagle_protocol/v1/messages/result/DetectionResult"
+CLASSIFICATION_RESULT_TYPE = "steeleagle_protocol/v1/messages/result/ClassificationResult"
 RGB_CHANNELS = 3
-# Room in an output for a RawFrame's fields besides its pixels: its ids,
-# timestamp and pose.
-RAW_FRAME_HEADROOM = 16 << 10
+# Room in an output for a RawFrame's fields besides its pixels, and for the
+# result: its ids, timestamp and pose, and its classification.
+OUTPUT_HEADROOM = 16 << 10
 
 
 class FrameError(ValueError):
@@ -26,8 +27,8 @@ def type_name(payload_type):
 
 
 def max_output_size(max_width, max_height):
-    """The largest crop this engine sends."""
-    return max_width * max_height * RGB_CHANNELS + RAW_FRAME_HEADROOM
+    """The largest crop this engine sends, with its result."""
+    return max_width * max_height * RGB_CHANNELS + OUTPUT_HEADROOM
 
 
 def parse_frame(data):
@@ -102,3 +103,11 @@ def crop(frame, pixels, bbox):
     frame.h_res, frame.v_res = right - left, bottom - top
     frame.channels = RGB_CHANNELS
     return frame.SerializeToString()
+
+
+def classification(detection):
+    """The serialized ClassificationResult of the crop of `detection`: its
+    class, as the detector names it, and its confidence."""
+    return result_pb2.ClassificationResult(
+        score=detection.score, **{"class": detection.class_name}
+    ).SerializeToString()

@@ -2,6 +2,7 @@
 Stock weights are downloaded the first time; the test skips without network."""
 
 import cv2
+import numpy as np
 import pytest
 from conftest import CAMERA
 
@@ -67,6 +68,35 @@ def test_rfdetr_finds_the_bus_and_the_people_in_the_bus_photo(rfdetr):
     names = [d.class_name for d in result.detections]
     assert "bus" in names
     assert names.count("person") >= BUS_PHOTO_MIN_PEOPLE
+
+
+def test_rfdetr_finds_a_small_letterboxed_crop_of_a_person(rfdetr):
+    from detection.predictors import LetterboxPredictor
+
+    boxed = LetterboxPredictor(rfdetr)
+    # Nano runs at 384x384
+    assert boxed.input_size == rfdetr.model.model_config.resolution == 384
+    # Writable, as the engine's frames are
+    rgb = np.frombuffer(bus_frame().data, dtype=np.uint8).reshape(1080, 810, 3).copy()
+    people = [
+        d for d in rfdetr.predict(rgb) if d.class_name == "person" and d.score > 0.5
+    ]
+    assert people
+    y_min, x_min, y_max, x_max = people[0].box
+    crop = rgb[
+        int(y_min * 1080) : int(y_max * 1080), int(x_min * 810) : int(x_max * 810)
+    ]
+    # Shrunk to 64 px tall, as a distant person's crop would be
+    small = cv2.resize(
+        crop, (max(1, crop.shape[1] * 64 // crop.shape[0]), 64), cv2.INTER_AREA
+    )
+    detected = boxed.predict(small)
+    assert max(d.score for d in detected if d.class_name == "person") > 0.5
+    assert all(0 <= v <= 1 for d in detected for v in d.box)
+
+
+def test_yolo_reports_its_input_size(yolo):
+    assert yolo.input_size == 640
 
 
 def test_a_trained_rfdetr_2xlarge_checkpoint_loads_as_its_own_variant(tmp_path):

@@ -1,5 +1,6 @@
 """End to end: frames go through a real Uriel producer, client and server and
-the cliped engine, across a real remote crossing to a stand-in verifier.
+the cliped engine, across a real remote crossing to a stand-in verifier, as
+do the tiles of cliped's reintegration producer.
 The image encoder is a stand-in too (conftest.BrightnessEncoder): a white
 square in a frame is the target."""
 
@@ -13,7 +14,7 @@ import uriel
 from conftest import RAW_FRAME_TYPE, BrightnessEncoder, make_frame
 
 from cliped.clip import Selector
-from cliped.engine import Cliped, max_output_size, run
+from cliped.engine import REINTEGRATION, Cliped, max_output_size, producer_name, run
 from cliped.send_queue import SendQueue
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 
@@ -24,6 +25,10 @@ FRAME_INTERVAL_S = 0.2
 FLOW_SPEC = """
 [[producers]]
 name = "{producer}"
+tokens = 2
+
+[[producers]]
+name = "{reintegration}"
 tokens = 2
 
 [[engines]]
@@ -41,6 +46,11 @@ timeout = "2s"
 
 [[edges]]
 from = "{cliped}"
+to = "{verifier}"
+timeout = "300ms"
+
+[[edges]]
+from = "{reintegration}"
 to = "{verifier}"
 timeout = "300ms"
 """
@@ -100,6 +110,7 @@ def flow():
     verifier, remote)."""
     suffix = uuid.uuid4().hex[:8]
     names = {k: f"{k}-{suffix}" for k in ("producer", "cliped", "verifier")}
+    names["reintegration"] = producer_name(names["cliped"], REINTEGRATION)
     encoder = BrightnessEncoder()
     cliped = Cliped(
         encoder,
@@ -135,6 +146,7 @@ def flow():
             ):
                 server.add_engine(names["cliped"])
                 client.add_producer(names["producer"])
+                client.add_producer(names["reintegration"])
                 client.add_flow(f"flow-{suffix}", FLOW_SPEC.format(**names))
                 time.sleep(0.3)
                 yield producer.send, cliped, verifier, remote
@@ -146,40 +158,36 @@ def flow():
             remote.close()
 
 
-def send_until(send, done, frame_id):
-    """Sends empty frames, from `frame_id` on, until `done()` or the time runs
-    out; each carries a queued tile, if one waits."""
+def wait_until(done):
     deadline = time.monotonic() + TIMEOUT_S
     while not done() and time.monotonic() < deadline:
-        send(make_frame(id=frame_id))
-        frame_id += 1
-        time.sleep(FRAME_INTERVAL_S)
+        time.sleep(0.05)
     return done()
 
 
 def test_a_target_tile_reaches_the_verifier_once(flow):
     send, cliped, verifier, _ = flow
     send(make_frame(bright=(150, 0, 350, 200), id=7))
-    assert send_until(send, lambda: cliped.queue.confirmed == 1, 8)
-    # Empty frames carry nothing once the verifier has it
+    assert wait_until(lambda: cliped.queue.confirmed == 1)
+    # Nothing is sent again once the verifier has it
     for frame_id in range(100, 105):
         send(make_frame(id=frame_id))
         time.sleep(FRAME_INTERVAL_S)
     assert verifier.frame_ids == [7] and len(cliped.queue) == 0
 
 
-def test_a_stalled_verifier_does_not_lose_the_tile(flow):
+def test_a_stalled_verifier_gets_the_tile_without_more_frames(flow):
     send, cliped, verifier, _ = flow
     verifier.stalled.set()
+    time.sleep(0.1)  # it may be in a wait for an input, which would take it
     send(make_frame(bright=(150, 0, 350, 200), id=7))
     # Its server takes the tile (ACCEPTED), the verifier does not, and the
-    # offer times out: the tile stays queued, and is sent again
-    for frame_id in range(8, 14):
-        send(make_frame(id=frame_id))
-        time.sleep(FRAME_INTERVAL_S)
+    # offer times out: the tile stays queued, and the producer sends it again
+    time.sleep(1.5)
     assert len(cliped.queue) == 1 and cliped.queue.confirmed == 0 and verifier.frame_ids == []
     verifier.stalled.clear()
-    assert send_until(send, lambda: cliped.queue.confirmed == 1, 14)
+    # No camera frame comes in: the producer alone gets it there
+    assert wait_until(lambda: cliped.queue.confirmed == 1)
     assert set(verifier.frame_ids) == {7}
 
 
@@ -188,10 +196,9 @@ def test_a_tile_found_while_the_remote_is_down_reaches_it_once_it_is_back(flow):
     remote.down()
     time.sleep(0.5)
     send(make_frame(bright=(150, 0, 350, 200), id=7))
-    for frame_id in range(8, 14):
-        send(make_frame(id=frame_id))
-        time.sleep(FRAME_INTERVAL_S)
+    time.sleep(1.5)
     assert len(cliped.queue) == 1 and cliped.queue.confirmed == 0
     remote.up()
-    assert send_until(send, lambda: cliped.queue.confirmed == 1, 14)
+    assert wait_until(lambda: cliped.queue.confirmed == 1)
     assert set(verifier.frame_ids) == {7}
+

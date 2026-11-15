@@ -1,5 +1,6 @@
 """Matches each frame the engine holds with the detector's result for the same
-input, and decides what to send in its place.
+input, decides what to send in its place, and queues the crops it sends until
+the verifier has them (send_queue.py).
 
 The engine subscribes to the detector's events. For each input, the detector
 either:
@@ -13,14 +14,27 @@ The result may come before or after the frame. A frame is cropped to the
 highest-scoring detection of the class in the result, and dropped if there is
 none, if the detector failed, or if its timeout, counted from when the frame
 reaches the engine, ends first.
+
+The engine also subscribes to the verifier's events, which settle the crops in
+the queue: a crop stays queued, and is sent again by the engine's
+reintegration producer, until the verifier's RESULT for it.
 """
 
 import logging
+import time
 from collections import Counter, OrderedDict
 
 import uriel
 
-from detection_crop.crop import FrameError, best_detection, crop, parse_frame, parse_result
+from detection_crop.crop import (
+    FrameError,
+    best_detection,
+    classification,
+    crop,
+    parse_frame,
+    parse_result,
+)
+from detection_crop.send_queue import Crop
 
 logger = logging.getLogger("detection_crop")
 
@@ -54,6 +68,8 @@ class Cropper:
         *,
         detector,
         class_name,
+        verifier,
+        queue,
         timeout_ns,
         max_output_size,
         clock,
@@ -61,6 +77,10 @@ class Cropper:
     ):
         self.detector = detector
         self.class_name = class_name
+        self.verifier = verifier
+        # A send_queue.SendQueue, which holds the crops until the verifier
+        # has them; Reintegration sends the ones waiting
+        self.queue = queue
         self.timeout_ns = timeout_ns
         self.max_output_size = max_output_size
         self.clock = clock
@@ -72,6 +92,9 @@ class Cropper:
         self._summary_at_ns = None
 
     def on_event(self, event):
+        if event.engine == self.verifier:
+            self.queue.on_event(event)
+            return
         if event.engine != self.detector:
             return
         kind = event.kind
@@ -123,10 +146,13 @@ class Cropper:
             return TOO_LATE
         return None
 
-    def apply(self, id, data, outcome):
-        """The serialized RawFrame `data` of the input `id`, cropped by
-        `outcome` (as the method `outcome` gave it) and serialized; or None if
-        the frame is dropped."""
+    def apply(self, id, data, outcome, now=None):
+        """The crop to send in place of the input `id` (a send_queue.Crop),
+        its serialized RawFrame `data` cropped by `outcome` (as the method
+        `outcome` gave it), and its result, the serialized
+        ClassificationResult of the detection; or (None, b"") if the frame is
+        dropped. The crop is queued, in flight as `id` since `now`."""
+        now = time.monotonic() if now is None else now
         if isinstance(outcome, str):
             return self._drop(id, outcome)
         detection = best_detection(outcome, self.class_name)
@@ -140,23 +166,27 @@ class Cropper:
         out = crop(frame, pixels, detection.bbox)
         if out is None:
             return self._drop(id, OUTSIDE)
-        if len(out) > self.max_output_size:
+        result = classification(detection)
+        if len(out) + len(result) > self.max_output_size:
             logger.warning(
-                "input %d: a %dx%d crop is %d bytes, over %d",
+                "input %d: a %dx%d crop and its result are %d bytes, over %d",
                 id.seq,
                 frame.h_res,
                 frame.v_res,
-                len(out),
+                len(out) + len(result),
                 self.max_output_size,
             )
             return self._drop(id, TOO_BIG)
         self._count(CROPPED)
-        return out
+        sent = Crop(score=detection.score, payload=out, frame_id=frame.id)
+        self.queue.push(sent)
+        self.queue.sent(sent, id, now)
+        return sent, result
 
     def _drop(self, id, why):
         logger.debug("input %d: dropped (%s)", id.seq, why)
         self._count(why)
-        return None
+        return None, b""
 
     def _count(self, what):
         self._counts[what] += 1
@@ -173,10 +203,13 @@ class Cropper:
             cropped = self._counts.pop(CROPPED, 0)
             dropped = ", ".join(f"{n} {why}" for why, n in self._counts.most_common())
             logger.info(
-                "last %.0f s: %d frames cropped%s",
+                "last %.0f s: %d frames cropped%s; queue %d (%d in flight), %d confirmed",
                 seconds,
                 cropped,
                 f" | dropped: {dropped}" if dropped else "",
+                len(self.queue),
+                self.queue.in_flight,
+                self.queue.confirmed,
             )
         self._counts = Counter()
         self._summary_at_ns = now

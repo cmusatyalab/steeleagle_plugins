@@ -45,6 +45,7 @@ class Config:
     vfov: float = DEFAULT_VFOV_DEG
     max_output_size: int = DEFAULT_MAX_OUTPUT_BYTES
     early_discard: bool = False
+    letterbox: bool = False
 
     @property
     def architecture(self):
@@ -73,6 +74,8 @@ def _validate(config):
         raise ConfigError(
             f"rfdetr_size {config.rfdetr_size!r} must be one of {RFDETR_SIZES}"
         )
+    if not isinstance(config.letterbox, bool):
+        raise ConfigError(f"letterbox {config.letterbox!r} must be true or false")
     if not 0 < config.confidence <= 1:
         raise ConfigError(f"confidence {config.confidence} must be in (0, 1]")
     for name in ("hfov", "vfov"):

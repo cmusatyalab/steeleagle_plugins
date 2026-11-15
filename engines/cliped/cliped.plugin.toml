@@ -1,7 +1,7 @@
 [plugin]
 name = "CLIP Edge Filter"
 type = "engine"
-description = "Scores the tiles of each camera frame against a text or image prompt with MobileCLIP, and sends the remote verifier the best tiles, best first, keeping each until the verifier has it"
+description = "Scores the tiles of each camera frame against a text or image prompt with MobileCLIP, sends each frame's best tile to the remote verifier, and resends the tiles it doesn't have yet, best first, on its reintegration producer"
 
 [[args]]
 name = "prompt"
@@ -130,10 +130,18 @@ description = "Most yes and most no answers kept learned, each; past it, the old
 default = 32
 
 [engine]
-type = "filter"
+type = "classification"
 inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
-# Each frame is replaced with the best queued tile, an RGB RawFrame at native
-# resolution with the id and pose of the frame it was cut from, or dropped if
-# no tile waits to be sent. Encode it (e.g. with the thumbnail plugin's WebP
-# encoder) before it crosses to the verifier.
-result = "steeleagle_protocol/v1/messages/result/DetectionResult"
+# Each frame is replaced with the best tile cut from it, an RGB RawFrame at
+# native resolution with the id and pose of the frame, or dropped if it has
+# none. Encode it (e.g. with the thumbnail plugin's WebP encoder) before it
+# crosses to the verifier.
+forwards = "steeleagle_protocol/v1/messages/frame/RawFrame"
+# The tile sent: class the prompt (the text, or the image's file name), score s
+result = "steeleagle_protocol/v1/messages/result/ClassificationResult"
+
+[[engine.producers]]
+# Sends the queued tiles the verifier doesn't have yet, best first, whether or
+# not frames come in. Route it to the same encoder as the engine's output.
+name = "reintegration"
+output = "steeleagle_protocol/v1/messages/frame/RawFrame"
