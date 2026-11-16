@@ -222,24 +222,10 @@ func TestManifestFromCatalog(t *testing.T) {
 	}
 	want := []config.MissionEngineField{
 		{Name: "local.yolo", Result: "steeleagle_protocol/v1/messages/result/DetectionResult"},
-		{Name: "remote.h264_encoder", Result: "messages/result/GenericResult"},
+		{Name: "remote.h264_encoder"},
 	}
 	if !reflect.DeepEqual(m.Engines, want) {
 		t.Errorf("engines = %+v, want %+v", m.Engines, want)
-	}
-}
-
-func TestManifestGenericStandIn(t *testing.T) {
-	for _, k := range []string{"Detection", "Classification", "Guidance", "Position", "Generic"} {
-		r := "steeleagle_protocol/v1/messages/result/" + k + "Result"
-		if got := ManifestResult(r); got != r {
-			t.Errorf("ManifestResult(%q) = %q", r, got)
-		}
-	}
-	for _, r := range []string{"steeleagle_protocol/v1/messages/frame/EncodedFrame", ""} {
-		if got := ManifestResult(r); got != "messages/result/GenericResult" {
-			t.Errorf("ManifestResult(%q) = %q", r, got)
-		}
 	}
 }
 

@@ -9,10 +9,6 @@ import (
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 )
 
-// genericResult is the result declared for an engine whose result type isn't
-// one the SDK generates a typed engine field for.
-const genericResult = "messages/result/GenericResult"
-
 // telemetryProducer is the producer every vehicle has, which needs no camera.
 const telemetryProducer = "telemetry"
 
@@ -317,7 +313,7 @@ func (t Template) Resolve(c Catalog, orchestratorIP string, target fleet.Vehicle
 			return Resolved{}, fmt.Errorf("flow engine %s is neither on this vehicle's daemon nor on the orchestrator", e.Name)
 		}
 		ce, _ := c.Engine(engines[i].IP + "." + engines[i].Bare) // resolveNames found it
-		manifest.Engines = append(manifest.Engines, config.MissionEngineField{Name: names[e.Name], Result: ManifestResult(ce.Result)})
+		manifest.Engines = append(manifest.Engines, config.MissionEngineField{Name: names[e.Name], Result: ce.Result})
 	}
 	fc, err := t.flowConfig(producers, engines, target.DaemonIP)
 	if err != nil {
@@ -335,17 +331,4 @@ func (t Template) Resolve(c Catalog, orchestratorIP string, target fleet.Vehicle
 		return Resolved{}, err
 	}
 	return Resolved{Flow: flow, Manifest: mb, Engines: names}, nil
-}
-
-// ManifestResult returns the result type to declare in a manifest for an
-// engine whose result is result: the result itself if its last path segment is
-// one of the five result types the SDK generates engine fields for, otherwise
-// the Generic stand-in.
-func ManifestResult(result string) string {
-	seg := result[strings.LastIndex(result, "/")+1:]
-	switch seg {
-	case "DetectionResult", "ClassificationResult", "GuidanceResult", "PositionResult", "GenericResult":
-		return result
-	}
-	return genericResult
 }
