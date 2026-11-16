@@ -54,6 +54,14 @@ IMAGE_QUESTION = (
     "exactly like the reference. Does image 2 contain this target, possibly rotated, lying down or partly "
     "out of frame? Answer with only yes or no."
 )
+# For box_rerank's crops: a detection with context around it, its box drawn
+# in red. The context helps the model recognize a small object, and the box
+# says which object is asked about when another (e.g. the target next to a
+# distractor) is in the crop too.
+BOX_QUESTION = (
+    "This image is cut from an aerial drone video. Is the object inside the red box {prompt}? "
+    "Answer with only yes or no."
+)
 
 
 class OllamaError(Exception):
@@ -138,6 +146,18 @@ def shrink(rgb, max_side=REFERENCE_MAX_SIDE):
     return cv2.resize(rgb, size, interpolation=cv2.INTER_AREA)
 
 
+def enlarge(rgb, min_side):
+    """`rgb` scaled up, keeping its aspect ratio, so its shorter side is at
+    least `min_side` pixels; as is if it already is, or if `min_side` is 0. A
+    crop is sent small to save the link, and enlarged here, where it costs
+    nothing, so the model sees the object over more patches."""
+    height, width = rgb.shape[:2]
+    if not min_side or min(height, width) >= min_side:
+        return rgb
+    scale = min_side / min(height, width)
+    return cv2.resize(rgb, (round(width * scale), round(height * scale)), interpolation=cv2.INTER_CUBIC)
+
+
 def encode_png(rgb):
     ok, data = cv2.imencode(".png", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
     if not ok:
@@ -153,14 +173,17 @@ class Verifier:
     forwarded. `question`, if given, replaces TEXT_QUESTION or
     IMAGE_QUESTION, with {prompt} in it replaced by `label`: wording for one
     target (e.g. "the same kind of animal" for an animal) can tell it from
-    look-alikes better than the generic questions."""
+    look-alikes better than the generic questions. Each frame is enlarged to
+    at least `min_side` pixels on its shorter side before the model sees it
+    (0 for as is)."""
 
-    def __init__(self, ask, *, label, reference=None, tile_log=None, question=None):
+    def __init__(self, ask, *, label, reference=None, tile_log=None, question=None, min_side=0):
         self.ask = ask
         self.label = label
         self.reference = reference
         self.custom_question = question
         self.tile_log = tile_log
+        self.min_side = min_side
         self.frames = 0
         self.matched = 0
 
@@ -177,7 +200,7 @@ class Verifier:
         if self.tile_log is not None:
             self.tile_log.input(frame.id, rgb)
         started = time.perf_counter()
-        answer = self.ask(*self.question(encode_png(rgb)))
+        answer = self.ask(*self.question(encode_png(enlarge(rgb, self.min_side))))
         match = parse_answer(answer)
         if match is None:
             logger.warning("frame %d: the model answered %r, not yes or no; dropping it", frame.id, answer)

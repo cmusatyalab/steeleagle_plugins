@@ -4,6 +4,7 @@ SteelEagle engine plugins for prompt-guided edge filtering:
 
 - `cliped.plugin.toml`, the edge filter: each camera frame (`RawFrame`) is cut into overlapping square tiles, every tile is scored against a text or image prompt with MobileCLIP2-S0, the frame's best tile is sent to the remote verifier, and the tiles worth sending wait in a prioritized send queue until the verifier has them, sent again by the engine's `reintegration` producer.
 - `verifier.plugin.toml`, the verifier: asks a vision-language model on Ollama (Qwen3-VL 8B Instruct by default) whether each tile matches the prompt, and forwards it if so, dropping it if not. Its answer goes back to cliped, which learns from it.
+- `box_rerank.plugin.toml`, the box reranker: decides which of a local detector's boxes, if any, is the target, by what the verifier said about boxes like it, and sends the boxes it has not heard about to the verifier off the frame path. See [box_rerank](#box_rerank).
 
 eagled picks one with `STEELEAGLE_PLUGIN`; unset runs the edge filter.
 
@@ -93,10 +94,59 @@ It needs an Ollama server (`ollama serve`); at startup it pulls the model if the
 | `model` | `qwen3-vl:8b-instruct` | Ollama model to ask |
 | `host` | | Ollama server URL; blank uses `OLLAMA_HOST`, or `http://localhost:11434` |
 | `timeout_ms` | `30000` | Wait for the model's answer about one frame before dropping it |
-| `question` | | The question asked about each frame, instead of the default one; `{prompt}` in it is replaced by `prompt` (or the image's name). With `image`, the model sees the reference first and the frame second. Anything but a yes drops the frame |
+| `question` | | The question asked about each frame, instead of the default one; `{prompt}` in it is replaced by `prompt` (or the image's name). With `image`, the model sees the reference first and the frame second. Anything but a yes drops the frame. `box` asks about the object in the red box, for box_rerank's crops |
 | `log_tiles` | `false` | Write each input to `STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg` and each frame forwarded to `STEELEAGLE_FILES/<engine>/out/<frame id>_0.jpeg` (JPEG, quality 75) |
+| `min_side` | `0` | Enlarge each frame so its shorter side is at least this many pixels before the model sees it (box_rerank's small crops); 0 for as is |
 
 Give the edge into the verifier a timeout above the model's time per tile: a tile that times out there is sent again.
+
+## box_rerank
+
+A detector on the vehicle (YOLO on the HTP) confuses look-alikes with the target, e.g. a white folding chair or a dark bag for a robot dog, and reports them at high confidence. box_rerank sits between the detector and the tracker: it gets the same frames as the detector, subscribes to its events, and reports at most one box per frame, the one it has the most reason to believe, or none. A false positive costs a tracker more than a missed frame, so when every candidate is held back the frame has no detection.
+
+```
+camera ─► detection_qnn (low confidence)
+   └────► box_rerank ─► Track action                (onboard, every frame)
+          box_rerank.reintegration ─► webp encoder ══ link ══ webp decoder ─► verifier (question = "box")
+```
+
+For each frame, the candidates are the detections of `classes` (by default `class` alone), the best `max_candidates` by confidence. Each is cropped as a square `context` times its longer side and embedded by the CLIP image encoder (~6 ms a crop on the HTP). What the verifier said about earlier crops, learned as the edge filter learns it (clip.Selector; see [Learning from the verifier](#learning-from-the-verifier)), gives each a verdict:
+
+| Verdict | When | Reported |
+| --- | --- | --- |
+| vetoed | at least `learn_similarity` to a crop the verifier said no to `confirmations` times, and closer to it than to any yes | never |
+| confirmed | at least `good_similarity` to a crop the verifier said yes to `good_confirmations` times, and no closer to a no | first, at any confidence |
+| unverified | anything else | if its confidence is at least `confidence`, unless `require_verified` |
+
+Of the eligible candidates, a confirmed one wins, then the most confident (plus `prompt_weight` times its CLIP prompt score `s`, 0 by default). The box is reported as is, renamed `class`, as the frame's `DetectionResult` result; the frame is dropped, as `cop_tracking` drops it, so box_rerank replaces it as the tracker's engine.
+
+Learning never holds up a frame. Each unverified candidate is queued for the verifier unless it is at least `novelty` similar to a crop queued, or to one the verifier answered in the last `cooldown` seconds: a chair in every frame is asked about once, then again after the cooldown, and its second no vetoes it. The box reported goes first. The crop sent is a square `verify_context` times the box's longer side (at least `min_verify_side`, scaled down to `max_verify_side`), with the box drawn in red: the context helps the model recognize a small object, and the box says which object is meant when the target stands next to a distractor. The reintegration producer delivers the queue as the edge filter's does ([The send queue](#the-send-queue)); a no or a yes that confirms drops the queued crops it settles.
+
+Run the detector with a lower `confidence` (and `nms_score_threshold`) than usual, e.g. 0.25, so a target it is unsure of is still a candidate; box_rerank's own `confidence` decides which unverified boxes are reported. On the remote side, run the verifier with `question = "box"` and `min_side` around 224, so small crops cross the link small and are enlarged for the model.
+
+`log_candidates` writes every candidate of every frame (its box, confidence, `s`, verdict, whether it was reported and queued), to score what was reported against labeled boxes; `log_tiles` writes each crop the verifier is sent.
+
+| Arg | Default | Description |
+| --- | --- | --- |
+| `detector` | | Required: the detection engine on this daemon, qualified with `STEELEAGLE_LOCAL_QUALIFIER` |
+| `verifier` | | Required: the verifier on the remote daemon, qualified with `STEELEAGLE_REMOTE_QUALIFIER` |
+| `class` | | Required: the class reported, as the tracker asks for it |
+| `classes` | `[]` | The detector's classes whose boxes are candidates; empty for `class` alone |
+| `prompt` / `image` | | The target, for the CLIP prompt score `s`; one is required |
+| `confidence` | `0.5` | Least confidence for an unverified box to be reported |
+| `require_verified` | `false` | Report only confirmed boxes |
+| `max_candidates` | `8` | Most boxes of a frame embedded |
+| `context` | `1.25` | Side of the crop embedded, times the box's longer side |
+| `verify_context` | `2.0` | Side of the crop the verifier sees, times the box's longer side |
+| `min_verify_side` / `max_verify_side` | `96` / `256` | Bounds of that crop's side, in pixels |
+| `novelty` | `0.92` | Similarity at which a crop counts as one queued or recently answered |
+| `cooldown` | `5.0` | Seconds before crops like an answered one are asked about again |
+| `prompt_weight` | `0.0` | Weight of `s` against confidence among unverified boxes |
+| `timeout` | `1000` | Longest wait for the detector's result on a frame, in ms |
+| `learn_similarity`, `confirmations`, `good_similarity`, `good_confirmations`, `max_learned` | `0.85`, `2`, `0.9`, `2`, `32` | As for the edge filter |
+| `backgrounds`, `quantized`, `npu`, `threads`, `max_queue` | | As for the edge filter |
+| `log_tiles` | `false` | Write each crop sent to `STEELEAGLE_FILES/<engine>/out/` |
+| `log_candidates` | | CSV of every candidate of every frame |
 
 ## On the Tachyon
 

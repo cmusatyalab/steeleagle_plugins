@@ -1,12 +1,15 @@
 """Entrypoint of the cliped plugins, which eagled starts with `pixi run start`:
-the edge filter (cliped.plugin.toml) and the verifier (verifier.plugin.toml).
+the edge filter (cliped.plugin.toml), the verifier (verifier.plugin.toml),
+and the detection reranker (box_rerank.plugin.toml).
 
 eagled names the plugin to run in STEELEAGLE_PLUGIN, its args in
 STEELEAGLE_PLUGIN_ARGS (a JSON object), the name to serve the engine as in
 STEELEAGLE_ENGINE_ENDPOINT, the daemon's files directory, which holds image
 prompts and the images log_tiles writes, in STEELEAGLE_FILES, and, for the
-edge filter, the remote daemon's IP, which qualifies the verifier's name, in
-STEELEAGLE_REMOTE_QUALIFIER.
+edge filter and the reranker, the remote daemon's IP, which qualifies the
+verifier's name, in STEELEAGLE_REMOTE_QUALIFIER, and, for the reranker, the
+local daemon's IP, which qualifies the detector's, in
+STEELEAGLE_LOCAL_QUALIFIER.
 """
 import json
 import logging
@@ -20,6 +23,7 @@ from cliped.files import FilesError, TileLog, files_dir, read_rgb, resolve
 
 CLIPED_PLUGIN = "cliped.plugin.toml"
 VERIFIER_PLUGIN = "verifier.plugin.toml"
+BOX_RERANK_PLUGIN = "box_rerank.plugin.toml"
 
 # Defaults of the args of cliped.plugin.toml. The daemon passes only the args
 # set in its config, so any arg left unset is defaulted here.
@@ -58,6 +62,39 @@ VERIFIER_DEFAULTS = {
     "timeout_ms": 30000,
     "log_tiles": False,
     "question": "",
+    "min_side": 0,
+}
+# Defaults of the args of box_rerank.plugin.toml
+RERANK_DEFAULTS = {
+    "prompt": "",
+    "image": "",
+    "detector": "",
+    "verifier": "",
+    "class": "",
+    "classes": [],
+    "confidence": 0.5,
+    "require_verified": False,
+    "max_candidates": 8,
+    "context": 1.25,
+    "verify_context": 2.0,
+    "min_verify_side": 96,
+    "max_verify_side": 256,
+    "novelty": 0.92,
+    "cooldown": 5.0,
+    "prompt_weight": 0.0,
+    "timeout": 1000,
+    "backgrounds": BACKGROUNDS,
+    "quantized": True,
+    "npu": True,
+    "threads": 4,
+    "max_queue": 64,
+    "learn_similarity": 0.85,
+    "confirmations": 2,
+    "good_similarity": 0.9,
+    "good_confirmations": 2,
+    "max_learned": 32,
+    "log_tiles": False,
+    "log_candidates": "",
 }
 POSITIVE_INTS = ("tile_size", "stride", "max_send", "k", "max_queue", "threads", "confirmations",
                  "good_confirmations", "max_learned")
@@ -137,6 +174,70 @@ def parse_args(content):
     return args
 
 
+def _positive_int(args, name, minimum=1):
+    value = args[name]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value) or value < minimum:
+        raise ConfigError(f"{name} must be an integer of at least {minimum}, not {value!r}")
+    args[name] = int(value)
+
+
+def _number(args, name, low, high, *, low_open=False):
+    """Checks that the arg `name` is a number in [low, high] ((low, high] with
+    `low_open`)."""
+    value = args[name]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{name} must be a number, not {value!r}")
+    if value < low or (low_open and value == low) or value > high:
+        raise ConfigError(f"{name} must be in {'(' if low_open else '['}{low}, {high}], not {value!r}")
+    args[name] = float(value)
+
+
+def _backgrounds(args):
+    backgrounds = args["backgrounds"]
+    if (not isinstance(backgrounds, list) or not backgrounds
+            or not all(isinstance(bg, str) and bg.strip() for bg in backgrounds)):
+        raise ConfigError("backgrounds must be a non-empty list of prompts")
+    args["backgrounds"] = [bg.strip() for bg in backgrounds]
+
+
+def _booleans(args, *names):
+    for name in names:
+        if not isinstance(args[name], bool):
+            raise ConfigError(f"{name} must be true or false")
+
+
+def parse_rerank_args(content):
+    """The args of box_rerank.plugin.toml in the JSON object `content`, with
+    every unset arg defaulted. Raises ConfigError for args that are missing or
+    out of range."""
+    args = _load(content, RERANK_DEFAULTS)
+    _prompt_or_image(args)
+    _strings(args, "detector", "verifier", "class", "log_candidates")
+    for name in ("detector", "verifier", "class"):
+        if not args[name]:
+            raise ConfigError(f"the {name!r} arg must be set")
+    classes = args["classes"]
+    if not isinstance(classes, list) or not all(isinstance(c, str) and c.strip() for c in classes):
+        raise ConfigError("classes must be a list of class names")
+    args["classes"] = [c.strip() for c in classes] or [args["class"]]
+    for name in ("max_candidates", "threads", "max_queue", "confirmations", "good_confirmations", "max_learned",
+                 "max_verify_side", "timeout"):
+        _positive_int(args, name)
+    _positive_int(args, "min_verify_side", 0)
+    if args["min_verify_side"] > args["max_verify_side"]:
+        raise ConfigError("min_verify_side must be at most max_verify_side")
+    _number(args, "confidence", 0, 1)
+    _number(args, "context", 1, 10)
+    _number(args, "verify_context", 1, 10)
+    _number(args, "cooldown", 0, 3600)
+    _number(args, "prompt_weight", -100, 100)
+    for name in ("novelty", "learn_similarity", "good_similarity"):
+        _number(args, name, 0, 1, low_open=True)
+    _backgrounds(args)
+    _booleans(args, "require_verified", "quantized", "npu", "log_tiles")
+    return args
+
+
 def parse_verifier_args(content):
     """The args of verifier.plugin.toml in the JSON object `content`, with
     every unset arg defaulted."""
@@ -155,6 +256,7 @@ def parse_verifier_args(content):
         raise ConfigError(f"timeout_ms must be a positive number, not {timeout!r}")
     if not isinstance(args["log_tiles"], bool):
         raise ConfigError("log_tiles must be true or false")
+    _positive_int(args, "min_side", 0)
     return args
 
 
@@ -195,14 +297,13 @@ def ensure_qnn_on_library_path():
     os.execv(sys.executable, [sys.executable, "-m", "cliped.main", *sys.argv[1:]])
 
 
-def build(args, verifier, *, image=None, tile_log=None):
-    """The Cliped of `args`, verified by the engine `verifier`, searching for
-    the image file `image` if given and for the text prompt if not."""
+def encoders(args, image=None):
+    """The image encoder of `args`, and the prompt vector t (of the image
+    file `image` if given, of the text prompt if not) and background vectors
+    b."""
     import torch
 
-    from cliped.clip import Encoder, NpuImageEncoder, Selector, image_vector, text_vectors
-    from cliped.engine import Cliped
-    from cliped.send_queue import SendQueue
+    from cliped.clip import Encoder, NpuImageEncoder, image_vector, text_vectors
 
     log = logging.getLogger("cliped")
     torch.set_num_threads(args["threads"])
@@ -220,7 +321,18 @@ def build(args, verifier, *, image=None, tile_log=None):
     if image is not None:
         t = image_vector(image_encoder, read_rgb(image))
         log.info("searching for the image %s", image)
+    return image_encoder, t, b
 
+
+def build(args, verifier, *, image=None, tile_log=None):
+    """The Cliped of `args`, verified by the engine `verifier`, searching for
+    the image file `image` if given and for the text prompt if not."""
+    from cliped.clip import Selector
+    from cliped.engine import Cliped
+    from cliped.send_queue import SendQueue
+
+    log = logging.getLogger("cliped")
+    image_encoder, t, b = encoders(args, image)
     if args["learn"]:
         log.info("learning from the verifier's answers (similarity %.2f, %d no's to gate; good similarity %.2f, "
                  "%d yes's to force; at most %d of each)", args["learn_similarity"], args["confirmations"],
@@ -244,6 +356,41 @@ def build(args, verifier, *, image=None, tile_log=None):
         tile_log=tile_log,
         sent_log=SentLog(args["log_sent"]) if args.get("log_sent") else None,
         scored_log=ScoredLog(args["log_scored"]) if args.get("log_scored") else None,
+    )
+
+
+def build_rerank(args, detector, verifier, *, image=None, tile_log=None):
+    """The Reranker of `args`, reranking the detections of the engine
+    `detector`, verified by the engine `verifier`."""
+    from cliped.clip import Selector
+    from cliped.rerank import CandidateLog, Reranker
+    from cliped.send_queue import SendQueue
+
+    image_encoder, t, b = encoders(args, image)
+    selector = Selector(t, b, learn=True, similarity=args["learn_similarity"],
+                        confirmations=args["confirmations"], max_learned=args["max_learned"],
+                        good_similarity=args["good_similarity"], good_confirmations=args["good_confirmations"])
+    return Reranker(
+        image_encoder,
+        selector,
+        SendQueue(max_size=args["max_queue"]),
+        detector=detector,
+        verifier=verifier,
+        class_name=args["class"],
+        classes=args["classes"],
+        confidence=args["confidence"],
+        max_candidates=args["max_candidates"],
+        context=args["context"],
+        verify_context=args["verify_context"],
+        min_verify_side=args["min_verify_side"],
+        max_verify_side=args["max_verify_side"],
+        novelty=args["novelty"],
+        cooldown_s=args["cooldown"],
+        require_verified=args["require_verified"],
+        prompt_weight=args["prompt_weight"],
+        timeout_ns=args["timeout"] * 1_000_000,
+        tile_log=tile_log,
+        candidate_log=CandidateLog(args["log_candidates"]) if args["log_candidates"] else None,
     )
 
 
@@ -274,8 +421,35 @@ def main_cliped(name):
     run(name, cliped, max_output_size=max_output_size(args["tile_size"]), stop=stop_on_signals())
 
 
+def main_box_rerank(name):
+    try:
+        args = parse_rerank_args(os.environ.get("STEELEAGLE_PLUGIN_ARGS"))
+        image = image_path(args)
+    except (ConfigError, ValueError) as err:
+        sys.exit(f"Bad args for the box_rerank engine: {err}")
+    if args["quantized"] and args["npu"]:
+        ensure_qnn_on_library_path()
+    try:
+        log = tile_log(args, name)
+    except ConfigError as err:
+        sys.exit(f"Bad args for the box_rerank engine: {err}")
+
+    from cliped.engine import qualify
+    from cliped.rerank import run
+
+    detector = qualify(os.environ.get("STEELEAGLE_LOCAL_QUALIFIER", ""), args["detector"])
+    verifier = qualify(os.environ.get("STEELEAGLE_REMOTE_QUALIFIER", ""), args["verifier"])
+    reranker = build_rerank(args, detector, verifier, image=image, tile_log=log)
+    logging.getLogger("cliped.rerank").info(
+        "reporting %r: unverified boxes from confidence %.2f%s; a no vetoes after %d, a yes confirms after %d",
+        args["class"], args["confidence"], " (never: require_verified)" if args["require_verified"] else "",
+        args["confirmations"], args["good_confirmations"])
+    run(name, reranker, stop=stop_on_signals())
+
+
 def main_verifier(name):
-    from cliped.verifier import DEFAULT_HOST, Ollama, OllamaError, Verifier, encode_png, run, shrink
+    from cliped.verifier import (BOX_QUESTION, DEFAULT_HOST, Ollama, OllamaError, Verifier, encode_png, run,
+                                 shrink)
 
     try:
         args = parse_verifier_args(os.environ.get("STEELEAGLE_PLUGIN_ARGS"))
@@ -291,15 +465,16 @@ def main_verifier(name):
     except OllamaError as err:
         sys.exit(f"Ollama at {ollama.host} can't serve {args['model']}: {err}")
     logging.getLogger("cliped.verifier").info("asking %s at %s", args["model"], ollama.host)
+    question = BOX_QUESTION if args["question"] == "box" else args["question"] or None
     verifier = Verifier(ollama.ask, label=args["image"] or args["prompt"], reference=reference, tile_log=log,
-                        question=args["question"] or None)
+                        question=question, min_side=args["min_side"])
     run(name, verifier, stop=stop_on_signals())
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     plugin = os.environ.get("STEELEAGLE_PLUGIN", CLIPED_PLUGIN)
-    plugins = {CLIPED_PLUGIN: main_cliped, VERIFIER_PLUGIN: main_verifier}
+    plugins = {CLIPED_PLUGIN: main_cliped, VERIFIER_PLUGIN: main_verifier, BOX_RERANK_PLUGIN: main_box_rerank}
     if plugin not in plugins:
         sys.exit(f"Unrecognized plugin {plugin!r}; expected one of {sorted(plugins)}")
     name = os.environ.get("STEELEAGLE_ENGINE_ENDPOINT")

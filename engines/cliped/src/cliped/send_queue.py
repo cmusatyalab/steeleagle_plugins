@@ -104,6 +104,10 @@ class SendQueue:
     def __contains__(self, tile):
         return tile in self._tiles
 
+    def __iter__(self):
+        """The queued tiles, waiting or in flight, in no particular order."""
+        return iter(list(self._tiles))
+
     def best(self):
         """The highest-priority tile not in flight, or None if every tile is in
         flight or there are none."""
