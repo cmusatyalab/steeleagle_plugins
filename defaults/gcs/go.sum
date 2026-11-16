@@ -14,8 +14,8 @@ github.com/cmusatyalab/steeleagle/api/go v0.3.8 h1:rpVL0FLU+WJFrBoqeeKY0Xd6Q7HQK
 github.com/cmusatyalab/steeleagle/api/go v0.3.8/go.mod h1:Ul2ATWzzXHpxT6/rK+aeUZpkIJsk+veD8BvxYPdnpMo=
 github.com/cmusatyalab/steeleagle/config v0.0.8 h1:t1FrlLA0pwd62XroI1pQ3TS2cHH9veg+TKhlmwwQ8yY=
 github.com/cmusatyalab/steeleagle/config v0.0.8/go.mod h1:ufbS1yFbr6eExvEp9JRqNMsXuqmh7QfR/CTqCyRwDLk=
-github.com/cmusatyalab/steeleagle/sdk v0.1.2 h1:7C3uMhSYfulaeu9UqPsUESNDjNpBGw1r2mT6/WGg174=
-github.com/cmusatyalab/steeleagle/sdk v0.1.2/go.mod h1:DNDaE2lckVVXuAkOMrZNHL4RemO2ndNYszAMKfXega4=
+github.com/cmusatyalab/steeleagle/sdk v0.1.3 h1:I6DlGFxeimO0GY0dTPcGPwUEN7IL8gkEQMowaDllaJc=
+github.com/cmusatyalab/steeleagle/sdk v0.1.3/go.mod h1:dScHsw5/f5YHKGj6MtdasjBd9qBcn3EFL9/N+kf64rg=
 github.com/cmusatyalab/uriel/go v0.2.0 h1:MBTxDfvui9zQFZtN/BqXHAVzQ6eaNIxezfEtFJOuL6Q=
 github.com/cmusatyalab/uriel/go v0.2.0/go.mod h1:Ck8FmU/kdWH7wX/XK6848bReGfpzHahsRASbP8yWetg=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
