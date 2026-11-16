@@ -292,9 +292,11 @@ func (u *Uploads) ServeDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Step 2: the checks of the flow and of the engines the mission uses
-	// that hold for every vehicle. Every vehicle's flow has the same engines
-	// under the same full names, wherever they run, so the mission is
-	// translated with those once here; without a flow it may use no engine.
+	// that hold for every vehicle. Every vehicle's flow has the same engines,
+	// though an engine's name (local.<engine> or remote.<engine>) depends on
+	// the vehicle's daemon; the mission is checked here with the names of the
+	// vehicle the flow was designed for, and each target is built with its own
+	// (BuildTarget.Engines). Without a flow it may use no engine.
 	engineNames := map[string]string{}
 	if hasFlow {
 		if err := req.Flow.Check(cat, u.svc.gcsIP); err != nil {

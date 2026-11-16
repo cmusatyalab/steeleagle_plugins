@@ -679,7 +679,12 @@ func GraphRoles(g Graph) []string { return nil }
 // about anything the canvas can't represent. Data decls referenced by an ident
 // are inlined into the params that reference them. Numbers may be json.Number
 // or float64; Float values come out as float64 and Int values as int64.
-func AstToGraph(ast map[string]any, ix *TypeIndex) map[string]any {
+//
+// engines maps an engine's ident suffix (constName of its name in the flow's
+// vehicle's mission, such as local_yolo) to the template name the canvas
+// stores; nil keeps the suffix as it is. An engine missing from a non-nil
+// map keeps its suffix and is warned about.
+func AstToGraph(ast map[string]any, ix *TypeIndex, engines map[string]string) map[string]any {
 	warnings := []any{}
 	data := map[string]map[string]any{}
 	var dataOrder []string
@@ -692,6 +697,7 @@ func AstToGraph(ast map[string]any, ix *TypeIndex) map[string]any {
 		data[name] = m
 	}
 	used := map[string]bool{}
+	fc := &fromCtx{ix: ix, data: data, used: used, engines: engines, warnings: &warnings}
 
 	instances := func(stanza, sec string) []any {
 		out := []any{}
@@ -705,7 +711,7 @@ func AstToGraph(ast map[string]any, ix *TypeIndex) map[string]any {
 			out = append(out, map[string]any{
 				"instance_id": asStr(decl["Name"]),
 				"type_name":   key,
-				"params":      fromAttrs(ix, owner, decl["Attrs"], data, used),
+				"params":      fc.attrs(owner, decl["Attrs"]),
 			})
 		}
 		return out
@@ -778,19 +784,44 @@ func typeKey(ix *TypeIndex, sec, typeName string, warnings *[]any) string {
 	return Bare(typeName)
 }
 
-func fromAttrs(ix *TypeIndex, owner string, attrs any, data map[string]map[string]any, used map[string]bool) map[string]any {
+// fromCtx is what converting an AST back into graph params needs: the data
+// decls by name, which of them got used, the engine names (see AstToGraph),
+// and the warnings to add to.
+type fromCtx struct {
+	ix       *TypeIndex
+	data     map[string]map[string]any
+	used     map[string]bool
+	engines  map[string]string
+	warnings *[]any
+}
+
+func (fc *fromCtx) attrs(owner string, attrs any) map[string]any {
 	out := map[string]any{}
 	for _, a := range asList(attrs) {
 		attr := asMap(a)
 		key := asStr(attr["Key"])
-		ft, _ := ix.FieldType(owner, key)
-		out[key] = fromValue(ix, ft, asMap(attr["Value"]), data, used)
+		ft, _ := fc.ix.FieldType(owner, key)
+		out[key] = fc.value(ft, asMap(attr["Value"]))
 	}
 	return out
 }
 
-// fromValue converts one AST Value into the plain-JSON param the frontend holds.
-func fromValue(ix *TypeIndex, goType string, value map[string]any, data map[string]map[string]any, used map[string]bool) any {
+// engine is the canvas's name for the engine an ident of goType names.
+func (fc *fromCtx) engine(goType, ident string) string {
+	suffix := strings.TrimPrefix(Bare(ident), Bare(goType)+"_")
+	if fc.engines == nil {
+		return suffix
+	}
+	if name, ok := fc.engines[suffix]; ok {
+		return name
+	}
+	*fc.warnings = append(*fc.warnings, fmt.Sprintf("Engine %s is not in the flow", ident))
+	return suffix
+}
+
+// value converts one AST Value into the plain-JSON param the frontend holds.
+func (fc *fromCtx) value(goType string, value map[string]any) any {
+	ix := fc.ix
 	if v, ok := value["Float"]; ok {
 		return toFloat(v)
 	}
@@ -807,7 +838,7 @@ func fromValue(ix *TypeIndex, goType string, value map[string]any, data map[stri
 		}
 		out := []any{}
 		for _, e := range asList(asMap(v)["Elems"]) {
-			out = append(out, fromValue(ix, elemType, asMap(e), data, used))
+			out = append(out, fc.value(elemType, asMap(e)))
 		}
 		return out
 	}
@@ -817,7 +848,7 @@ func fromValue(ix *TypeIndex, goType string, value map[string]any, data map[stri
 		if owner == "" {
 			owner = asStr(inline["Type"])
 		}
-		return fromAttrs(ix, owner, inline["Args"], data, used)
+		return fc.attrs(owner, inline["Args"])
 	}
 	ident := asStr(value["Ident"])
 	switch ident {
@@ -826,19 +857,19 @@ func fromValue(ix *TypeIndex, goType string, value map[string]any, data map[stri
 	case "false":
 		return false
 	}
-	if d, ok := data[ident]; ok {
-		used[ident] = true
+	if d, ok := fc.data[ident]; ok {
+		fc.used[ident] = true
 		owner := goType
 		if owner == "" {
 			owner = asStr(d["Type"])
 		}
-		return fromAttrs(ix, owner, d["Attrs"], data, used)
+		return fc.attrs(owner, d["Attrs"])
 	}
 	if goType != "" && ix.Kind(goType) == "feature" {
 		return strings.TrimPrefix(Bare(ident), Bare(goType)+"_")
 	}
 	if goType != "" && ix.Kind(goType) == "engine" {
-		return strings.TrimPrefix(Bare(ident), Bare(goType)+"_")
+		return fc.engine(goType, ident)
 	}
 	return Bare(ident)
 }

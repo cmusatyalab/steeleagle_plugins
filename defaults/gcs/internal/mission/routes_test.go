@@ -665,12 +665,65 @@ func TestBuildEngineReferenceWithoutFlow(t *testing.T) {
 	}
 }
 
-func TestRenderKeepsEngineNamesVerbatim(t *testing.T) {
+func TestRenderWithoutFlowKeepsEngineNamesVerbatim(t *testing.T) {
 	s := newService(t, engineFake(t))
 	rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", trackBody(t, "yolo", nil, nil))
 	if rec.Code != 200 || !strings.Contains(decodeMap(t, rec)["dsl"].(string), "yolo") {
 		t.Fatalf("render status %d: %s", rec.Code, rec.Body)
 	}
+}
+
+// With a flow, the DSL names engines as the mission Deploy builds for the
+// flow's vehicle does, and parsing it with the same flow gives back the
+// canvas's template names.
+func TestRenderAndParseDSLWithFlow(t *testing.T) {
+	s := newFlowService(t, engineFake(t), flowCatalog("100.64.0.1", "100.64.0.2"))
+	tpl := localYolo()
+	tpl.Engines = append(tpl.Engines, flows.TemplateEngine{Name: "swap03.yolo"})
+	tpl.Edges = append(tpl.Edges, flows.TemplateEdge{From: "100.64.0.1.telemetry", To: "swap03.yolo", Timeout: "1s"})
+	for engine, ident := range map[string]string{
+		"100.64.0.1.yolo": "DetectionEngine_local_yolo",
+		"swap03.yolo":     "DetectionEngine_remote_yolo",
+	} {
+		rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", trackBody(t, engine, tpl, nil))
+		if rec.Code != 200 {
+			t.Fatalf("render %s: status %d: %s", engine, rec.Code, rec.Body)
+		}
+		dsl := decodeMap(t, rec)["dsl"].(string)
+		if !strings.Contains(dsl, ident) || strings.Contains(dsl, "100_64") || strings.Contains(dsl, "swap03") {
+			t.Fatalf("render %s: want %s, got\n%s", engine, ident, dsl)
+		}
+		body, _ := json.Marshal(map[string]any{"dsl": dsl, "flow": tpl})
+		rec = do(s.ServeParseDSL, "POST", "/api/parse_dsl", body)
+		if rec.Code != 200 {
+			t.Fatalf("parse %s: status %d: %s", engine, rec.Code, rec.Body)
+		}
+		g := decodeMap(t, rec)
+		eq(t, g["nodes"].([]any)[0].(map[string]any)["params"].(map[string]any)["Engine"], engine)
+		eq(t, g["warnings"], []any{})
+	}
+}
+
+func TestRenderDSLFlowThatDoesNotResolveIs422(t *testing.T) {
+	s := newFlowService(t, engineFake(t), flowCatalog())
+	rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", trackBody(t, "100.64.0.1.det", remoteDet(), nil))
+	if rec.Code != 422 || decodeMap(t, rec)["detail"] != "flow engine 100.64.0.1.det is not on 100.64.0.1" {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestParseDSLWarnsOfEngineNotInFlow(t *testing.T) {
+	s := newFlowService(t, engineFake(t), flowCatalog("100.64.0.1"))
+	rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", trackBody(t, "100.64.0.1.yolo", localYolo(), nil))
+	dsl := strings.ReplaceAll(decodeMap(t, rec)["dsl"].(string), "local_yolo", "local_ghost")
+	body, _ := json.Marshal(map[string]any{"dsl": dsl, "flow": localYolo()})
+	rec = do(s.ServeParseDSL, "POST", "/api/parse_dsl", body)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	g := decodeMap(t, rec)
+	eq(t, g["nodes"].([]any)[0].(map[string]any)["params"].(map[string]any)["Engine"], "local_ghost")
+	eq(t, g["warnings"], []any{"Engine DetectionEngine_local_ghost is not in the flow"})
 }
 
 func TestBuildWithFlow(t *testing.T) {
