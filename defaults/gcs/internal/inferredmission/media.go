@@ -91,15 +91,28 @@ type sample struct {
 	ID      *uint64
 }
 
-var samplePTS = regexp.MustCompile(`\bn:\s*\d+\s+pts:\s*-?\d+\s+pts_time:([\d.eE+-]+)`)
+var samplePTS = regexp.MustCompile(`\bn:\s*\d+\s+pts:\s*(-?\d+)\s+pts_time:`)
 
 func sampleVideo(ctx context.Context, src, dir string, start, end float64, cfg Settings) ([]sample, error) {
 	duration := end - start
-	filter := fmt.Sprintf("trim=duration=%.9f,select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,%.9f),%s,showinfo",
-		duration, 1/cfg.FrameFPS, scaleFilter(cfg.MaxFrameSide))
-	return decode(ctx, dir, nil, []string{"-ss", fmt.Sprintf("%.9f", start), "-f", "mov", "-i", src}, filter,
-		int(math.Ceil(duration*cfg.FrameFPS))+1, func(i int, pts []byte) (sample, error) {
-			at, err := strconv.ParseFloat(string(pts), 64)
+	seek := start
+	selectFrames := fmt.Sprintf("select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,%.9f)", 1/cfg.FrameFPS)
+	if cfg.SectionMode == sectionSliding {
+		// A section may start in the middle of a global sampling slot. Seek
+		// back to the slot boundary to see its first frame, then exclude any
+		// selection that precedes this section.
+		slot := math.Floor(start * cfg.FrameFPS)
+		seek = slot / cfg.FrameFPS
+		selectFrames = fmt.Sprintf("select=isnan(prev_selected_t)+gt(floor(t*%.9f+1e-6)\\,floor(prev_selected_t*%.9f+1e-6)),trim=start=%.9f",
+			cfg.FrameFPS, cfg.FrameFPS, start-seek)
+	}
+	// Use the exact timestamp in FFmpeg's microsecond time base rather than
+	// the rounded decimal pts_time field, which can round onto a boundary.
+	filter := fmt.Sprintf("settb=AVTB,trim=end=%.9f,%s,%s,showinfo", end-seek, selectFrames, scaleFilter(cfg.MaxFrameSide))
+	return decode(ctx, dir, nil, []string{"-ss", fmt.Sprintf("%.9f", seek), "-f", "mov", "-i", src}, filter,
+		int(math.Ceil((end-seek)*cfg.FrameFPS))+1, func(_ int, pts []byte) (sample, error) {
+			microseconds, err := strconv.ParseInt(string(pts), 10, 64)
+			at := float64(microseconds-int64(math.Round((start-seek)*1e6))) / 1e6
 			if err != nil || at < 0 || at >= duration {
 				return sample{}, errors.New("A decoded frame falls outside the section timeline.")
 			}

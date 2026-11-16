@@ -5,7 +5,14 @@ import (
 	"math"
 )
 
+const (
+	sectionNonOverlapping = "non_overlapping"
+	sectionSliding        = "sliding"
+	slidingVideoLimit     = 5
+)
+
 type Settings struct {
+	SectionMode       string  `json:"section_mode"`
 	SectionSeconds    float64 `json:"section_seconds"`
 	FrameFPS          float64 `json:"frame_fps"`
 	MaxFrameSide      int     `json:"max_frame_side"`
@@ -21,7 +28,7 @@ type Settings struct {
 
 func DefaultSettings() Settings {
 	return Settings{
-		SectionSeconds: 15, FrameFPS: 1, MaxFrameSide: 768, HistoryMode: "recency", HistorySections: 10,
+		SectionMode: sectionNonOverlapping, SectionSeconds: 15, FrameFPS: 1, MaxFrameSide: 768, HistoryMode: "recency", HistorySections: 10,
 		HalfLifeSections: 3, RequestTimeout: 60, GenerationTimeout: 120,
 		MaxVideoBytes: 1 << 30, MaxVideoSeconds: 3600, MaxActiveRuns: 4,
 	}
@@ -41,10 +48,41 @@ func (s Settings) Validate() error {
 			return errors.New("Inferred mission settings must use finite numbers.")
 		}
 	}
+	switch s.SectionMode {
+	case "", sectionNonOverlapping, sectionSliding:
+	default:
+		return errors.New("Unknown section mode.")
+	}
 	switch s.HistoryMode {
 	case "recency", "uniform", "no_memory":
 		return nil
 	default:
 		return errors.New("Unknown history mode.")
 	}
+}
+
+func (s Settings) withSectionDefault() Settings {
+	if s.SectionMode == "" {
+		s.SectionMode = sectionNonOverlapping
+	}
+	return s
+}
+
+func (s Settings) stride() float64 {
+	if s.SectionMode == sectionSliding {
+		return 1
+	}
+	return s.SectionSeconds
+}
+
+func (s Settings) sectionCount(duration float64) int {
+	if s.SectionMode == sectionSliding {
+		return 1 + int(math.Ceil(math.Max(0, duration-s.SectionSeconds)))
+	}
+	return int(math.Ceil(duration / s.SectionSeconds))
+}
+
+func (s Settings) window(index int, duration float64) (start, end float64) {
+	start = float64(index-1) * s.stride()
+	return start, math.Min(start+s.SectionSeconds, duration)
 }

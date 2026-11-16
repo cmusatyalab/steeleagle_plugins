@@ -78,6 +78,7 @@ func (s *Service) Register(mux *http.ServeMux, sources func() []Source) {
 		state, _ := run.snap()
 		reply(w, http.StatusOK, state)
 	}))
+	mux.HandleFunc("PATCH "+api+"/sessions/{session}", s.withRun(s.manageRun))
 	mux.HandleFunc("GET "+api+"/sessions/{session}/events", s.withRun(s.events))
 	mux.HandleFunc("GET "+api+"/sessions/{session}/sections", s.withRun(s.sections))
 	mux.HandleFunc("GET "+api+"/sessions/{session}/sections/{section}", s.withRun(s.section))
@@ -226,7 +227,12 @@ func (s *Service) videoMedia(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, s.videoPath(video.ID))
 }
 
-func (s *Service) sessions(w http.ResponseWriter, _ *http.Request) {
+func (s *Service) sessions(w http.ResponseWriter, r *http.Request) {
+	includeArchived, err := strconv.ParseBool(first(r.URL.Query().Get("include_archived"), "false"))
+	if err != nil {
+		failHTTP(w, http.StatusBadRequest, "Invalid include_archived value.")
+		return
+	}
 	s.mu.RLock()
 	runs := make([]*run, 0, len(s.runs))
 	for _, run := range s.runs {
@@ -235,9 +241,11 @@ func (s *Service) sessions(w http.ResponseWriter, _ *http.Request) {
 	s.mu.RUnlock()
 	states := make([]snapshot, 0, len(runs))
 	for _, run := range runs {
-		state, _ := run.snap()
-		state.Sections = nil
-		states = append(states, state)
+		run.mu.Lock()
+		if includeArchived || run.meta.Archived == nil {
+			states = append(states, snapshot{session: run.meta})
+		}
+		run.mu.Unlock()
 	}
 	slices.SortFunc(states, func(a, b snapshot) int {
 		switch {
@@ -370,7 +378,10 @@ func (s *Service) artifact(w http.ResponseWriter, r *http.Request, run *run) {
 			}
 			data = row.Mission
 		}
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"section-%06d-%s\"", row.Index, name))
+		run.mu.Lock()
+		meta := run.meta
+		run.mu.Unlock()
+		w.Header().Set("Content-Disposition", jsonDownloadDisposition(meta, row.Index, name))
 		reply(w, http.StatusOK, data)
 		return
 	}

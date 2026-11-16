@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -32,30 +31,34 @@ type sectionSummary struct {
 	CompileStatus   string  `json:"compile_status,omitempty"`
 	InferenceText   string  `json:"inference_text,omitempty"`
 	Error           string  `json:"error,omitempty"`
+	Elapsed         float64 `json:"elapsed,omitempty"`
+	InferenceTime   float64 `json:"inference_elapsed,omitempty"`
 }
 
 type section struct {
 	sectionSummary
-	InputQuality   string           `json:"input_quality,omitempty"`
-	FrameCount     int              `json:"frame_count"`
-	FrameTimes     []float64        `json:"frame_times,omitempty"`
-	CaptureTimes   []*float64       `json:"capture_times,omitempty"`
-	FrameIDs       []*uint64        `json:"frame_ids,omitempty"`
-	UsedReceipt    bool             `json:"uses_gcs_receive_time,omitempty"`
-	Telemetry      map[string]any   `json:"telemetry,omitempty"`
-	History        []historyItem    `json:"history,omitempty"`
-	VisionPrompt   string           `json:"vision_prompt,omitempty"`
-	DSLReference   map[string]any   `json:"dsl_reference,omitempty"`
-	Task           *task            `json:"task,omitempty"`
-	Instruction    string           `json:"instruction,omitempty"`
-	Adaptation     string           `json:"adaptation,omitempty"`
-	Unresolved     []string         `json:"unresolved,omitempty"`
-	Attempts       []mission.Draft  `json:"attempts,omitempty"`
-	DSL            string           `json:"dsl,omitempty"`
-	Mission        *missionArtifact `json:"mission_json,omitempty"`
-	Elapsed        float64          `json:"elapsed,omitempty"`
-	InferenceTime  float64          `json:"inference_elapsed,omitempty"`
-	GenerationTime float64          `json:"generation_elapsed,omitempty"`
+	InputQuality         string           `json:"input_quality,omitempty"`
+	FrameCount           int              `json:"frame_count"`
+	FrameTimes           []float64        `json:"frame_times,omitempty"`
+	CaptureTimes         []*float64       `json:"capture_times,omitempty"`
+	FrameIDs             []*uint64        `json:"frame_ids,omitempty"`
+	UsedReceipt          bool             `json:"uses_gcs_receive_time,omitempty"`
+	Telemetry            map[string]any   `json:"telemetry,omitempty"`
+	History              []historyItem    `json:"history,omitempty"`
+	VisionPrompt         string           `json:"vision_prompt,omitempty"`
+	DSLReference         map[string]any   `json:"dsl_reference,omitempty"`
+	Task                 *task            `json:"task,omitempty"`
+	Instruction          string           `json:"instruction,omitempty"`
+	Adaptation           string           `json:"adaptation,omitempty"`
+	Unresolved           []string         `json:"unresolved,omitempty"`
+	Attempts             []mission.Draft  `json:"attempts,omitempty"`
+	DSL                  string           `json:"dsl,omitempty"`
+	Mission              *missionArtifact `json:"mission_json,omitempty"`
+	FramePreparationTime float64          `json:"frame_preparation_elapsed,omitempty"`
+	HistoryWaitTime      float64          `json:"history_wait_elapsed,omitempty"`
+	VisionRequestTime    float64          `json:"vision_request_elapsed,omitempty"`
+	GenerationTime       float64          `json:"generation_elapsed,omitempty"`
+	PriorAttempts        []sectionSummary `json:"prior_attempts,omitempty"`
 }
 
 type missionArtifact struct {
@@ -64,15 +67,16 @@ type missionArtifact struct {
 }
 
 type startRequest struct {
-	Mode     string                  `json:"mode,omitempty"`
-	Source   string                  `json:"source_type"`
-	Asset    string                  `json:"video_asset_id,omitempty"`
-	Vehicle  string                  `json:"vehicle_id,omitempty"`
-	Producer string                  `json:"producer,omitempty"`
-	History  string                  `json:"history_mode,omitempty"`
-	Flight   *float64                `json:"flight_started_at,omitempty"`
-	Offset   *float64                `json:"video_takeoff_offset,omitempty"`
-	Plan     mission.PlanningContext `json:"planning_context"`
+	Mode        string                  `json:"mode,omitempty"`
+	Source      string                  `json:"source_type"`
+	Asset       string                  `json:"video_asset_id,omitempty"`
+	Vehicle     string                  `json:"vehicle_id,omitempty"`
+	Producer    string                  `json:"producer,omitempty"`
+	History     string                  `json:"history_mode,omitempty"`
+	SectionMode string                  `json:"section_mode,omitempty"`
+	Flight      *float64                `json:"flight_started_at,omitempty"`
+	Offset      *float64                `json:"video_takeoff_offset,omitempty"`
+	Plan        mission.PlanningContext `json:"planning_context"`
 }
 
 type session struct {
@@ -80,6 +84,9 @@ type session struct {
 	SchemaVersion int                     `json:"schema_version"`
 	Mode          string                  `json:"mode"`
 	Created       float64                 `json:"created_at"`
+	Updated       float64                 `json:"updated_at"`
+	Name          string                  `json:"display_name,omitempty"`
+	Archived      *float64                `json:"archived_at"`
 	Revision      uint64                  `json:"revision"`
 	Status        string                  `json:"status"`
 	Source        string                  `json:"source_type"`
@@ -159,14 +166,22 @@ func (r *run) setSection(row section) error {
 	return nil
 }
 
+// setStatus records changes to the analysis clock. The caller holds r.mu
+// or owns a run which has yet to be published.
 func (r *run) setStatus(status, detail string) error {
-	previous := r.meta
-	r.meta.Status, r.meta.Error = status, detail
-	r.meta.Revision++
-	if err := writeJSONFile(filepath.Join(r.dir, "session.json"), r.meta); err != nil {
-		r.meta = previous
+	meta := r.meta
+	meta.Status, meta.Error, meta.Updated = status, detail, seconds(time.Now())
+	return r.setSession(meta)
+}
+
+// setSession publishes a metadata change without changing the analysis clock.
+// The caller holds r.mu or owns a run which has yet to be published.
+func (r *run) setSession(meta session) error {
+	meta.Revision = r.meta.Revision + 1
+	if err := writeJSONFile(filepath.Join(r.dir, "session.json"), meta); err != nil {
 		return err
 	}
+	r.meta = meta
 	close(r.changed)
 	r.changed = make(chan struct{})
 	return nil
@@ -182,15 +197,17 @@ type Service struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 
-	mu      sync.RWMutex
-	runs    map[string]*run
-	live    map[string]*liveInput
-	wg      sync.WaitGroup
-	closed  bool
-	uploads chan struct{}
+	mu         sync.RWMutex
+	runs       map[string]*run
+	live       map[string]*liveInput
+	wg         sync.WaitGroup
+	closed     bool
+	uploads    chan struct{}
+	videoSlots chan struct{}
 }
 
 func New(ctx context.Context, root string, settings Settings, vision, generation nl2dsl.Provider, generator nl2dsl.Generator, log zerolog.Logger) (*Service, error) {
+	settings = settings.withSectionDefault()
 	if err := settings.Validate(); err != nil {
 		return nil, err
 	}
@@ -201,7 +218,7 @@ func New(ctx context.Context, root string, settings Settings, vision, generation
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	s := &Service{root: root, settings: settings, generator: generator, vision: vision, generation: generation, log: log,
-		ctx: ctx, cancel: cancel, runs: map[string]*run{}, live: map[string]*liveInput{}, uploads: make(chan struct{}, 2)}
+		ctx: ctx, cancel: cancel, runs: map[string]*run{}, live: map[string]*liveInput{}, uploads: make(chan struct{}, 2), videoSlots: make(chan struct{}, slidingVideoLimit)}
 	s.recover()
 	return s, nil
 }
@@ -249,9 +266,17 @@ func (s *Service) recover() {
 		}
 		dir := filepath.Join(s.root, "runs", id)
 		r := &run{dir: dir, rows: map[int]section{}, changed: make(chan struct{})}
-		if readJSON(filepath.Join(dir, "session.json"), &r.meta) != nil ||
+		sessionPath := filepath.Join(dir, "session.json")
+		if readJSON(sessionPath, &r.meta) != nil ||
 			r.meta.SchemaVersion != 1 || r.meta.ID != id || r.meta.Settings.Validate() != nil {
 			continue
+		}
+		r.meta.Settings = r.meta.Settings.withSectionDefault()
+		if r.meta.Updated == 0 {
+			r.meta.Updated = r.meta.Created
+			if info, err := os.Stat(sessionPath); err == nil {
+				r.meta.Updated = seconds(info.ModTime())
+			}
 		}
 		paths, _ := filepath.Glob(filepath.Join(dir, "sections", "*", "record.json"))
 		for _, path := range paths {
@@ -273,9 +298,11 @@ func (s *Service) recover() {
 			if r.meta.Source == "live" {
 				status = "stopped"
 			}
-			if err := r.setStatus(status, "GCS restarted during analysis."); err != nil {
+			meta := r.meta
+			meta.Status, meta.Error = status, "GCS restarted during analysis."
+			if err := r.setSession(meta); err != nil {
 				s.log.Warn().Err(err).Msg("could not recover analysis status")
-				r.meta.Status = status
+				r.meta = meta
 			}
 		}
 		s.runs[id] = r
@@ -289,6 +316,9 @@ func (s *Service) start(req startRequest) (*run, error) {
 	cfg := s.settings
 	if req.History != "" {
 		cfg.HistoryMode = req.History
+	}
+	if req.SectionMode != "" {
+		cfg.SectionMode = req.SectionMode
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -310,7 +340,7 @@ func (s *Service) start(req startRequest) (*run, error) {
 			return nil, errors.New("The takeoff offset must be within the video.")
 		}
 		r.meta.Video, r.meta.Status = &video, "analyzing"
-		r.meta.Total = int(math.Ceil(video.Duration / cfg.SectionSeconds))
+		r.meta.Total = cfg.sectionCount(video.Duration)
 	case "live":
 		if req.Vehicle == "" || req.Producer == "" {
 			return nil, errors.New("Select a vehicle camera to observe.")
@@ -389,7 +419,7 @@ func (s *Service) launch(r *run, meta session) {
 		r.collecting, r.frameCount = 0, 0
 		if err := r.setStatus(status, detail); err != nil {
 			s.log.Warn().Err(err).Msg("could not persist final analysis status")
-			r.meta.Status, r.meta.Error = "error", "Could not save the analysis session."
+			r.meta.Status, r.meta.Error, r.meta.Updated = "error", "Could not save the analysis session.", seconds(time.Now())
 			r.update()
 		}
 	})
@@ -403,6 +433,9 @@ func (s *Service) resume(r *run) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.meta.Archived != nil {
+		return errors.New("Restore the archived run before resuming.")
+	}
 	if r.meta.Source != "uploaded_video" || r.running || r.meta.Status != "paused" {
 		return errors.New("Only a paused video analysis can be resumed.")
 	}
@@ -433,47 +466,22 @@ func seconds(t time.Time) float64 { return float64(t.UnixNano()) / float64(time.
 
 func timeout(seconds float64) time.Duration { return time.Duration(seconds * float64(time.Second)) }
 
-func (s *Service) runVideo(r *run, meta session) (string, string) {
-	if meta.Video == nil || !validID.MatchString(meta.Video.ID) {
-		return "error", "The analysis record is missing its source video."
-	}
-	path := s.videoPath(meta.Video.ID)
-	sum, err := digest(path)
-	if err != nil || sum != meta.Video.SHA256 {
-		return "error", "The uploaded video has changed or is missing."
-	}
-	cfg := meta.Settings
-	for index := 1; index <= meta.Total; index++ {
-		if s.ctx.Err() != nil {
-			return "paused", "GCS stopped during analysis."
-		}
-		r.mu.Lock()
-		status, row := r.meta.Status, r.rows[index]
-		r.mu.Unlock()
-		if status != "analyzing" {
-			break
-		}
-		if finished(row.Status) {
-			continue
-		}
-		start, end := float64(index-1)*cfg.SectionSeconds, math.Min(float64(index)*cfg.SectionSeconds, meta.Video.Duration)
-		row = section{sectionSummary: sectionSummary{Index: index, Start: start, End: end}, InputQuality: "complete"}
-		if end-start < cfg.SectionSeconds {
-			row.InputQuality = "partial"
-		}
-		load := func() ([]sample, error) { return sampleVideo(s.ctx, path, framesDir(r, index), start, end, cfg) }
-		if err := s.process(r, meta, row, load); err != nil {
-			s.log.Warn().Err(err).Msg("could not save video analysis")
-			return "paused", "Could not save the analysis section."
-		}
-	}
-	return "completed", ""
-}
-
 func framesDir(r *run, index int) string { return filepath.Join(r.sectionDir(index), "frames") }
 
 func (s *Service) process(r *run, meta session, row section, load func() ([]sample, error)) error {
+	return s.processSection(r, meta, row, load, nil, func() {})
+}
+
+func (s *Service) processSection(r *run, meta session, row section, load func() ([]sample, error), historyReady []<-chan struct{}, publishVision func()) error {
 	start := time.Now()
+	r.mu.Lock()
+	archived := r.rows[row.Index]
+	r.mu.Unlock()
+	row.Attempts = archived.Attempts
+	row.PriorAttempts = archived.PriorAttempts
+	if archived.Status == "interrupted" {
+		row.PriorAttempts = append(slices.Clone(row.PriorAttempts), archived.sectionSummary)
+	}
 	row.Status, row.InferenceStatus, row.CompileStatus = "preparing", "pending", "not_attempted"
 	if err := r.setSection(row); err != nil {
 		return err
@@ -489,7 +497,9 @@ func (s *Service) process(r *run, meta session, row section, load func() ([]samp
 		row.Elapsed = time.Since(start).Seconds()
 		return r.setSection(row)
 	}
+	frameStart := time.Now()
 	frames, err := load()
+	row.FramePreparationTime = time.Since(frameStart).Seconds()
 	if err != nil {
 		return fail(err.Error())
 	}
@@ -505,6 +515,15 @@ func (s *Service) process(r *run, meta session, row section, load func() ([]samp
 		row.FrameIDs = append(row.FrameIDs, frame.ID)
 		row.UsedReceipt = row.UsedReceipt || (meta.Source == "live" && frame.Capture == nil)
 	}
+	historyStart := time.Now()
+	for _, ready := range historyReady {
+		select {
+		case <-ready:
+		case <-s.ctx.Done():
+			return fail(s.ctx.Err().Error())
+		}
+	}
+	row.HistoryWaitTime = time.Since(historyStart).Seconds()
 	r.mu.Lock()
 	previous := slices.SortedFunc(maps.Values(r.rows), func(a, b section) int { return a.Index - b.Index })
 	r.mu.Unlock()
@@ -518,7 +537,7 @@ func (s *Service) process(r *run, meta session, row section, load func() ([]samp
 	inferenceStart := time.Now()
 	reply, err := s.vision.Complete(ctx, nl2dsl.Request{Instructions: row.VisionPrompt, Images: images})
 	cancel()
-	row.InferenceTime = time.Since(inferenceStart).Seconds()
+	row.VisionRequestTime = time.Since(inferenceStart).Seconds()
 	if err != nil {
 		return fail(err.Error())
 	}
@@ -538,6 +557,7 @@ func (s *Service) process(r *run, meta session, row section, load func() ([]samp
 	}
 	row.Task, row.Instruction = &task, instruction
 	row.Status, row.InferenceStatus = "generating", "valid"
+	row.InferenceTime = time.Since(start).Seconds()
 	switch task.Kind {
 	case "track", "precision_land":
 		row.Unresolved = []string{"The inferred class requires an operator to confirm the target and configured detection engine."}
@@ -549,6 +569,7 @@ func (s *Service) process(r *run, meta session, row section, load func() ([]samp
 	if err := r.setSection(row); err != nil {
 		return err
 	}
+	publishVision()
 	ctx, cancel = context.WithTimeout(s.ctx, timeout(meta.Settings.GenerationTimeout))
 	generationStart := time.Now()
 	res, err := s.generator.Generate(ctx, nl2dsl.Options{
@@ -559,7 +580,8 @@ func (s *Service) process(r *run, meta session, row section, load func() ([]samp
 	})
 	cancel()
 	row.GenerationTime = time.Since(generationStart).Seconds()
-	row.DSLReference, row.Attempts = res.Reference, res.Attempts
+	row.DSLReference = res.Reference
+	row.Attempts = append(slices.Clone(row.Attempts), res.Attempts...)
 	if err != nil {
 		return fail(err.Error())
 	}

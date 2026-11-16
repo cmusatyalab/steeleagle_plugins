@@ -132,7 +132,13 @@ func collectLive(ctx context.Context, r *run, meta session, jobs chan<- liveSect
 	in := r.live
 	cfg := meta.Settings
 	duration, interval := timeout(cfg.SectionSeconds), timeout(1/cfg.FrameFPS)
-	var anchor, last, picked time.Time
+	sliding := cfg.SectionMode == sectionSliding
+	stride := duration
+	if sliding {
+		stride = time.Second
+	}
+	var anchor, last, picked, lastPublishedSample time.Time
+	lastSlot := -1
 	var packets []livePacket
 	var indices []int
 	var telemetry map[string]any
@@ -149,13 +155,24 @@ func collectLive(ctx context.Context, r *run, meta session, jobs chan<- liveSect
 		return 0
 	}
 
+	windowStart := func(index int) time.Duration {
+		return time.Duration(index-1) * stride
+	}
+
 	publish := func(final bool) error {
 		if index == 0 {
 			return nil
 		}
-		start := float64(index-1)*cfg.SectionSeconds + offset()
+		start := windowStart(index).Seconds() + offset()
 		end := start + cfg.SectionSeconds
-		origin := anchor.Add(time.Duration(index-1) * duration)
+		origin := anchor.Add(windowStart(index))
+		if sliding && !lastPublishedSample.IsZero() && (len(indices) == 0 || !picked.After(lastPublishedSample)) {
+			if final {
+				return nil // Overlap alone does not make another observation.
+			}
+			return r.setSection(section{sectionSummary: sectionSummary{Index: index, Start: start, End: end,
+				Status: "gap", Error: "No new sampled frames were received in this interval."}, InputQuality: "partial"})
+		}
 		quality := "complete"
 		if partial || final || len(indices) < int(math.Ceil(cfg.SectionSeconds*cfg.FrameFPS/2)) {
 			quality = "partial"
@@ -176,8 +193,47 @@ func collectLive(ctx context.Context, r *run, meta session, jobs chan<- liveSect
 		if err := r.setSection(row); err != nil {
 			return err
 		}
-		jobs <- liveSection{row: row, packets: packets, indices: indices, origin: origin}
+		lastPublishedSample = picked
+		// The next window may reuse the same packets. Give the serial
+		// decoder its own slice headers and slots, sharing immutable bytes.
+		jobs <- liveSection{row: row, packets: slices.Clone(packets), indices: slices.Clone(indices), origin: origin}
 		return nil
+	}
+
+	advance := func(next int) {
+		index = next
+		origin := anchor.Add(windowStart(index))
+		keep := 0
+		for keep < len(indices) && packets[indices[keep]].at.Before(origin) {
+			keep++
+		}
+		indices = indices[keep:]
+		if len(indices) == 0 {
+			picked, telemetry = time.Time{}, nil
+		}
+		// Keep the keyframe needed to decode the first retained sample.
+		// If there are no retained samples, keep only the trailing GOP.
+		first := len(packets) - 1
+		if len(indices) > 0 {
+			first = indices[0]
+		}
+		key := first
+		for key >= 0 && !packets[key].key {
+			key--
+		}
+		if key < 0 {
+			packets, bytesUsed = nil, 0
+		} else {
+			for i := range key {
+				bytesUsed -= len(packets[i].data)
+			}
+			clear(packets[:key])
+			packets = packets[key:]
+			for i := range indices {
+				indices[i] -= key
+			}
+		}
+		partial = false
 	}
 
 	for {
@@ -209,27 +265,27 @@ func collectLive(ctx context.Context, r *run, meta session, jobs chan<- liveSect
 			if anchor.IsZero() {
 				anchor = at
 			}
-			next := int(at.Sub(anchor)/duration) + 1
-			if next != index {
+			elapsed := at.Sub(anchor)
+			next := 1
+			if elapsed >= duration {
+				next = int((elapsed-duration)/stride) + 2
+			}
+			if next > index {
 				if err := publish(false); err != nil {
 					return err
 				}
 				if index != 0 && next > index+1 {
 					row := section{sectionSummary: sectionSummary{Index: index + 1, Status: "gap",
-						Start: float64(index)*cfg.SectionSeconds + offset(), End: float64(next-1)*cfg.SectionSeconds + offset(),
+						Start: windowStart(index+1).Seconds() + offset(), End: (windowStart(next-1) + duration).Seconds() + offset(),
 						Error: "No fresh frames were received in this interval."}, InputQuality: "partial"}
 					if err := r.setSection(row); err != nil {
 						return err
 					}
 				}
-				// Carry only the last GOP across the boundary so predictive
-				// frames at the beginning of a section can still be decoded.
-				packets, bytesUsed = trailingGOP(packets)
-				if frame.Keyframe {
+				advance(next)
+				if frame.Keyframe && len(indices) == 0 {
 					packets, bytesUsed = nil, 0
 				}
-				indices, telemetry, picked, partial = nil, nil, time.Time{}, false
-				index = next
 			}
 			if current := in.dropped.Load(); current != dropped || (haveID && frame.ID != lastID+1) {
 				partial, dropped, needKeyframe = true, current, true
@@ -251,9 +307,14 @@ func collectLive(ctx context.Context, r *run, meta session, jobs chan<- liveSect
 			}
 			packets = append(packets, livePacket{data: frame.Data, at: at, capture: capture, id: frame.ID, key: frame.Keyframe})
 			bytesUsed += len(frame.Data)
+			slot := int(math.Floor(elapsed.Seconds()*cfg.FrameFPS + 1e-6))
 			selected := picked.IsZero() || at.Sub(picked) >= interval-time.Microsecond
+			if sliding {
+				selected = slot > lastSlot
+			}
 			if selected {
 				picked = at
+				lastSlot = slot
 				indices = append(indices, len(packets)-1)
 				if frame.RelativeAltitude != nil {
 					telemetry = map[string]any{"relative_altitude_m": *frame.RelativeAltitude, "source": "imaging_frame"}
@@ -261,6 +322,12 @@ func collectLive(ctx context.Context, r *run, meta session, jobs chan<- liveSect
 					telemetry = map[string]any{"relative_altitude_m": reading.meters, "source": "telemetry_feed"}
 				} else {
 					telemetry = nil
+				}
+				if sliding && float64(slot+1)/cfg.FrameFPS >= (windowStart(index)+duration).Seconds() {
+					if err := publish(false); err != nil {
+						return err
+					}
+					advance(index + 1)
 				}
 			}
 			if !selected {
@@ -277,17 +344,6 @@ func collectLive(ctx context.Context, r *run, meta session, jobs chan<- liveSect
 			r.mu.Unlock()
 		}
 	}
-}
-
-func trailingGOP(packets []livePacket) ([]livePacket, int) {
-	var size int
-	for i := len(packets) - 1; i >= 0; i-- {
-		size += len(packets[i].data)
-		if packets[i].key {
-			return slices.Clone(packets[i:]), size
-		}
-	}
-	return nil, 0
 }
 
 func decodeLive(ctx context.Context, r *run, meta session, job liveSection) ([]sample, error) {

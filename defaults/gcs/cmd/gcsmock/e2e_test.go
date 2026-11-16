@@ -847,7 +847,7 @@ func TestE2EMockAIConfig(t *testing.T) {
 		"vision_model": "gpt-4o",
 		"chat_temperature": 0.25,
 		"vision_temperature": 0,
-		"inferred_mission": {"section_seconds": 12, "frame_fps": 2, "history_mode": "uniform"}
+		"inferred_mission": {"section_mode": "sliding", "section_seconds": 12, "frame_fps": 2, "history_mode": "uniform"}
 	}`
 	if err := os.WriteFile(path, []byte(settings), 0600); err != nil {
 		t.Fatal(err)
@@ -902,7 +902,7 @@ func TestE2EMockAIConfig(t *testing.T) {
 	if !effective.Configured || effective.Models["dsl_model"] != "gpt-4o-mini" || effective.Models["vision_model"] != "gpt-4o" ||
 		effective.Models["dsl_temperature"] != "0.25" || effective.Models["vision_temperature"] != "0" ||
 		effective.Settings["section_seconds"] != float64(12) || effective.Settings["frame_fps"] != float64(2) ||
-		effective.Settings["history_mode"] != "uniform" {
+		effective.Settings["history_mode"] != "uniform" || effective.Settings["section_mode"] != "sliding" {
 		t.Fatalf("startup overrides not applied by the child: %+v", effective)
 	}
 }

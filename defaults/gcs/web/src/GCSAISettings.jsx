@@ -140,6 +140,15 @@ export default function GCSAISettings({ text, onChange, disabled, currentGCS }) 
             <details>
                 <summary className="cursor-pointer text-sm font-semibold">Inference settings</summary>
                 <div className="flex flex-column gap-2 mt-2">
+                    <label className="flex flex-column gap-1">
+                        <span className="text-sm">Section window</span>
+                        <select className="p-inputtext p-component" value={inference.section_mode ?? ''}
+                            onChange={e => updateInference('section_mode', e.target.value)} disabled={disabled}>
+                            <option value="">Default (Non-overlapping)</option>
+                            <option value="non_overlapping">Non-overlapping</option>
+                            <option value="sliding">Sliding (1-second step)</option>
+                        </select>
+                    </label>
                     <div className="flex flex-wrap gap-2">
                         {number('Section seconds', 'section_seconds', inference, updateInference, { min: 1, max: 60, placeholder: '15', step: 0.5 })}
                         {number('Frames per second', 'frame_fps', inference, updateInference, { min: 0.01, max: 60, placeholder: '1', step: 0.1 })}

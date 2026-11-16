@@ -131,6 +131,7 @@ vision_reasoning_effort = "medium"
 data_dir = "/var/lib/steeleagle/gcs-analysis"
 
 [services.plugin.args.ai.inferred_mission]
+section_mode = "non_overlapping"
 section_seconds = 15
 frame_fps = 1
 history_mode = "recency"
@@ -144,6 +145,18 @@ directory. `STEELEAGLE_INFERRED_MISSION_DATA` can override it. Use a distinct
 data directory for each GCS instance. For a trusted model gateway, set
 `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, or
 `STEELEAGLE_VISION_BASE_URL` to the provider's versioned base URL.
+
+Use **Advanced options → Section window** in a new run to override the
+configured section mode. The default is consecutive 15-second windows at
+1 fps. To reproduce the sliding experiment, set `section_mode = "sliding"`,
+`section_seconds = 5`, and `frame_fps = 1`. Windows start one second apart.
+Sliding MP4 runs share up to five concurrent section workers; live runs
+process their overlapping windows in order.
+
+The report shows wall time for the run and timing for each section. Rename
+or archive an idle run from Saved runs; restore it before resuming. Archiving
+keeps the source, sampled frames, and records. JSON downloads use the run's
+name, UTC creation time, and section index.
 
 Install FFmpeg and ffprobe for both MP4 and live analysis. Live Observe lists
 currently streaming V4 cameras. Keep the camera → encoder → GCS and
@@ -310,7 +323,8 @@ For example, `gcs-ai.json` can contain:
   "chat_temperature": 0.2,
   "vision_model": "gpt-6.1-sol",
   "inferred_mission": {
-    "section_seconds": 12,
+    "section_mode": "sliding",
+    "section_seconds": 5,
     "frame_fps": 1,
     "history_mode": "recency"
   }
