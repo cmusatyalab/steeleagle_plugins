@@ -447,9 +447,18 @@ def main_box_rerank(name):
     run(name, reranker, stop=stop_on_signals())
 
 
+def box_question(args, reference):
+    """The question for box_rerank's crops if `question` is "box": about
+    the reference image with one, else about the prompt; None otherwise."""
+    if args["question"] != "box":
+        return None
+    from cliped.verifier import BOX_IMAGE_QUESTION, BOX_QUESTION
+
+    return BOX_IMAGE_QUESTION if reference is not None else BOX_QUESTION
+
+
 def main_verifier(name):
-    from cliped.verifier import (BOX_QUESTION, DEFAULT_HOST, Ollama, OllamaError, Verifier, encode_png, run,
-                                 shrink)
+    from cliped.verifier import DEFAULT_HOST, Ollama, OllamaError, Verifier, encode_png, run, shrink
 
     try:
         args = parse_verifier_args(os.environ.get("STEELEAGLE_PLUGIN_ARGS"))
@@ -465,7 +474,7 @@ def main_verifier(name):
     except OllamaError as err:
         sys.exit(f"Ollama at {ollama.host} can't serve {args['model']}: {err}")
     logging.getLogger("cliped.verifier").info("asking %s at %s", args["model"], ollama.host)
-    question = BOX_QUESTION if args["question"] == "box" else args["question"] or None
+    question = box_question(args, reference) or args["question"] or None
     verifier = Verifier(ollama.ask, label=args["image"] or args["prompt"], reference=reference, tile_log=log,
                         question=question, min_side=args["min_side"])
     run(name, verifier, stop=stop_on_signals())

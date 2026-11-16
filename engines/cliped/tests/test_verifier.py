@@ -105,3 +105,14 @@ def test_shrink_caps_the_longer_side_and_keeps_the_aspect_ratio():
     assert shrink(np.zeros((5712, 4284, 3), np.uint8)).shape == (REFERENCE_MAX_SIDE, 336, 3)
     small = np.zeros((100, 200, 3), np.uint8)
     assert shrink(small) is small
+
+
+def test_the_box_image_question_shows_the_reference_then_the_crop():
+    from cliped.verifier import BOX_IMAGE_QUESTION
+
+    model = Model("yes")
+    verifier = Verifier(model, label="person.jpg", reference=b"reference", question=BOX_IMAGE_QUESTION)
+    keep, _ = verifier.on_input(make_input(1, make_frame()))
+    question, images = model.asked[0]
+    assert keep and question == BOX_IMAGE_QUESTION and images[0] == b"reference" and len(images) == 2
+    assert "red box" in question and "{" not in question

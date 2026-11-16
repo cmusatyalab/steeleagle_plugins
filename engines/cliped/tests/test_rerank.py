@@ -286,3 +286,12 @@ def test_the_verifier_enlarges_small_frames_only():
     assert enlarge(small, 0) is small and enlarge(small, 32) is small
     args = main.parse_verifier_args(json.dumps({"prompt": "a robot dog", "question": "box", "min_side": 224}))
     assert args["min_side"] == 224
+
+
+def test_the_box_question_asks_about_the_reference_when_there_is_one():
+    from cliped.verifier import BOX_IMAGE_QUESTION, BOX_QUESTION
+
+    args = main.parse_verifier_args(json.dumps({"image": "person.jpg", "question": "box"}))
+    assert main.box_question(args, b"reference") == BOX_IMAGE_QUESTION
+    assert main.box_question(args, None) == BOX_QUESTION
+    assert main.box_question(main.parse_verifier_args(json.dumps({"prompt": "p"})), b"reference") is None

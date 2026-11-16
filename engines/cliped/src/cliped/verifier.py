@@ -62,6 +62,16 @@ BOX_QUESTION = (
     "This image is cut from an aerial drone video. Is the object inside the red box {prompt}? "
     "Answer with only yes or no."
 )
+# box_rerank's crops with a reference image (an individual, e.g. one person
+# among several): as IMAGE_QUESTION, about the boxed object only, so a crop
+# whose context holds the target next to another object is a no for the
+# other one
+BOX_IMAGE_QUESTION = (
+    "Image 1 is a reference photo of a target, taken from the ground. Image 2 is cut from an aerial drone "
+    "video, seen from above, with one object marked by a red box. That object would be small and will never "
+    "look exactly like the reference. Is the object inside the red box this target, possibly rotated, lying "
+    "down or partly out of frame? Judge only the object inside the red box. Answer with only yes or no."
+)
 
 
 class OllamaError(Exception):

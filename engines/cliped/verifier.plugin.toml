@@ -36,7 +36,7 @@ default = 30000
 [[args]]
 name = "question"
 type = "string"
-description = "The question asked about each frame, instead of the default one; {prompt} in it is replaced by prompt (or the image's name). With image, the model sees the reference first and the frame second. It should ask for a yes or no answer: anything but yes drops the frame. Blank uses the default question; \"box\" asks about the object in the red box, for box_rerank's crops"
+description = "The question asked about each frame, instead of the default one; {prompt} in it is replaced by prompt (or the image's name). With image, the model sees the reference first and the frame second. It should ask for a yes or no answer: anything but yes drops the frame. Blank uses the default question; \"box\" asks about the object in the red box, for box_rerank's crops: whether it is the prompt, or, with image, the reference's target"
 default = ""
 
 [[args]]
