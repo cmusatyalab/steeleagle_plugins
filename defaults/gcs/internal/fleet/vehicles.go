@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +48,17 @@ type CameraView struct {
 	VFov float64 `json:"vfov,omitempty"`
 }
 
+// Alerts are a vehicle's warnings, each the name of its level without the
+// enum's prefix (e.g. "CRITICAL" for BATTERY_WARNING_CRITICAL), or empty if
+// there is none.
+type Alerts struct {
+	Battery      string `json:"battery,omitempty"`
+	GPS          string `json:"gps,omitempty"`
+	Magnetometer string `json:"magnetometer,omitempty"`
+	Connection   string `json:"connection,omitempty"`
+	Compass      string `json:"compass,omitempty"`
+}
+
 // VehicleJSON is a vehicle as the UI reads it.
 type VehicleJSON struct {
 	Name        string    `json:"name"`
@@ -76,6 +88,16 @@ type VehicleJSON struct {
 	// Camera is where the gimbal camera points; omitted if the telemetry
 	// has no gimbal pose.
 	Camera *CameraView `json:"camera,omitempty"`
+	// Auto is whether a mission this GCS started is running on the vehicle:
+	// from when it started until it is stopped or held.
+	Auto bool `json:"auto"`
+	// Mode is the driver's flight mode without its prefix (e.g.
+	// "RETURN_TO_HOME"), and Motion its motion status ("HOLDING",
+	// "IN_TRANSIT" or "STOPPED"); empty if unknown.
+	Mode   string `json:"mode"`
+	Motion string `json:"motion"`
+	// Alerts are the vehicle's warnings.
+	Alerts Alerts `json:"alerts"`
 	// Setpoint is the position the vehicle was sent to, with its altitude
 	// relative like Current's; omitted unless the driver's setpoint is a
 	// global position.
@@ -120,7 +142,27 @@ func ToVehicleJSON(v Vehicle, t *telemetrypb.Telemetry, flowStatus string, now t
 		out.Camera.HFov, out.Camera.VFov = float64(c.HFov), float64(c.VFov)
 	}
 	out.Setpoint = globalSetpoint(pos)
+	out.Mode = enumName(t.GetMode().String(), "MODE_")
+	out.Motion = enumName(t.GetMotionStatus().String(), "MOTION_STATUS_")
+	a := t.GetAlertInfo()
+	out.Alerts = Alerts{
+		Battery:      enumName(a.GetBatteryWarning().String(), "BATTERY_WARNING_"),
+		GPS:          enumName(a.GetGpsWarning().String(), "GPS_WARNING_"),
+		Magnetometer: enumName(a.GetMagnetometerWarning().String(), "MAGNETOMETER_WARNING_"),
+		Connection:   enumName(a.GetConnectionWarning().String(), "CONNECTION_WARNING_"),
+		Compass:      enumName(a.GetCompassWarning().String(), "COMPASS_WARNING_"),
+	}
 	return out
+}
+
+// enumName is an enum value's name without its prefix, or "" for the
+// unspecified value.
+func enumName(name, prefix string) string {
+	name = strings.TrimPrefix(name, prefix)
+	if name == "UNSPECIFIED" {
+		return ""
+	}
+	return name
 }
 
 func wrap360(deg float64) float64 {
@@ -239,6 +281,7 @@ func (h *Vehicles) ServeVehicles(w http.ResponseWriter, r *http.Request) {
 		out[i].Reachable = true
 		if h.flows != nil {
 			out[i].Track, out[i].TrackStart = h.flows.Track(v.Name)
+			out[i].Auto = h.flows.Auto(v.Name)
 		}
 	}
 	for _, s := range h.remember(snap) {

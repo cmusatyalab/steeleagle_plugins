@@ -299,3 +299,24 @@ func TestTelemetryModes(t *testing.T) {
 	v.TakeOff(10)
 	want(telemetrypb.Mode_MODE_TAKEOFF)
 }
+
+// TestTelemetryBatteryWarnings checks that the battery warning follows the
+// charge: low below 30%, critical below 15%.
+func TestTelemetryBatteryWarnings(t *testing.T) {
+	for _, tt := range []struct {
+		battery float64
+		want    telemetrypb.AlertInfo_BatteryWarning
+	}{
+		{100, telemetrypb.AlertInfo_BATTERY_WARNING_UNSPECIFIED},
+		{30, telemetrypb.AlertInfo_BATTERY_WARNING_UNSPECIFIED},
+		{29.5, telemetrypb.AlertInfo_BATTERY_WARNING_LOW},
+		{15, telemetrypb.AlertInfo_BATTERY_WARNING_LOW},
+		{14.5, telemetrypb.AlertInfo_BATTERY_WARNING_CRITICAL},
+	} {
+		v := NewVehicle("alpha", LatLon{40, -80})
+		v.SetBattery(tt.battery)
+		if got := v.Telemetry(time.Now()).GetAlertInfo().GetBatteryWarning(); got != tt.want {
+			t.Errorf("battery %v%%: warning %v, want %v", tt.battery, got, tt.want)
+		}
+	}
+}

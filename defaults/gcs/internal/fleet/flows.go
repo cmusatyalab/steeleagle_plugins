@@ -58,6 +58,8 @@ type vehicleState struct {
 	telemetry                *telemetrypb.Telemetry
 	// track is where the vehicle has been, from its telemetry.
 	track track
+	// auto is whether a mission this GCS started runs on the vehicle.
+	auto bool
 }
 
 // Flows pushes the GCS dataflow to vehicles, and tracks how each push went.
@@ -224,6 +226,24 @@ func carryUnavailable(prev, snap Snapshot) (Snapshot, map[string]bool) {
 // arm arms the vehicle, to be checked right away.
 func (st *vehicleState) arm() {
 	st.armed, st.attempts, st.nextCheck = true, 0, time.Time{}
+}
+
+// SetAuto records whether a mission this GCS started runs on each vehicle:
+// true once it starts, false once it is stopped or held.
+func (f *Flows) SetAuto(vehicles []string, auto bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, name := range vehicles {
+		f.state(name).auto = auto
+	}
+}
+
+// Auto is whether a mission this GCS started runs on the vehicle.
+func (f *Flows) Auto(vehicle string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := f.vehicles[vehicle]
+	return st != nil && st.auto
 }
 
 // MissionStarted disarms each vehicle, so that its mission's flow isn't

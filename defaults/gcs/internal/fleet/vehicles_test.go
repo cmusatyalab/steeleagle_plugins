@@ -422,3 +422,48 @@ func (b *syncBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+// TestVehiclesAuto checks that a vehicle is listed as auto from when its
+// mission starts until it is stopped.
+func TestVehiclesAuto(t *testing.T) {
+	_, f, h := vehiclesFixture(t)
+	f.SetAuto([]string{v1}, true)
+	_, out, _ := getVehicles(t, h)
+	f.Wait()
+	if !out[0].Auto || out[1].Auto {
+		t.Fatalf("auto = %v, %v; want only %s", out[0].Auto, out[1].Auto, v1)
+	}
+	f.SetAuto([]string{v1}, false)
+	_, out, _ = getVehicles(t, h)
+	f.Wait()
+	if out[0].Auto {
+		t.Fatal("still auto after the mission stopped")
+	}
+}
+
+func TestToVehicleJSONModeMotionAlerts(t *testing.T) {
+	tel := testTelemetry(time.Now(), 10, 0)
+	tel.SetMode(telemetrypb.Mode_MODE_RETURN_TO_HOME)
+	tel.SetMotionStatus(telemetrypb.MotionStatus_MOTION_STATUS_IN_TRANSIT)
+	tel.SetAlertInfo(telemetrypb.AlertInfo_builder{
+		BatteryWarning:      telemetrypb.AlertInfo_BATTERY_WARNING_CRITICAL,
+		GpsWarning:          telemetrypb.AlertInfo_GPS_WARNING_NO_FIX,
+		MagnetometerWarning: telemetrypb.AlertInfo_MAGNETOMETER_WARNING_PERTURBATIONS,
+		ConnectionWarning:   telemetrypb.AlertInfo_CONNECTION_WARNING_WEAK_CONNECTION,
+		CompassWarning:      telemetrypb.AlertInfo_COMPASS_WARNING_WEAK_LOCK,
+	}.Build())
+	got := ToVehicleJSON(Vehicle{Name: v1}, tel, "ok", time.Now())
+	if got.Mode != "RETURN_TO_HOME" || got.Motion != "IN_TRANSIT" {
+		t.Errorf("mode, motion = %q, %q", got.Mode, got.Motion)
+	}
+	want := Alerts{Battery: "CRITICAL", GPS: "NO_FIX", Magnetometer: "PERTURBATIONS", Connection: "WEAK_CONNECTION", Compass: "WEAK_LOCK"}
+	if got.Alerts != want {
+		t.Errorf("alerts = %+v, want %+v", got.Alerts, want)
+	}
+	quiet := testTelemetry(time.Now(), 10, 0)
+	quiet.ClearAlertInfo()
+	b, _ := json.Marshal(ToVehicleJSON(Vehicle{Name: v1}, quiet, "ok", time.Now()))
+	if !strings.Contains(string(b), `"alerts":{}`) || !strings.Contains(string(b), `"mode":""`) {
+		t.Errorf("unset mode and alerts JSON = %s", b)
+	}
+}

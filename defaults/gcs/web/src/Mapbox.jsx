@@ -9,6 +9,7 @@ import MapUnavailable from './MapUnavailable.jsx'
 import { cameraRay, setpointPath, cameraLabel, setpointLabel, vehicleCameraGeoJSON, vehicleSetpointGeoJSON, vehicleFootprintGeoJSON } from './mapOverlays.js'
 import { hasMapboxToken } from './mapboxToken.js'
 import { classColor, pinOpacity, pinCardHTML } from './detectionPins.js'
+import { badgesHTML } from './vehicleState.js'
 
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -418,7 +419,7 @@ function MapboxMap({ selectedVehicle, vehicles, mapPanelSize, tracking, detected
         .setLngLat([v.current.long, v.current.lat])
         .setPopup(
           new mapboxgl.Popup({ offset: 20, anchor: 'top', focusAfterOpen: false, closeButton: false, closeOnClick: false, className: 'vehicle-label-popup' })
-            .setHTML(`<strong title="${escapeHtml(v.name)}" style="color:${vehicleStatusTextColor(status)}">${chipsHtml}${escapeHtml(displayName(v.name))}<br>${v.current.alt.toFixed(2)} m</strong>`)
+            .setHTML(`<strong title="${escapeHtml(v.name)}" style="color:${vehicleStatusTextColor(status)}">${chipsHtml}${escapeHtml(displayName(v.name))}${badgesHTML(v)}<br>${v.current.alt.toFixed(2)} m</strong>`)
         )
         .addTo(mapRef.current);
       marker.togglePopup();

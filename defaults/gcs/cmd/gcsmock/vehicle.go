@@ -131,6 +131,25 @@ func (v *Vehicle) Home() LatLon {
 	return v.home
 }
 
+// SetBattery sets the battery's charge, in percent.
+func (v *Vehicle) SetBattery(percent float64) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.battery = math.Max(0, math.Min(100, percent))
+}
+
+// batteryWarning is the warning for the charge: low below 30%, critical
+// below 15%.
+func batteryWarning(percent float64) telemetrypb.AlertInfo_BatteryWarning {
+	switch {
+	case percent < 15:
+		return telemetrypb.AlertInfo_BATTERY_WARNING_CRITICAL
+	case percent < 30:
+		return telemetrypb.AlertInfo_BATTERY_WARNING_LOW
+	}
+	return telemetrypb.AlertInfo_BATTERY_WARNING_UNSPECIFIED
+}
+
 // TakeOff climbs (or descends) to alt meters. It succeeds if already airborne.
 func (v *Vehicle) TakeOff(alt float64) {
 	v.mu.Lock()
@@ -427,6 +446,7 @@ func (v *Vehicle) Telemetry(now time.Time) *telemetrypb.Telemetry {
 		GpsInfo:     telemetrypb.GpsInfo_builder{Satellites: proto.Uint32(satellites)}.Build(),
 		AlertInfo: telemetrypb.AlertInfo_builder{
 			MagnetometerWarning: telemetrypb.AlertInfo_MAGNETOMETER_WARNING_UNSPECIFIED,
+			BatteryWarning:      batteryWarning(v.battery),
 		}.Build(),
 		PositionInfo: telemetrypb.PositionInfo_builder{
 			Home: common.GlobalPosition_builder{

@@ -30,6 +30,9 @@ import PresenceBar, { PRESENCE_BAR_HEIGHT } from './PresenceBar.jsx';
 import { getApiUrl } from './urls.js';
 import { assignControlGroup, recallControlGroup } from './squadUtils.js';
 import { postToApi } from './apiUtils.js';
+import { alertEvents } from './vehicleState.js';
+import { hasTelemetry } from './mapUtils.js';
+import { displayName } from './vehicleNames.js';
 import { hasMapboxToken, MISSING_TOKEN_DETAIL } from './mapboxToken.js';
 import { MOVEMENT_KEYS, createJoystickSender, createSerialPoster, velocityFrom } from './joystick.js';
 
@@ -38,6 +41,9 @@ const ZERO_VELOCITY = { xvel: 0, yvel: 0, zvel: 0, angularvel: 0 };
 // Module-level so StrictMode's double-run of mount effects toasts only once
 let mapboxTokenWarned = false;
 
+
+// How long a yellow alert toast stays; red ones stay until dismissed.
+const ALERT_TOAST_MS = 6000;
 
 function App() {
   const appName = "SteelEagle";
@@ -86,6 +92,9 @@ function App() {
   // Keep a ref to the last-known vehicles JSON so we can skip setVehicles when
   // the server returns identical data, preventing needless re-renders.
   const vehiclesJsonRef = useRef('');
+  // Each vehicle's alerts when its telemetry was last fresh, to toast only
+  // those that appear or get worse
+  const alertsRef = useRef(new Map());
   // Movement keys currently held (a ref: keydown auto-repeat must not
   // re-render or touch the sender). The sender keeps re-sending the latest
   // velocity while anything is held and sends one zero on release; it reaches
@@ -137,6 +146,16 @@ function App() {
         }
         lastErrorDetail = null;
         const result = await response.json();
+        for (const v of result) {
+          if (!hasTelemetry(v)) continue;
+          for (const e of alertEvents(alertsRef.current.get(v.name), v.alerts)) {
+            toast.current?.show({
+              severity: e.severity, summary: `${displayName(v.name)}: ${e.text}`,
+              sticky: e.severity === 'error', life: ALERT_TOAST_MS,
+            });
+          }
+          alertsRef.current.set(v.name, v.alerts ?? {});
+        }
         // Only update state (and trigger a re-render) when the data has actually changed
         const resultJson = JSON.stringify(result);
         if (resultJson !== vehiclesJsonRef.current) {

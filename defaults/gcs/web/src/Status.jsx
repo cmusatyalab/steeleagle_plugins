@@ -1,6 +1,7 @@
 import React from "react";
 import { Card } from 'primereact/card';
 import { Badge } from 'primereact/badge';
+import { vehicleBadges } from './vehicleState.js';
 import { ProgressBar } from 'primereact/progressbar';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faSatellite } from '@fortawesome/free-solid-svg-icons';
@@ -89,11 +90,15 @@ function Status({ vehicle, video, selectable, selected, onToggle }) {
                     <span
                         className="font-semibold text-sm white-space-nowrap overflow-hidden text-overflow-ellipsis"
                         style={{ minWidth: 0 }}
-                        title={vehicle.name}
+                        title={vehicle.model ? `${vehicle.name} (${vehicle.model})` : vehicle.name}
                     >
                         {displayName(vehicle.name)}
                     </span>
-                    <span className="text-color-secondary text-xs white-space-nowrap" style={{ flexShrink: 0 }}>{vehicle.model}</span>
+                    <span className="white-space-nowrap" style={{ flexShrink: 0 }}>
+                        {vehicleBadges(vehicle).map((b) => (
+                            <span key={b.kind} className={`vehicle-badge vehicle-badge-${b.kind}`}>{b.label}</span>
+                        ))}
+                    </span>
                     <span className="flex-1" />
                     <LinkIndicator icon="pi-chart-line" up={telemetry}
                         title={`Telemetry: ${telemetry ? 'flowing' : 'not flowing'} (${ago(vehicle.last_updated)})`} />

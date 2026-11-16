@@ -190,6 +190,10 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 		fleetFlows = fleet.NewFlows(conn, fleet.FlowSpec{Engine: engine}, log)
 		controller.OnHold(fleetFlows.PushAfterHold)
 		controller.OnStart(fleetFlows.MissionStarted)
+		// A vehicle is AUTO from when its mission starts until it is stopped
+		// or held
+		controller.OnStarted(func(vs []string) { fleetFlows.SetAuto(vs, true) })
+		controller.OnStopped(func(vs []string) { fleetFlows.SetAuto(vs, false) })
 		vehicles = http.HandlerFunc(fleet.NewVehicles(daemonClient, fleetFlows, log).ServeVehicles)
 	}
 
