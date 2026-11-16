@@ -2,7 +2,7 @@ import dataclasses
 
 import pytest
 import uriel
-from conftest import VERIFIER, input_id, make_event
+from conftest import VERIFIER, make_event
 
 from detection_crop.engine import REINTEGRATION, Reintegration, producer_name
 from detection_crop.send_queue import Crop, SendQueue
@@ -22,15 +22,15 @@ class Publisher:
         return uriel.InputId(PRODUCER_NAME, 9, len(self.payloads))
 
 
-def producer_event(kind, seq, engine="local.encoder"):
+def producer_event(kind, seq, engine=VERIFIER, outcome=uriel.Outcome.DROP):
     """An event about the producer's input `seq` at `engine`."""
-    event = make_event(kind, seq, engine=engine)
+    event = make_event(kind, seq, engine=engine, outcome=outcome)
     return dataclasses.replace(event, id=uriel.InputId(PRODUCER_NAME, 9, seq))
 
 
 @pytest.fixture
 def queue():
-    return SendQueue(max_size=8, resend_after_s=5.0)
+    return SendQueue(max_size=8)
 
 
 def queued(queue, *scores):
@@ -44,52 +44,43 @@ def test_the_producer_is_named_after_the_engine():
     assert producer_name("crop", REINTEGRATION) == "crop.reintegration"
 
 
-def test_reintegration_sends_the_queue_best_first_one_admission_at_a_time(queue):
+def settle(queue, event):
+    queue.on_event(event, VERIFIER)
+
+
+def test_reintegration_sends_the_queue_best_first_one_crop_at_a_time(queue):
     queued(queue, 0.2, 0.9, 0.5)
     reintegration, publish = Reintegration(queue), Publisher()
     assert reintegration.step(0, publish).score == 0.9
-    # Not admitted yet: publishing another would replace it at the client
-    assert reintegration.step(0, publish) is None and len(publish.payloads) == 1
-    # Admitted (an event at the next engine): the next goes
-    reintegration.on_event(producer_event(K.ACCEPTED, 1))
-    assert reintegration.step(0, publish).score == 0.5
-    reintegration.on_event(producer_event(K.SENT, 2))
-    assert reintegration.step(0, publish).score == 0.2
-    reintegration.on_event(producer_event(K.SENT, 3))
-    # All in flight: nothing to send until the verifier answers
-    assert reintegration.step(0, publish) is None
-    queue.on_event(producer_event(K.RESULT, 1, engine=VERIFIER))
-    assert len(queue) == 2 and queue.confirmed == 1
-    # The verifier timed out on 0.5: sent again
-    queue.on_event(producer_event(K.TIMED_OUT, 2, engine=VERIFIER))
-    assert reintegration.step(1, publish).score == 0.5
+    # Still in the flow, however long: nothing else goes
+    for kind in (K.ACCEPTED, K.SENT):
+        settle(queue, producer_event(kind, 1))
+    assert reintegration.step(100, publish) is None and len(publish.payloads) == 1
+    # The verifier read it: the next goes
+    settle(queue, producer_event(K.RESULT, 1))
+    assert queue.confirmed == 1
+    assert reintegration.step(100, publish).score == 0.5
+    # It timed out at the verifier: its turn ended unread, so it goes again
+    settle(queue, producer_event(K.TIMED_OUT, 2))
+    again = reintegration.step(101, publish)
+    assert again.score == 0.5 and len(again.carriers) == 2
+    settle(queue, producer_event(K.RESULT, 3))
+    assert reintegration.step(102, publish).score == 0.2
 
 
-def test_a_better_crop_replaces_the_one_waiting_for_admission(queue):
+def test_a_better_crop_waits_for_the_one_in_flight(queue):
     (low,) = queued(queue, 0.2)
     reintegration, publish = Reintegration(queue), Publisher()
     assert reintegration.step(0, publish) is low
     (high,) = queued(queue, 0.9)
-    assert reintegration.step(0, publish) is high
-    # The client replaced the low crop, so it waits again, and goes next
-    assert not low.in_flight
-    reintegration.on_event(producer_event(K.ACCEPTED, 2))
-    assert reintegration.step(0, publish) is low
-
-
-def test_a_crop_never_admitted_is_sent_again_after_resend_after(queue):
-    (crop,) = queued(queue, 0.9)
-    reintegration, publish = Reintegration(queue), Publisher()
-    assert reintegration.step(0, publish) is crop
-    assert reintegration.step(4, publish) is None
-    assert reintegration.step(5, publish) is crop and crop.carriers[-1].seq == 2
-
-
-def test_reintegration_does_not_send_the_crop_an_input_carries(queue):
-    (crop,) = queued(queue, 0.9)
-    queue.sent(crop, input_id(1), 0)
-    reintegration, publish = Reintegration(queue), Publisher()
     assert reintegration.step(0, publish) is None
-    # Skipped at the verifier: the producer sends it instead
-    queue.on_event(make_event(K.SKIPPED, 1, engine=VERIFIER))
-    assert reintegration.step(1, publish) is crop
+    settle(queue, producer_event(K.RESULT, 1))
+    assert reintegration.step(0, publish) is high
+
+
+def test_a_crop_dropped_on_the_way_is_sent_again(queue):
+    (crop,) = queued(queue, 0.9)
+    reintegration, publish = Reintegration(queue), Publisher()
+    reintegration.step(0, publish)
+    settle(queue, producer_event(K.RESULT, 1, engine="10.0.0.2.decoder", outcome=uriel.Outcome.DROP))
+    assert reintegration.step(1, publish) is crop and crop.carriers[-1].seq == 2

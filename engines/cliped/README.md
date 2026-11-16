@@ -9,15 +9,15 @@ eagled picks one with `STEELEAGLE_PLUGIN`; unset runs the edge filter.
 
 A tile's score is `s = v·t − max_j v·b_j`: how much more its embedding `v` looks like the prompt `t` than like the closest background `b_j`. A tile is queued when `s > max(0, thr + margin · std(s))`, where `thr` is an EMA of each frame's `k`-th best score and `std(s)` is taken over the frame's tiles. At most `max_send` tiles of a frame are queued.
 
-Each input is replaced with the best tile cut from it: an RGB `RawFrame` at the tile's native resolution, with the id, timestamp and pose of the frame. If it has none, the input is dropped. The result is a `ClassificationResult` of that tile: `class` is the prompt (the text, or the image's file name) and `score` is `s`. Every tile the input picked (up to `max_send`) is queued, the one sent included.
+Each input is replaced with the best tile cut from it: an RGB `RawFrame` at the tile's native resolution, with the id, timestamp and pose of the frame. If it has none, the input is dropped. The result is a `ClassificationResult` of that tile: `class` is the prompt (the text, or the image's file name) and `score` is `s`. The engine forwards that tile blindly and does not track it. Every tile the input picked (up to `max_send`), the forwarded one included, is queued for the engine's `reintegration` producer.
 
-The engine's `reintegration` producer (`[[engine.producers]]` in `cliped.plugin.toml`) sends the queued tiles the verifier doesn't have yet, best first, whenever the flow has room for them. An engine can send only in answer to an input, so before it, a tile that was lost, timed out or found while the link was down waited for a later frame to carry it, and none came when frames stopped or when their tokens were all taken. A flow names the producer `local.<cliped>.reintegration`; it runs in the engine's process, publishing on `STEELEAGLE_ENGINE_ENDPOINT.reintegration`.
+The `reintegration` producer (`[[engine.producers]]` in `cliped.plugin.toml`) is what delivers tiles to the verifier: the queued tiles, best first, one at a time, each until the verifier has it, whether or not frames come in. A flow names the producer `local.<cliped>.reintegration`; it runs in the engine's process, publishing on `STEELEAGLE_ENGINE_ENDPOINT.reintegration`. Leave the engine a dead end (no edge out of it, so Uriel drops what it forwards), give the producer one token, and route the producer to the verifier.
 
-cliped does not compress tiles. Put an encoder after it and after its producer, e.g. the thumbnail plugin's WebP encoder, and its decoder before the verifier:
+cliped does not compress tiles. Put an encoder after its producer, e.g. the thumbnail plugin's WebP encoder, and its decoder before the verifier:
 
 ```
-camera → rescale (720p) → cliped ─────────┐
-                     cliped.reintegration ─┴→ webp encoder ══ link ══ webp decoder → verifier
+camera → rescale (720p) → cliped   (a dead end)
+cliped.reintegration → webp encoder ══ link ══ webp decoder → verifier
 ```
 
 `tile_size` and `stride` are tuned for 720p frames, so rescale them first.
@@ -40,18 +40,16 @@ Replayed over the logged tiles of the normal-network runs (3 scenes × 3 trials)
 
 ## The send queue
 
-A tile goes out in two ways: in place of the frame it was cut from, and on the `reintegration` producer, which sends the waiting tiles best first. Uriel's client keeps only a producer's newest input until the flow has room for it, and one it replaces there never enters the flow, so the producer has one tile at a time waiting to be admitted: the next goes once an event shows the last one entered the flow, unless a better tile is queued first, which takes its place.
+The engine only adds to the queue; the `reintegration` producer delivers it. The producer has one tile in the flow at a time: it publishes the best waiting tile, and the next only once that one's turn in the flow has ended. With one token, the flow paces it, and the client never has a second input of it waiting to replace the first. Every input ends in the flow with an event, so no timer is needed:
 
-A tile leaves the queue only on the verifier's `RESULT` event for an input it went out as: the verifier finished it. `ACCEPTED` is not enough: for a remote verifier it means only that the remote server got the tile, and a busy or stuck verifier then produces `ACCEPTED`, `SENT`, `TIMED_OUT` without ever taking it. Until its `RESULT`:
-
-| Event or condition | Effect |
+| Event about the tile's latest send | Effect |
 | --- | --- |
-| `SKIPPED` / `TIMED_OUT` for the tile's latest carrier | the tile waits to be sent again |
-| `DISCONNECTED`, or `LOST` (its `RESULT` may be among the lost) | every tile in flight waits to be sent again |
-| `resend_after_ms` without word, e.g. dropped by the encoder before reaching the verifier, or never admitted | the tile waits to be sent again |
-| more than `max_queue` tiles | the lowest-priority tile is dropped, in flight or not: not a must-send, lowest score |
+| the verifier's `RESULT` (yes or no) | the verifier read it: it leaves the queue |
+| `SKIPPED` or `TIMED_OUT` at any engine, or a `RESULT` of another engine that dropped it (before the verifier) | its turn ended unread: it waits to be sent again |
+| `DISCONNECTED`, or `LOST` (the event that settled it may be among the lost) | it waits to be sent again |
+| `ACCEPTED`, `SENT` | still in flight: for a remote verifier, `ACCEPTED` means only that its server got the tile |
 
-A tile sent again may reach the verifier twice; that is the price of never losing one.
+When more than `max_queue` tiles wait, the lowest-priority tile is dropped, in flight or not: not a must-send, lowest score. A tile sent again may reach the verifier twice, if its `RESULT` was among the lost events; that is the price of never losing one.
 
 ## Args
 
@@ -69,7 +67,6 @@ A tile sent again may reach the verifier twice; that is the price of never losin
 | `k` | `2` | The threshold follows each frame's k-th best score |
 | `ema` | `0.9` | Weight of the threshold's old value at each frame |
 | `max_queue` | `64` | Most tiles waiting for the verifier |
-| `resend_after_ms` | `5000` | Wait for a sent tile's `RESULT` before sending it again; keep it above the verifier's edge timeout plus its processing time |
 | `npu` | `true` | With `quantized`, run on the HTP through QNN (`libs/`); `false` runs it on the CPU |
 | `threads` | `4` | CPU threads for the text encoder, and for the image encoder off the HTP |
 | `learn` | `true` | Learn from the verifier's answers (see above) |
@@ -92,9 +89,10 @@ It needs an Ollama server (`ollama serve`); at startup it pulls the model if the
 | `model` | `qwen3-vl:8b-instruct` | Ollama model to ask |
 | `host` | | Ollama server URL; blank uses `OLLAMA_HOST`, or `http://localhost:11434` |
 | `timeout_ms` | `30000` | Wait for the model's answer about one frame before dropping it |
+| `question` | | The question asked about each frame, instead of the default one; `{prompt}` in it is replaced by `prompt` (or the image's name). With `image`, the model sees the reference first and the frame second. Anything but a yes drops the frame |
 | `log_tiles` | `false` | Write each input to `STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg` and each frame forwarded to `STEELEAGLE_FILES/<engine>/out/<frame id>_0.jpeg` (JPEG, quality 75) |
 
-Keep cliped's `resend_after_ms` above the edge's timeout plus the model's time per tile.
+Give the edge into the verifier a timeout above the model's time per tile: a tile that times out there is sent again.
 
 ## On the Tachyon
 

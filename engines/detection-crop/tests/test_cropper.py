@@ -25,7 +25,7 @@ def make_cropper(clock=None, max_output_size=1 << 20, sent_log=None):
         detector=DETECTOR,
         class_name="person",
         verifier=VERIFIER,
-        queue=SendQueue(max_size=8, resend_after_s=5.0),
+        queue=SendQueue(max_size=8),
         timeout_ns=2_000_000_000,
         max_output_size=max_output_size,
         clock=clock or Clock(),
@@ -55,21 +55,18 @@ def test_a_result_before_the_frame_crops_it_to_the_best_box():
     assert crop.score == pytest.approx(0.9)
 
 
-def test_a_crop_is_queued_in_flight_until_the_verifier_has_it():
+def test_a_crop_is_queued_for_reintegration_and_the_forwarded_one_is_not_tracked():
     cropper = make_cropper()
     cropper.on_event(result_event(0, (0, 0, 1, 1)))
     outcome = cropper.outcome(input_id(0), cropper.deadline())
     crop, _ = cropper.apply(input_id(0), FRAME, outcome, now=0)
-    assert crop in cropper.queue and crop.carriers == [input_id(0)]
-    # The detector's events are not the verifier's
-    cropper.on_event(make_event(uriel.EventKind.SKIPPED, 0))
-    assert crop.in_flight
-    # The verifier timed out: the crop waits to be sent again
-    cropper.on_event(make_event(uriel.EventKind.TIMED_OUT, 0, engine=VERIFIER))
-    assert not crop.in_flight and cropper.queue.best(1) is crop
-    # The verifier has it: gone
+    assert crop in cropper.queue and crop.carriers == [] and not crop.in_flight
+    # Events about the camera's input, even the verifier's, say nothing about it
+    cropper.queue.on_event(make_event(uriel.EventKind.RESULT, 0, engine=VERIFIER), VERIFIER)
+    assert len(cropper.queue) == 1 and cropper.queue.confirmed == 0
+    # Reintegration sends it, and the verifier has it: gone
     cropper.queue.sent(crop, input_id(5), 1)
-    cropper.on_event(make_event(uriel.EventKind.RESULT, 5, engine=VERIFIER))
+    cropper.queue.on_event(make_event(uriel.EventKind.RESULT, 5, engine=VERIFIER), VERIFIER)
     assert len(cropper.queue) == 0 and cropper.queue.confirmed == 1
 
 

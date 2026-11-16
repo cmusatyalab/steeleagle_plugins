@@ -50,6 +50,15 @@ def test_an_image_prompt_shows_the_reference_first():
     assert keep and verdict(result) == {"match": True}
 
 
+def test_a_question_replaces_the_default_one():
+    for reference, n_images in ((None, 1), (b"reference", 2)):
+        model = Model("yes")
+        verifier = Verifier(model, label="a dog", reference=reference, question="Is {prompt} here? Answer yes or no.")
+        keep, _ = verifier.on_input(make_input(1, make_frame()))
+        question, images = model.asked[0]
+        assert keep and question == "Is a dog here? Answer yes or no." and len(images) == n_images
+
+
 def test_parse_answer():
     assert parse_answer(" **Yes**") is True
     assert parse_answer("No, it does not") is False
@@ -69,7 +78,11 @@ def test_verifier_args():
     assert (args["model"], args["timeout_ms"], args["log_tiles"]) == ("qwen3-vl:8b-instruct", 30000, False)
     args = main.parse_verifier_args(json.dumps({"prompt": "a tarp", "image": "t.jpg"}))
     assert (args["prompt"], args["image"]) == ("", "t.jpg")
-    for bad in [{}, {"prompt": "p", "timeout_ms": 0}, {"prompt": "p", "model": ""}, {"prompt": "p", "log_tiles": 1}]:
+    assert main.parse_verifier_args(json.dumps({"prompt": "a tarp"}))["question"] == ""
+    args = main.parse_verifier_args(json.dumps({"image": "t.jpg", "question": " Same kind of animal? "}))
+    assert args["question"] == "Same kind of animal?"
+    for bad in [{}, {"prompt": "p", "timeout_ms": 0}, {"prompt": "p", "model": ""}, {"prompt": "p", "log_tiles": 1},
+                {"prompt": "p", "question": "Is {thing} here?"}, {"prompt": "p", "question": 3}]:
         with pytest.raises(main.ConfigError):
             main.parse_verifier_args(json.dumps(bad))
 

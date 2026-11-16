@@ -1,7 +1,7 @@
 """End to end: frames go from a real Uriel producer, through a client and
-server, to a stand-in detection engine and to the detection-crop engine,
-which sends their crops across a real remote crossing to a stand-in verifier,
-as do the crops of its reintegration producer."""
+server, to a stand-in detection engine and to the detection-crop engine, a
+dead end; the crops of its reintegration producer go across a real remote
+crossing to a stand-in verifier."""
 
 import queue
 import tempfile
@@ -25,11 +25,11 @@ TIMEOUT_S = 10.0
 FLOW_SPEC = """
 [[producers]]
 name = "{producer}"
-tokens = 2
+tokens = 1
 
 [[producers]]
 name = "{reintegration}"
-tokens = 2
+tokens = 1
 
 [[engines]]
 name = "{detector}"
@@ -52,11 +52,6 @@ timeout = "5s"
 from = "{producer}"
 to = "{crop}"
 timeout = "5s"
-
-[[edges]]
-from = "{crop}"
-to = "{verifier}"
-timeout = "300ms"
 
 [[edges]]
 from = "{reintegration}"
@@ -153,7 +148,7 @@ def flow():
         detector=names["detector"],
         class_name="person",
         verifier=names["verifier"],
-        queue=SendQueue(max_size=8, resend_after_s=5.0),
+        queue=SendQueue(max_size=8),
         timeout_ns=2_000_000_000,
         max_output_size=max_output_size(320, 240),
         clock=time.monotonic_ns,

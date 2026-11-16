@@ -1,32 +1,27 @@
-"""The prioritized send queue: tiles wait in it until the verifier has them,
-so a tile sent while the link is down is not lost. Tiles the selector must
-send (like one the verifier said yes to) go first, then the rest; each group
-best score first.
+"""The prioritized send queue: the engine queues the tiles worth sending,
+and the engine's reintegration producer (engine.Reintegration) delivers them,
+best first, until the verifier has each. The tile the engine forwards in
+place of a camera frame is not a send: in a flow where the engine is a dead
+end, it goes nowhere. Tiles the selector must send (like one the verifier
+said yes to) go first, then the rest; each group best score first.
 
-A tile goes out in two ways, each as an input with an id the verifier's
-events name (its carrier): in place of the camera frame it was cut from, by
-the engine, and on the engine's reintegration producer, which sends the
-queue's waiting tiles best first (engine.Reintegration). A tile leaves the
-queue only on the verifier's RESULT event for one of its carriers: the
-verifier finished it.
+Reintegration has one tile in flight at a time (its producer has one token),
+as an input with an id the flow's events name (its carrier). Every input
+ends in the flow with an event, so no timer is needed:
 
-ACCEPTED is not enough. For a remote verifier it means only that the remote
-server received the tile; if the verifier then never takes it (it is busy or
-stuck), the events are ACCEPTED, SENT, TIMED_OUT. (A local verifier's events
-have no ACCEPTED at all.) So ACCEPTED and SENT leave a tile in flight. Until
-its RESULT:
+- the verifier's RESULT: the verifier read the tile (yes or no), which leaves
+  the queue;
+- SKIPPED or TIMED_OUT at any engine, or a RESULT of another engine that
+  dropped it (before the verifier, e.g. an encoder or decoder failing): its
+  token is back and the verifier never read it, so it waits to be sent again;
+- DISCONNECTED, or LOST (the event that settled it may be among the lost):
+  the tile in flight waits to be sent again.
 
-- SKIPPED or TIMED_OUT for its latest carrier puts it back to wait;
-- DISCONNECTED, or LOST (the ACCEPTED may be among the lost events), puts
-  every tile in flight back to wait;
-- a tile in flight longer than `resend_after_s` with no word goes back to
-  wait, in case it was dropped before it reached the verifier at all, e.g. by
-  the encoder between them.
-
-A tile put back may be sent again and reach the verifier twice; that is the
-price of never losing one. When the queue is over `max_size`, the tile with the
-lowest priority (not a must-send, lowest score) is dropped, in flight or
-not.
+ACCEPTED and SENT leave it in flight: for a remote verifier ACCEPTED means
+only that the remote server received it. A tile put back may reach the
+verifier twice (if its RESULT was among the lost); that is the price of never
+losing one. When the queue is over `max_size`, the tile with the lowest
+priority (not a must-send, lowest score) is dropped, in flight or not.
 """
 import itertools
 import logging
@@ -36,9 +31,7 @@ import uriel
 
 logger = logging.getLogger("cliped.send_queue")
 
-# The event that shows the verifier has the tile.
-_CONFIRMED = frozenset({uriel.EventKind.RESULT})
-# Events that end one offer of a tile without it reaching the verifier.
+# Events that end a tile's offer at an engine without it being processed.
 _NOT_ACCEPTED = frozenset({uriel.EventKind.SKIPPED, uriel.EventKind.TIMED_OUT})
 # Events after which no tile in flight can be counted on.
 _RESET = frozenset({uriel.EventKind.DISCONNECTED, uriel.EventKind.LOST})
@@ -57,7 +50,7 @@ class Tile:
     # Its number among the tiles of that frame
     index: int = 0
     order: int = 0
-    # The ids of every input it went out in place of; the last is the latest
+    # The ids of every input it went out as; the last is the latest
     carriers: list = field(default_factory=list)
     # When it was last sent (time.monotonic()), or None while it waits
     sent_at: float | None = None
@@ -77,11 +70,10 @@ class Tile:
 
 
 class SendQueue:
-    def __init__(self, *, max_size, resend_after_s):
+    def __init__(self, *, max_size):
         if max_size < 1:
             raise ValueError("max_size must be at least 1")
         self.max_size = max_size
-        self.resend_after_s = resend_after_s
         self._tiles = []
         # Carrier id -> the tile it carried
         self._carried = {}
@@ -112,18 +104,11 @@ class SendQueue:
     def __contains__(self, tile):
         return tile in self._tiles
 
-    def best(self, now):
+    def best(self):
         """The highest-priority tile not in flight, or None if every tile is in
-        flight or there are none. Tiles in flight for `resend_after_s` (at
-        `now`) with no word go back to wait first."""
-        best = None
-        for tile in self._tiles:
-            if tile.in_flight and now - tile.sent_at >= self.resend_after_s:
-                logger.info("tile of frame %d unacknowledged for %.1fs; resending it", tile.frame_id, now - tile.sent_at)
-                tile.sent_at = None
-            if not tile.in_flight and (best is None or tile.priority > best.priority):
-                best = tile
-        return best
+        flight or there are none."""
+        waiting = [tile for tile in self._tiles if not tile.in_flight]
+        return max(waiting, key=lambda t: t.priority, default=None)
 
     def sent(self, tile, carrier, now):
         """Marks `tile` as sent as the input `carrier` at `now`. A tile no
@@ -134,24 +119,19 @@ class SendQueue:
         tile.sent_at = now
         self._carried[carrier] = tile
 
-    def unsend(self, tile, carrier):
-        """Puts `tile` back to wait if its latest carrier is `carrier`, which
-        will never reach the verifier, e.g. one replaced before it left."""
-        if tile in self._tiles and tile.carriers and tile.carriers[-1] == carrier:
-            tile.sent_at = None
-
     def next(self, carrier, now):
         """The highest-priority tile not in flight, marked as sent as the input
         `carrier` at `now`; or None if every tile is in flight or there are
         none."""
-        best = self.best(now)
+        best = self.best()
         if best is not None:
             self.sent(best, carrier, now)
         return best
 
-    def on_event(self, event):
-        """Takes an event of the verifier. Returns the tile its RESULT
-        confirmed, if any."""
+    def on_event(self, event, verifier):
+        """Takes an event about a carrier (or a DISCONNECTED or LOST event)
+        at any engine; `verifier` is the verifier's engine name. Returns the
+        tile the verifier's RESULT confirmed, if any."""
         kind = event.kind
         if kind in _RESET:
             for tile in self._tiles:
@@ -160,12 +140,15 @@ class SendQueue:
         tile = self._carried.get(event.id)
         if tile is None:
             return None
-        if kind in _CONFIRMED:
+        if kind == uriel.EventKind.RESULT and event.engine == verifier:
             self._remove(tile)
             self.confirmed += 1
             logger.info("verifier has the tile of frame %d (score %.3f)", tile.frame_id, tile.score)
             return tile
-        if kind in _NOT_ACCEPTED and tile.carriers[-1] == event.id:
+        ended = kind in _NOT_ACCEPTED or (kind == uriel.EventKind.RESULT and event.outcome == uriel.Outcome.DROP)
+        if ended and tile.carriers[-1] == event.id:
+            logger.info("tile of frame %d: %s at %s before the verifier read it; sending it again",
+                        tile.frame_id, kind.name, event.engine)
             tile.sent_at = None
         return None
 

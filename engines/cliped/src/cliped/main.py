@@ -36,7 +36,6 @@ DEFAULTS = {
     "k": 2,
     "ema": 0.9,
     "max_queue": 64,
-    "resend_after_ms": 5000,
     "npu": True,
     "threads": 4,
     "log_scores": False,
@@ -56,6 +55,7 @@ VERIFIER_DEFAULTS = {
     "host": "",
     "timeout_ms": 30000,
     "log_tiles": False,
+    "question": "",
 }
 POSITIVE_INTS = ("tile_size", "stride", "max_send", "k", "max_queue", "threads", "confirmations", "max_learned")
 
@@ -111,13 +111,11 @@ def parse_args(content):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value) or value < 1:
             raise ConfigError(f"{name} must be a positive integer, not {value!r}")
         args[name] = int(value)
-    for name in ("margin", "ema", "resend_after_ms", "learn_similarity"):
+    for name in ("margin", "ema", "learn_similarity"):
         if isinstance(args[name], bool) or not isinstance(args[name], (int, float)):
             raise ConfigError(f"{name} must be a number, not {args[name]!r}")
     if not 0 <= args["ema"] < 1:
         raise ConfigError("ema must be in [0, 1)")
-    if args["resend_after_ms"] <= 0:
-        raise ConfigError("resend_after_ms must be positive")
     if not 0 < args["learn_similarity"] <= 1:
         raise ConfigError("learn_similarity must be in (0, 1]")
     backgrounds = args["backgrounds"]
@@ -140,9 +138,14 @@ def parse_verifier_args(content):
     every unset arg defaulted."""
     args = _load(content, VERIFIER_DEFAULTS)
     _prompt_or_image(args)
-    _strings(args, "model", "host")
+    _strings(args, "model", "host", "question")
     if not args["model"]:
         raise ConfigError("the 'model' arg must be set")
+    if args["question"]:
+        try:
+            args["question"].format(prompt="")
+        except (KeyError, IndexError, ValueError) as err:
+            raise ConfigError(f"question: only {{prompt}} may be in braces ({err!r})") from None
     timeout = args["timeout_ms"]
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         raise ConfigError(f"timeout_ms must be a positive number, not {timeout!r}")
@@ -222,7 +225,7 @@ def build(args, verifier, *, image=None, tile_log=None):
                         confirmations=args["confirmations"], max_learned=args["max_learned"])
     from cliped.sent_log import ScoredLog, SentLog
 
-    queue = SendQueue(max_size=args["max_queue"], resend_after_s=args["resend_after_ms"] / 1000)
+    queue = SendQueue(max_size=args["max_queue"])
     return Cliped(
         image_encoder,
         selector,
@@ -282,7 +285,8 @@ def main_verifier(name):
     except OllamaError as err:
         sys.exit(f"Ollama at {ollama.host} can't serve {args['model']}: {err}")
     logging.getLogger("cliped.verifier").info("asking %s at %s", args["model"], ollama.host)
-    verifier = Verifier(ollama.ask, label=args["image"] or args["prompt"], reference=reference, tile_log=log)
+    verifier = Verifier(ollama.ask, label=args["image"] or args["prompt"], reference=reference, tile_log=log,
+                        question=args["question"] or None)
     run(name, verifier, stop=stop_on_signals())
 
 

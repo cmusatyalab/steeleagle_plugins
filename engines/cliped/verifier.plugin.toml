@@ -34,6 +34,12 @@ description = "Milliseconds to wait for the model's answer about one frame befor
 default = 30000
 
 [[args]]
+name = "question"
+type = "string"
+description = "The question asked about each frame, instead of the default one; {prompt} in it is replaced by prompt (or the image's name). With image, the model sees the reference first and the frame second. It should ask for a yes or no answer: anything but yes drops the frame. Blank uses the default question"
+default = ""
+
+[[args]]
 name = "log_tiles"
 type = "boolean"
 description = "Write each input frame to STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg and each frame forwarded to STEELEAGLE_FILES/<engine>/out/<frame id>_0.jpeg, as JPEG at quality 75"

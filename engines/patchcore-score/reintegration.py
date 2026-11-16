@@ -2,25 +2,27 @@
 its crops (vendored from detection-crop's send_queue.py and engine.py, with
 crops as frames).
 
-Each anomalous frame forwarded is queued too, scored by how far its anomaly
-score is above the threshold, until the verifier's RESULT event for it shows
-the verifier finished it. (Any engine that finishes the frame posts a RESULT,
-even with no result, so the verifier can be the decoder at the far end.) The
-engine's reintegration producer sends the queue's waiting frames, best first,
-whenever the flow has room for them, so a frame lost, timed out, or found
-while the link was down still reaches the verifier.
+The engine forwards each anomalous frame blindly and does not track it: in a
+flow where the engine is a dead end, it goes nowhere. It also queues each,
+scored by how far its anomaly score is above the threshold, and the engine's
+reintegration producer delivers the queue: one frame at a time, most
+anomalous first, each until the verifier's RESULT event for it shows the
+verifier read it. (Any engine that finishes the frame posts a RESULT, even
+with no result, so the verifier can be the decoder at the far end.) Give the
+producer one token: the flow then paces it.
 
-A frame goes out in two ways, each as an input with an id the verifier's
-events name (its carrier): in place of the input it was scored from, by the
-engine, and on the reintegration producer. Until its RESULT:
+Every input ends in the flow with an event, so no timer is needed:
 
-- SKIPPED or TIMED_OUT for its latest carrier puts it back to wait;
-- DISCONNECTED, or LOST, puts every frame in flight back to wait;
-- a frame in flight longer than `resend_after_s` with no word goes back to
-  wait.
+- the verifier's RESULT: it leaves the queue;
+- SKIPPED or TIMED_OUT at any engine, or a RESULT of another engine that
+  dropped it (before the verifier): its turn ended unread, so it waits to be
+  sent again;
+- DISCONNECTED, or LOST (the event that settled it may be among the lost):
+  the frame in flight waits to be sent again.
 
-A frame put back may reach the verifier twice; that is the price of never
-losing one. Past `max_size`, the frame with the lowest score is dropped.
+ACCEPTED and SENT leave it in flight. A frame put back may reach the verifier
+twice; that is the price of never losing one. Past `max_size`, the frame with
+the lowest score is dropped.
 """
 
 import itertools
@@ -31,9 +33,7 @@ import uriel
 
 logger = logging.getLogger("patchcore_score.reintegration")
 
-# The event that shows the verifier has the crop.
-_CONFIRMED = frozenset({uriel.EventKind.RESULT})
-# Events that end one offer of a crop without it reaching the verifier.
+# Events that end a crop's offer at an engine without it being processed.
 _NOT_ACCEPTED = frozenset({uriel.EventKind.SKIPPED, uriel.EventKind.TIMED_OUT})
 # Events after which no crop in flight can be counted on.
 _RESET = frozenset({uriel.EventKind.DISCONNECTED, uriel.EventKind.LOST})
@@ -67,11 +67,10 @@ class Crop:
 
 
 class SendQueue:
-    def __init__(self, *, max_size, resend_after_s):
+    def __init__(self, *, max_size):
         if max_size < 1:
             raise ValueError("max_size must be at least 1")
         self.max_size = max_size
-        self.resend_after_s = resend_after_s
         self._crops = []
         # Carrier id -> the crop it carried
         self._carried = {}
@@ -104,22 +103,11 @@ class SendQueue:
         )
         return worst
 
-    def best(self, now):
+    def best(self):
         """The highest-priority crop not in flight, or None if every crop is
-        in flight or there are none. Crops in flight for `resend_after_s` (at
-        `now`) with no word go back to wait first."""
-        best = None
-        for crop in self._crops:
-            if crop.in_flight and now - crop.sent_at >= self.resend_after_s:
-                logger.info(
-                    "crop of frame %d unacknowledged for %.1fs; resending it",
-                    crop.frame_id,
-                    now - crop.sent_at,
-                )
-                crop.sent_at = None
-            if not crop.in_flight and (best is None or crop.priority > best.priority):
-                best = crop
-        return best
+        in flight or there are none."""
+        waiting = [crop for crop in self._crops if not crop.in_flight]
+        return max(waiting, key=lambda c: c.priority, default=None)
 
     def sent(self, crop, carrier, now):
         """Marks `crop` as sent as the input `carrier` at `now`. A crop no
@@ -130,24 +118,19 @@ class SendQueue:
         crop.sent_at = now
         self._carried[carrier] = crop
 
-    def unsend(self, crop, carrier):
-        """Puts `crop` back to wait if its latest carrier is `carrier`, which
-        will never reach the verifier, e.g. one replaced before it left."""
-        if crop in self._crops and crop.carriers and crop.carriers[-1] == carrier:
-            crop.sent_at = None
-
     def next(self, carrier, now):
         """The highest-priority crop not in flight, marked as sent as the
         input `carrier` at `now`; or None if every crop is in flight or there
         are none."""
-        best = self.best(now)
+        best = self.best()
         if best is not None:
             self.sent(best, carrier, now)
         return best
 
-    def on_event(self, event):
-        """Takes an event of the verifier. Returns the crop its RESULT
-        confirmed, if any."""
+    def on_event(self, event, verifier):
+        """Takes an event about a carrier (or a DISCONNECTED or LOST event)
+        at any engine; `verifier` is the verifier's engine name. Returns the
+        crop the verifier's RESULT confirmed, if any."""
         kind = event.kind
         if kind in _RESET:
             for crop in self._crops:
@@ -156,12 +139,21 @@ class SendQueue:
         crop = self._carried.get(event.id)
         if crop is None:
             return None
-        if kind in _CONFIRMED:
+        if kind == uriel.EventKind.RESULT and event.engine == verifier:
             self._remove(crop)
             self.confirmed += 1
             logger.info("verifier has the crop of frame %d (score %.3f)", crop.frame_id, crop.score)
             return crop
-        if kind in _NOT_ACCEPTED and crop.carriers[-1] == event.id:
+        ended = kind in _NOT_ACCEPTED or (
+            kind == uriel.EventKind.RESULT and event.outcome == uriel.Outcome.DROP
+        )
+        if ended and crop.carriers[-1] == event.id:
+            logger.info(
+                "crop of frame %d: %s at %s before the verifier read it; sending it again",
+                crop.frame_id,
+                kind.name,
+                event.engine,
+            )
             crop.sent_at = None
         return None
 
@@ -177,57 +169,40 @@ class SendQueue:
 
 
 class Reintegration:
-    """The engine's reintegration producer: sends the crops waiting in
-    `queue`, best first, whether or not inputs come in.
-
-    Uriel's client keeps only a producer's newest input until the flow has
-    room for it, and an input it replaces there never enters the flow, with no
-    event. So one crop at a time waits to be admitted: the next goes once an
-    event (`on_event`) shows the last one entered the flow, unless a better
-    crop turns up, which replaces it, and it waits again. A crop admitted is
-    in flight like any other until the verifier's events settle it
-    (send_queue.py)."""
+    """The engine's reintegration producer: delivers the crops waiting in
+    `queue`, best first, whether or not inputs come in, one at a time: the
+    next goes only once the last one's turn in the flow ended (the queue
+    settles it on the flow's events; see send_queue.py). Its producer has one
+    token, so the flow paces it, and with only one input published at a time
+    the client never replaces one before it enters the flow."""
 
     def __init__(self, queue):
         self.queue = queue
-        # The crop published last and its input id, until admitted
-        self._pending = None
+        # The crop published last and its input id, until its turn ends
+        self._current = None
         self.published = 0
-
-    def on_event(self, event):
-        """Takes an event about the producer's inputs, at any engine, or of
-        the verifier: any event about the crop waiting means it was
-        admitted."""
-        if self._pending is not None and event.id == self._pending[1]:
-            self._pending = None
 
     def step(self, now, publish):
         """Publishes the best waiting crop with `publish(payload)`, which
-        returns its input id, unless the crop published last still waits to
-        be admitted and is no worse. Returns the crop published, or None."""
-        best = self.queue.best(now)
-        if self._pending is not None:
-            crop, id = self._pending
-            if crop not in self.queue or not crop.in_flight or crop.carriers[-1] != id:
-                self._pending = None  # confirmed, dropped, or put back to wait
-            elif best is None or best.priority <= crop.priority:
+        returns its input id, unless the crop published last is still in the
+        flow. Returns the crop published, or None."""
+        if self._current is not None:
+            crop, id = self._current
+            if crop in self.queue and crop.in_flight and crop.carriers[-1] == id:
                 return None
-            else:
-                # The better crop replaces it at the client, so it never leaves
-                self.queue.unsend(crop, id)
-                self._pending = None
-                best = self.queue.best(now)
+            self._current = None  # confirmed, dropped, or put back to wait
+        best = self.queue.best()
         if best is None:
             return None
         id = publish(best.payload)
         self.queue.sent(best, id, now)
-        self._pending = (best, id)
+        self._current = (best, id)
         self.published += 1
         logger.info(
-            "reintegration: sending the frame of input %d (score %.3f); queue %d (%d in flight)",
+            "reintegration: sending the frame of input %d (score %.3f)%s; queue %d",
             best.frame_id,
             best.score,
+            f", try {len(best.carriers)}" if len(best.carriers) > 1 else "",
             len(self.queue),
-            self.queue.in_flight,
         )
         return best

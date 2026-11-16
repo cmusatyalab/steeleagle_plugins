@@ -1,30 +1,25 @@
-"""The prioritized send queue: crops wait in it until the verifier has them,
-so a crop sent while the link is down is not lost. The crop of the most
-confident detection goes first.
+"""The prioritized send queue: the engine queues each crop it makes, and the
+engine's reintegration producer (engine.Reintegration) delivers them, best
+first, until the verifier has each. The crop the engine forwards in place of
+a camera frame is not a send: in a flow where the engine is a dead end, it
+goes nowhere. The crop of the most confident detection goes first.
 
-A crop goes out in two ways, each as an input with an id the verifier's
-events name (its carrier): in place of the camera frame it was cut from, by
-the engine, and on the engine's reintegration producer, which sends the
-queue's waiting crops best first (engine.Reintegration). A crop leaves the
-queue only on the verifier's RESULT event for one of its carriers: the
-verifier finished it.
+Reintegration has one crop in flight at a time (its producer has one token),
+as an input with an id the flow's events name (its carrier). Every input
+ends in the flow with an event, so no timer is needed:
 
-ACCEPTED is not enough. For a remote verifier it means only that the remote
-server received the crop; if the verifier then never takes it (it is busy or
-stuck), the events are ACCEPTED, SENT, TIMED_OUT. (A local verifier's events
-have no ACCEPTED at all.) So ACCEPTED and SENT leave a crop in flight. Until
-its RESULT:
+- the verifier's RESULT: the verifier read the crop, which leaves the queue;
+- SKIPPED or TIMED_OUT at any engine, or a RESULT of another engine that
+  dropped it (before the verifier, e.g. an encoder or decoder failing): its
+  token is back and the verifier never read it, so it waits to be sent again;
+- DISCONNECTED, or LOST (the event that settled it may be among the lost):
+  the crop in flight waits to be sent again.
 
-- SKIPPED or TIMED_OUT for its latest carrier puts it back to wait;
-- DISCONNECTED, or LOST (the RESULT may be among the lost events), puts
-  every crop in flight back to wait;
-- a crop in flight longer than `resend_after_s` with no word goes back to
-  wait, in case it was dropped before it reached the verifier at all, e.g. by
-  an encoder between them.
-
-A crop put back may be sent again and reach the verifier twice; that is the
-price of never losing one. When the queue is over `max_size`, the crop with
-the lowest score is dropped, in flight or not.
+ACCEPTED and SENT leave it in flight: for a remote verifier ACCEPTED means
+only that the remote server received it. A crop put back may reach the
+verifier twice (if its RESULT was among the lost); that is the price of never
+losing one. When the queue is over `max_size`, the crop with the lowest score
+is dropped, in flight or not.
 """
 
 import itertools
@@ -35,9 +30,7 @@ import uriel
 
 logger = logging.getLogger("detection_crop.send_queue")
 
-# The event that shows the verifier has the crop.
-_CONFIRMED = frozenset({uriel.EventKind.RESULT})
-# Events that end one offer of a crop without it reaching the verifier.
+# Events that end a crop's offer at an engine without it being processed.
 _NOT_ACCEPTED = frozenset({uriel.EventKind.SKIPPED, uriel.EventKind.TIMED_OUT})
 # Events after which no crop in flight can be counted on.
 _RESET = frozenset({uriel.EventKind.DISCONNECTED, uriel.EventKind.LOST})
@@ -70,11 +63,10 @@ class Crop:
 
 
 class SendQueue:
-    def __init__(self, *, max_size, resend_after_s):
+    def __init__(self, *, max_size):
         if max_size < 1:
             raise ValueError("max_size must be at least 1")
         self.max_size = max_size
-        self.resend_after_s = resend_after_s
         self._crops = []
         # Carrier id -> the crop it carried
         self._carried = {}
@@ -107,22 +99,11 @@ class SendQueue:
         )
         return worst
 
-    def best(self, now):
+    def best(self):
         """The highest-priority crop not in flight, or None if every crop is
-        in flight or there are none. Crops in flight for `resend_after_s` (at
-        `now`) with no word go back to wait first."""
-        best = None
-        for crop in self._crops:
-            if crop.in_flight and now - crop.sent_at >= self.resend_after_s:
-                logger.info(
-                    "crop of frame %d unacknowledged for %.1fs; resending it",
-                    crop.frame_id,
-                    now - crop.sent_at,
-                )
-                crop.sent_at = None
-            if not crop.in_flight and (best is None or crop.priority > best.priority):
-                best = crop
-        return best
+        in flight or there are none."""
+        waiting = [crop for crop in self._crops if not crop.in_flight]
+        return max(waiting, key=lambda c: c.priority, default=None)
 
     def sent(self, crop, carrier, now):
         """Marks `crop` as sent as the input `carrier` at `now`. A crop no
@@ -133,24 +114,19 @@ class SendQueue:
         crop.sent_at = now
         self._carried[carrier] = crop
 
-    def unsend(self, crop, carrier):
-        """Puts `crop` back to wait if its latest carrier is `carrier`, which
-        will never reach the verifier, e.g. one replaced before it left."""
-        if crop in self._crops and crop.carriers and crop.carriers[-1] == carrier:
-            crop.sent_at = None
-
     def next(self, carrier, now):
         """The highest-priority crop not in flight, marked as sent as the
         input `carrier` at `now`; or None if every crop is in flight or there
         are none."""
-        best = self.best(now)
+        best = self.best()
         if best is not None:
             self.sent(best, carrier, now)
         return best
 
-    def on_event(self, event):
-        """Takes an event of the verifier. Returns the crop its RESULT
-        confirmed, if any."""
+    def on_event(self, event, verifier):
+        """Takes an event about a carrier (or a DISCONNECTED or LOST event)
+        at any engine; `verifier` is the verifier's engine name. Returns the
+        crop the verifier's RESULT confirmed, if any."""
         kind = event.kind
         if kind in _RESET:
             for crop in self._crops:
@@ -159,12 +135,21 @@ class SendQueue:
         crop = self._carried.get(event.id)
         if crop is None:
             return None
-        if kind in _CONFIRMED:
+        if kind == uriel.EventKind.RESULT and event.engine == verifier:
             self._remove(crop)
             self.confirmed += 1
             logger.info("verifier has the crop of frame %d (score %.3f)", crop.frame_id, crop.score)
             return crop
-        if kind in _NOT_ACCEPTED and crop.carriers[-1] == event.id:
+        ended = kind in _NOT_ACCEPTED or (
+            kind == uriel.EventKind.RESULT and event.outcome == uriel.Outcome.DROP
+        )
+        if ended and crop.carriers[-1] == event.id:
+            logger.info(
+                "crop of frame %d: %s at %s before the verifier read it; sending it again",
+                crop.frame_id,
+                kind.name,
+                event.engine,
+            )
             crop.sent_at = None
         return None
 

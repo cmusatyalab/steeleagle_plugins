@@ -20,7 +20,6 @@ def test_defaults():
         "max_width": 1920,
         "max_height": 1080,
         "max_queue": 64,
-        "resend_after_ms": 5000,
         "log_sent": "",
     }
 
@@ -32,7 +31,7 @@ def test_detector_class_and_verifier_are_required(missing):
 
 
 @pytest.mark.parametrize(
-    "name", ["timeout", "max_width", "max_height", "max_queue", "resend_after_ms"]
+    "name", ["timeout", "max_width", "max_height", "max_queue"]
 )
 @pytest.mark.parametrize("value", [0, -1, 1.5, True])
 def test_numbers_must_be_positive_whole_numbers(name, value):

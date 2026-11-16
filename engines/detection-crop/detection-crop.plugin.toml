@@ -1,7 +1,7 @@
 [plugin]
 name = "Detection Crop"
 type = "engine"
-description = "Crops each camera frame to the highest-scoring detection of a class that a local detection engine found in it, sends the crop on to the remote verifier with the detection's class and confidence, and resends the crops it doesn't have yet, best first, on its reintegration producer"
+description = "Crops each camera frame to the highest-scoring detection of a class that a local detection engine found in it, forwards the crop with the detection's class and confidence, and delivers every crop to the remote verifier, best first, on its reintegration producer"
 
 [[args]]
 name = "detector"
@@ -18,7 +18,7 @@ default = ""
 [[args]]
 name = "verifier"
 type = "string"
-description = "Service name of the engine on the remote daemon that the crops go to; a crop stays queued until its RESULT event for it shows it has the crop. Required"
+description = "Service name of the engine on the remote daemon that the crops go to; a crop stays queued until its RESULT event for it shows it has read the crop. Required"
 default = ""
 
 [[args]]
@@ -46,12 +46,6 @@ description = "Most crops waiting for the verifier; past it, the one of the leas
 default = 64
 
 [[args]]
-name = "resend_after_ms"
-type = "number"
-description = "Milliseconds a sent crop waits for the verifier's RESULT, with no other word, before it is sent again; keep it above the verifier's edge timeout plus its processing time"
-default = 5000
-
-[[args]]
 name = "log_sent"
 type = "string"
 description = "CSV file to log each crop cut and queued to send to, as frame_id, timestamp_ns (the frame's capture timestamp, which the crop keeps), the crop's left, top, right and bottom in pixels of its frame_width x frame_height frame, score and class; a relative path is in the daemon's files directory (STEELEAGLE_FILES). Replaced when the plugin starts. Empty for none"
@@ -70,7 +64,8 @@ forwards = "steeleagle_protocol/v1/messages/frame/RawFrame"
 result = "steeleagle_protocol/v1/messages/result/ClassificationResult"
 
 [[engine.producers]]
-# Sends the queued crops the verifier doesn't have yet, best first, whether or
-# not frames come in. Route it to the same engine as the engine's output.
+# Delivers the queued crops to the verifier, best first, one at a time, each
+# until the verifier's RESULT for it, whether or not frames come in. Give it
+# one token; leave the engine a dead end (no edge out of it).
 name = "reintegration"
 output = "steeleagle_protocol/v1/messages/frame/RawFrame"

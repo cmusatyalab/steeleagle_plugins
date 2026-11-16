@@ -1,7 +1,7 @@
 [plugin]
 name = "CLIP Edge Filter"
 type = "engine"
-description = "Scores the tiles of each camera frame against a text or image prompt with MobileCLIP, sends each frame's best tile to the remote verifier, and resends the tiles it doesn't have yet, best first, on its reintegration producer"
+description = "Scores the tiles of each camera frame against a text or image prompt with MobileCLIP, forwards each frame's best tile, and delivers every tile worth sending to the remote verifier, best first, on its reintegration producer"
 
 [[args]]
 name = "prompt"
@@ -76,12 +76,6 @@ description = "Most tiles waiting for the verifier; past it, the lowest-scored t
 default = 64
 
 [[args]]
-name = "resend_after_ms"
-type = "number"
-description = "Milliseconds a sent tile waits for the verifier's RESULT, with no other word, before it is sent again; keep it above the verifier's edge timeout plus its processing time"
-default = 5000
-
-[[args]]
 name = "npu"
 type = "boolean"
 description = "Run the INT8 image encoder on the HTP through QNN (libs/); false runs it on the CPU. Only with quantized"
@@ -146,14 +140,16 @@ type = "classification"
 inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
 # Each frame is replaced with the best tile cut from it, an RGB RawFrame at
 # native resolution with the id and pose of the frame, or dropped if it has
-# none. Encode it (e.g. with the thumbnail plugin's WebP encoder) before it
-# crosses to the verifier.
+# none. It is not tracked: route only the reintegration producer to the
+# verifier, and leave the engine a dead end (no edge out of it).
 forwards = "steeleagle_protocol/v1/messages/frame/RawFrame"
 # The tile sent: class the prompt (the text, or the image's file name), score s
 result = "steeleagle_protocol/v1/messages/result/ClassificationResult"
 
 [[engine.producers]]
-# Sends the queued tiles the verifier doesn't have yet, best first, whether or
-# not frames come in. Route it to the same encoder as the engine's output.
+# Delivers the queued tiles to the verifier, best first, one at a time, each
+# until the verifier's RESULT for it, whether or not frames come in. Give it
+# one token, and encode its tiles (e.g. with the thumbnail plugin's WebP
+# encoder) before they cross to the verifier.
 name = "reintegration"
 output = "steeleagle_protocol/v1/messages/frame/RawFrame"

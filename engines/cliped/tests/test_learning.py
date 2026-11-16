@@ -112,7 +112,7 @@ def test_without_learning_nothing_is_gated():
 
 
 def test_rescore_drops_waiting_tiles_that_no_longer_pass_and_reorders_the_rest():
-    queue = SendQueue(max_size=8, resend_after_s=5.0)
+    queue = SendQueue(max_size=8)
     a, b, c = (Tile(score=s, payload=b"", frame_id=i, box=(0, 0, 1, 1)) for i, s in enumerate([0.3, 0.2, 0.1]))
     for tile in (a, b, c):
         queue.push(tile)
@@ -125,7 +125,7 @@ def test_rescore_drops_waiting_tiles_that_no_longer_pass_and_reorders_the_rest()
 
 
 def test_must_sends_go_ahead_of_better_scored_tiles_and_are_dropped_last():
-    queue = SendQueue(max_size=2, resend_after_s=5.0)
+    queue = SendQueue(max_size=2)
     strong = Tile(score=0.9, payload=b"", frame_id=1, box=(0, 0, 1, 1))
     must = Tile(score=0.1, payload=b"", frame_id=2, box=(0, 0, 1, 1), must_send=True)
     queue.push(strong)
@@ -136,7 +136,7 @@ def test_must_sends_go_ahead_of_better_scored_tiles_and_are_dropped_last():
 
 
 def test_rescore_moves_tiles_like_a_yes_to_the_front():
-    queue = SendQueue(max_size=8, resend_after_s=5.0)
+    queue = SendQueue(max_size=8)
     tiles = [Tile(score=s, payload=b"", frame_id=i, box=(0, 0, 1, 1)) for i, s in enumerate([0.5, 0.4, 0.1])]
     for tile in tiles:
         queue.push(tile)
@@ -158,7 +158,7 @@ def learning_cliped():
     return Cliped(
         encoder,
         Selector(encoder.t, encoder.b, k=4, margin=0.0, max_send=8, learn=True, similarity=0.99),
-        SendQueue(max_size=8, resend_after_s=5.0),
+        SendQueue(max_size=8),
         prompt="a white square",
         verifier=VERIFIER,
         tile_size=200,
@@ -178,7 +178,10 @@ def test_confirmed_no_results_teach_the_selector_and_rescore_the_queue(learning_
     cliped = learning_cliped
     cliped.on_input(make_input(1, gray_frame(1)), now=0)
     cliped.on_input(make_input(2, gray_frame(2)), now=0)
-    assert len(cliped.queue) == 6 and cliped.queue.in_flight == 2
+    assert len(cliped.queue) == 6 and cliped.queue.in_flight == 0
+    # Reintegration sends two of them
+    cliped.queue.next(input_id(1), now=0)
+    cliped.queue.next(input_id(2), now=0)
     # The verifier says no to the first gray tile: learned, but not yet gating
     cliped.on_event(result_event(1, {"match": False}))
     assert cliped.selector.noes == [1] and len(cliped.queue) == 5
@@ -194,7 +197,8 @@ def test_a_yes_puts_queued_tiles_like_it_first_and_new_ones_too(learning_cliped)
         pixels = np.zeros((300, 400, 3), np.uint8)
         pixels[100:] = level
         return frame_pb2.RawFrame(data=pixels.tobytes(), h_res=400, v_res=300, channels=3, id=id).SerializeToString()
-    cliped.on_input(make_input(1, frame(140, 1)), now=0)  # sends one dim tile, queues two
+    cliped.on_input(make_input(1, frame(140, 1)), now=0)  # queues the dim tiles
+    cliped.queue.next(input_id(1), now=0)  # reintegration sends one
     cliped.on_input(make_input(2, frame(200, 2)), now=0)  # queues bright ones, which beat the dim on s
     # The verifier says yes to the dim tile: the dim tiles waiting go first
     cliped.on_event(result_event(1, {"match": True}))
@@ -208,5 +212,6 @@ def test_a_yes_puts_queued_tiles_like_it_first_and_new_ones_too(learning_cliped)
 def test_a_result_that_is_not_a_verdict_teaches_nothing(learning_cliped):
     cliped = learning_cliped
     cliped.on_input(make_input(1, gray_frame(1)), now=0)
+    cliped.queue.next(input_id(1), now=0)
     cliped.on_event(result_event(1, {"match": False}, payload_type="steeleagle_protocol/v1/messages/result/DetectionResult"))
     assert cliped.queue.confirmed == 1 and not cliped.selector.backgrounds

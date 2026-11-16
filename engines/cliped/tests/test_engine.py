@@ -24,7 +24,7 @@ def cliped():
     return Cliped(
         encoder,
         Selector(encoder.t, encoder.b, margin=0.25, max_send=1),
-        SendQueue(max_size=8, resend_after_s=5.0),
+        SendQueue(max_size=8),
         prompt="a white square",
         verifier=VERIFIER,
         tile_size=200,
@@ -63,21 +63,20 @@ def test_an_input_is_replaced_with_its_own_tile_and_classified(cliped):
     classification = result_pb2.ClassificationResult.FromString(result)
     assert getattr(classification, "class") == "a white square"
     assert classification.score == pytest.approx(tile.score)
-    # It is queued, in flight as the input it replaced
-    assert len(cliped.queue) == 1 and tile.carriers == [input_id(1)]
+    # It is queued for reintegration; the forwarded tile itself is not tracked
+    assert len(cliped.queue) == 1 and tile.carriers == [] and not tile.in_flight
 
     # An empty frame is dropped with no result, even with a tile in the queue
-    cliped.on_event(make_event(K.TIMED_OUT, 1))
     assert cliped.on_input(make_input(2, make_frame(id=41)), now=1) == (None, b"")
-    # The verifier has it: gone
+    # Events about the camera's inputs say nothing about the queue
     cliped.on_event(make_event(K.RESULT, 1))
-    assert len(cliped.queue) == 0 and cliped.queue.confirmed == 1
+    assert len(cliped.queue) == 1 and cliped.queue.confirmed == 0
 
 
 def test_an_image_prompt_classifies_as_the_file_name():
     encoder = BrightnessEncoder()
     cliped = Cliped(encoder, Selector(encoder.t, encoder.b, margin=0.25, max_send=1),
-                    SendQueue(max_size=8, resend_after_s=5.0), prompt="tarp.jpg", verifier=VERIFIER,
+                    SendQueue(max_size=8), prompt="tarp.jpg", verifier=VERIFIER,
                     tile_size=200, stride=150)
     _, result = cliped.on_input(make_input(1, make_frame(bright=(150, 0, 350, 200))), now=0)
     assert getattr(result_pb2.ClassificationResult.FromString(result), "class") == "tarp.jpg"
@@ -97,9 +96,9 @@ class Publisher:
 PRODUCER_NAME = "cliped.reintegration"
 
 
-def reintegration_event(kind, seq, engine="local.encoder"):
+def reintegration_event(kind, seq, engine=VERIFIER, outcome=uriel.Outcome.DROP):
     event = make_event(kind, seq, engine=engine)
-    return dataclasses.replace(event, id=uriel.InputId(PRODUCER_NAME, 9, seq))
+    return dataclasses.replace(event, id=uriel.InputId(PRODUCER_NAME, 9, seq), outcome=outcome)
 
 
 def queued(cliped, *scores):
@@ -109,60 +108,48 @@ def queued(cliped, *scores):
     return tiles
 
 
-def test_reintegration_sends_the_queue_best_first_one_admission_at_a_time(cliped):
+def test_reintegration_sends_the_queue_best_first_one_tile_at_a_time(cliped):
     queued(cliped, 0.2, 0.9, 0.5)
     reintegration, publish = Reintegration(cliped.queue), Publisher()
     assert reintegration.step(0, publish).score == 0.9
-    # Not admitted yet: publishing another would replace it at the client
-    assert reintegration.step(0, publish) is None and len(publish.payloads) == 1
-    # Admitted (an event at the encoder): the next goes
-    reintegration.on_event(reintegration_event(K.ACCEPTED, 1))
-    assert reintegration.step(0, publish).score == 0.5
-    reintegration.on_event(reintegration_event(K.SENT, 2))
-    assert reintegration.step(0, publish).score == 0.2
-    reintegration.on_event(reintegration_event(K.SENT, 3))
-    # All in flight: nothing to send until the verifier answers
-    assert reintegration.step(0, publish) is None
-    cliped.on_event(dataclasses.replace(make_event(K.RESULT), id=uriel.InputId(PRODUCER_NAME, 9, 1)))
-    assert len(cliped.queue) == 2 and cliped.queue.confirmed == 1
-    # The verifier timed out on 0.5: sent again
-    cliped.on_event(dataclasses.replace(make_event(K.TIMED_OUT), id=uriel.InputId(PRODUCER_NAME, 9, 2)))
-    assert reintegration.step(1, publish).score == 0.5
+    # Still in the flow, however long: nothing else goes
+    for kind in (K.ACCEPTED, K.SENT):
+        cliped.on_event(reintegration_event(kind, 1))
+    assert reintegration.step(100, publish) is None and len(publish.payloads) == 1
+    # The verifier read it: the next goes
+    cliped.on_event(reintegration_event(K.RESULT, 1))
+    assert cliped.queue.confirmed == 1
+    assert reintegration.step(100, publish).score == 0.5
+    # It timed out at the verifier: its turn ended unread, so it goes again
+    cliped.on_event(reintegration_event(K.TIMED_OUT, 2))
+    again = reintegration.step(101, publish)
+    assert again.score == 0.5 and len(again.carriers) == 2
+    cliped.on_event(reintegration_event(K.RESULT, 3))
+    assert reintegration.step(102, publish).score == 0.2
 
 
-def test_a_better_tile_replaces_the_one_waiting_for_admission(cliped):
+def test_a_better_tile_waits_for_the_one_in_flight(cliped):
     low, = queued(cliped, 0.2)
     reintegration, publish = Reintegration(cliped.queue), Publisher()
     assert reintegration.step(0, publish) is low
     high, = queued(cliped, 0.9)
+    assert reintegration.step(0, publish) is None
+    cliped.on_event(reintegration_event(K.RESULT, 1))
     assert reintegration.step(0, publish) is high
-    # The client replaced the low tile, so it waits again, and goes next
-    assert not low.in_flight
-    reintegration.on_event(reintegration_event(K.ACCEPTED, 2))
-    assert reintegration.step(0, publish) is low
 
 
-def test_a_tile_never_admitted_is_sent_again_after_resend_after(cliped):
+def test_a_tile_dropped_on_the_way_is_sent_again(cliped):
     tile, = queued(cliped, 0.9)
     reintegration, publish = Reintegration(cliped.queue), Publisher()
-    assert reintegration.step(0, publish) is tile
-    assert reintegration.step(4, publish) is None
-    assert reintegration.step(5, publish) is tile and tile.carriers[-1].seq == 2
+    reintegration.step(0, publish)
+    cliped.on_event(reintegration_event(K.RESULT, 1, engine="10.0.0.2.decoder", outcome=uriel.Outcome.DROP))
+    assert reintegration.step(1, publish) is tile and tile.carriers[-1].seq == 2
 
 
-def test_reintegration_does_not_send_the_tile_an_input_carries(cliped):
+def test_reintegration_sends_the_tile_the_engine_forwarded(cliped):
     cliped.on_input(make_input(1, make_frame(bright=(150, 0, 350, 200), id=40)), now=0)
     reintegration, publish = Reintegration(cliped.queue), Publisher()
-    assert reintegration.step(0, publish) is None
-    # Skipped at the verifier: the producer sends it instead
-    cliped.on_event(make_event(K.SKIPPED, 1))
-    assert reintegration.step(1, publish).frame_id == 40
-
-
-def test_events_of_other_engines_are_ignored(cliped):
-    cliped.on_input(make_input(1, make_frame(bright=(0, 0, 200, 200))), now=0)
-    cliped.on_event(make_event(K.RESULT, 1, engine="10.0.0.1.other"))
-    assert len(cliped.queue) == 1
+    assert reintegration.step(0, publish).frame_id == 40
 
 
 def test_a_frame_that_is_not_rgb_is_refused(cliped):
@@ -219,7 +206,7 @@ def test_log_tiles_writes_each_input_and_each_tile_sent(tmp_path):
     cliped = Cliped(
         encoder,
         Selector(encoder.t, encoder.b, margin=0.25, max_send=1),
-        SendQueue(max_size=8, resend_after_s=5.0),
+        SendQueue(max_size=8),
         prompt="a white square",
         verifier=VERIFIER,
         tile_size=200,

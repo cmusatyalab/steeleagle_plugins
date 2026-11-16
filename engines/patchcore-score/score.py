@@ -65,7 +65,7 @@ RGB_CHANNELS = 3
 EXPECTED_RGB_SIZE = FRAME_W * FRAME_H * RGB_CHANNELS
 
 RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
-# The producer that resends queued frames, as score.plugin.toml advertises
+# The producer that delivers queued frames, as score.plugin.toml advertises
 # it; the engine publishes on {engine name}.{this}
 REINTEGRATION = "reintegration"
 # How long the engine waits for an input or event before it reads its
@@ -226,9 +226,10 @@ def run_engine(name, args, remote_qualifier=None):
     with decoder_name) -- this engine subscribes to it and hot-swaps its
     bank whenever retrain announces one.
 
-    With args['verifier'] set, each anomalous frame forwarded is also queued
-    until that remote engine finishes it, and the reintegration producer
-    resends the waiting ones, most anomalous first (reintegration.py)."""
+    With args['verifier'] set, each anomalous frame forwarded is also queued,
+    and the reintegration producer delivers them to that remote engine, one at
+    a time, most anomalous first, each until it reads it (reintegration.py).
+    The forwarded frame is not tracked: leave the engine a dead end."""
     bootstrap_bundled_models()
 
     faiss_index, model, threshold, trained_threshold = load_bank(
@@ -242,15 +243,14 @@ def run_engine(name, args, remote_qualifier=None):
     with contextlib.ExitStack() as stack:
         stack.enter_context(torch.no_grad())
         engine = stack.enter_context(uriel.Engine(name, max_output_size=args["max_output_size"]))
-        queue = reintegration = publish = admissions = None
+        queue = reintegration = publish = events = None
         if verifier:
             producer = f"{name}.{REINTEGRATION}"
             frames = stack.enter_context(uriel.Producer(
                 producer, input_type=RAW_FRAME_TYPE, max_input_size=args["max_output_size"]))
-            admissions = stack.enter_context(uriel.Subscription.producer(producer))
-            queue = SendQueue(max_size=args["max_queue"], resend_after_s=args["resend_after_ms"] / 1000)
+            events = stack.enter_context(uriel.Subscription.producer(producer))
+            queue = SendQueue(max_size=args["max_queue"])
             reintegration = Reintegration(queue)
-            engine.subscribe(verifier)
 
             def publish(payload):
                 return uriel.InputId(producer, frames.session, frames.send(payload))
@@ -265,10 +265,6 @@ def run_engine(name, args, remote_qualifier=None):
         while True:
             engine.wait(POLL_INTERVAL_S)
             while (event := engine.poll_event()) is not None:
-                if verifier and event.engine == verifier:
-                    queue.on_event(event)
-                    reintegration.on_event(event)
-                    continue
                 if event.kind != uriel.EventKind.RESULT or event.engine != retrain_engine:
                     continue
                 try:
@@ -282,9 +278,12 @@ def run_engine(name, args, remote_qualifier=None):
                     logger.info("swapped to new bank: %s", swap_info)
                 except Exception as e:
                     logger.error("bank swap failed, keeping current bank: %s", e)
-            if admissions is not None:
-                while (event := admissions.poll()) is not None:
-                    reintegration.on_event(event)
+            if events is not None:
+                while (event := events.poll()) is not None:
+                    try:
+                        queue.on_event(event, verifier)
+                    except Exception:
+                        logger.exception("failed to handle a %s event", event.kind)
 
             input = engine.poll()
             if input is not None:
@@ -354,7 +353,6 @@ def process(engine, input, model, faiss_index, threshold, args, queue, sent_log,
         queued = Crop(score=anomaly_score / threshold if threshold else anomaly_score,
                       payload=payload, frame_id=input.id.seq)
         queue.push(queued)
-        queue.sent(queued, input.id, time.monotonic())
     logger.info("ANOMALOUS score=%.4f (%.1fms) -> forwarded", anomaly_score, elapsed_ms)
 
 

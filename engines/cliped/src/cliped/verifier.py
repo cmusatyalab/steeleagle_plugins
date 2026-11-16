@@ -41,14 +41,18 @@ TEXT_QUESTION = (
     "This is a tile cut from an aerial drone photo. Does it show {prompt}? "
     "Answer with only yes or no."
 )
-# The reference is usually a ground-level photo, and the tile looks down on
-# the target from far above: say so, and ask for the same target, not its
-# category, so look-alikes (e.g. real people for a mannequin) are rejected.
+# The reference is usually a ground-level photo, and the tile is a small,
+# low-resolution view from above: say so, and that the target never looks
+# exactly like the reference, so the model doesn't demand the same appearance.
+# Asking for "this target" still rejects most look-alikes. On the mannequin
+# tiles cliped sent (parkinglot, traintrack, street) it kept 103/105 real ones
+# and said yes to 2/19 tiles of people and 28/303 of nothing; the earlier
+# "same appearance, not merely the same category" kept only 86/105.
 IMAGE_QUESTION = (
-    "Image 1: a reference photo of a target, taken from the ground. "
-    "Image 2: a tile from an aerial drone photo, seen from above. "
-    "Does image 2 contain this same target (same appearance, not merely the same category), "
-    "possibly small, rotated, lying down, or partly out of frame? Answer with only yes or no."
+    "Image 1 is a reference photo of a target, taken from the ground. Image 2 is a low-resolution tile cut "
+    "from an aerial drone photo, seen from above. The target in image 2 would be small and will never look "
+    "exactly like the reference. Does image 2 contain this target, possibly rotated, lying down or partly "
+    "out of frame? Answer with only yes or no."
 )
 
 
@@ -146,20 +150,24 @@ class Verifier:
     the model (Ollama.ask). With `reference`, an encoded image file, the
     prompt is that image, named `label`; otherwise it is the text `label`.
     `tile_log` (files.TileLog), if given, gets each input and each frame
-    forwarded."""
+    forwarded. `question`, if given, replaces TEXT_QUESTION or
+    IMAGE_QUESTION, with {prompt} in it replaced by `label`: wording for one
+    target (e.g. "the same kind of animal" for an animal) can tell it from
+    look-alikes better than the generic questions."""
 
-    def __init__(self, ask, *, label, reference=None, tile_log=None):
+    def __init__(self, ask, *, label, reference=None, tile_log=None, question=None):
         self.ask = ask
         self.label = label
         self.reference = reference
+        self.custom_question = question
         self.tile_log = tile_log
         self.frames = 0
         self.matched = 0
 
     def question(self, png):
         if self.reference is not None:
-            return IMAGE_QUESTION, [self.reference, png]
-        return TEXT_QUESTION.format(prompt=self.label), [png]
+            return (self.custom_question or IMAGE_QUESTION).format(prompt=self.label), [self.reference, png]
+        return (self.custom_question or TEXT_QUESTION).format(prompt=self.label), [png]
 
     def on_input(self, input):
         """Whether to forward `input`, and the serialized GenericResult.

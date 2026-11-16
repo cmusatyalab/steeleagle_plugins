@@ -1,6 +1,7 @@
 """Matches each frame the engine holds with the detector's result for the same
-input, decides what to send in its place, and queues the crops it sends until
-the verifier has them (send_queue.py).
+input, decides what to forward in its place, and queues each crop for the
+engine's reintegration producer, which delivers it to the verifier
+(send_queue.py).
 
 The engine subscribes to the detector's events. For each input, the detector
 either:
@@ -15,13 +16,12 @@ highest-scoring detection of the class in the result, and dropped if there is
 none, if the detector failed, or if its timeout, counted from when the frame
 reaches the engine, ends first.
 
-The engine also subscribes to the verifier's events, which settle the crops in
-the queue: a crop stays queued, and is sent again by the engine's
-reintegration producer, until the verifier's RESULT for it.
+The crop forwarded in place of a frame is not tracked: in a flow where the
+engine is a dead end, it goes nowhere. The events about the reintegration
+producer's inputs settle the crops in the queue (engine.run).
 """
 
 import logging
-import time
 from collections import Counter, OrderedDict
 
 import uriel
@@ -96,9 +96,7 @@ class Cropper:
         self._summary_at_ns = None
 
     def on_event(self, event):
-        if event.engine == self.verifier:
-            self.queue.on_event(event)
-            return
+        """Takes an event of the detector."""
         if event.engine != self.detector:
             return
         kind = event.kind
@@ -155,8 +153,8 @@ class Cropper:
         its serialized RawFrame `data` cropped by `outcome` (as the method
         `outcome` gave it), and its result, the serialized
         ClassificationResult of the detection; or (None, b"") if the frame is
-        dropped. The crop is queued, in flight as `id` since `now`."""
-        now = time.monotonic() if now is None else now
+        dropped. The crop is queued for reintegration; the one forwarded is
+        not tracked."""
         if isinstance(outcome, str):
             return self._drop(id, outcome)
         detection = best_detection(outcome, self.class_name)
@@ -188,7 +186,6 @@ class Cropper:
             self.sent_log.write(frame, box, width, height, detection.score, detection.class_name)
         sent = Crop(score=detection.score, payload=out, frame_id=frame.id)
         self.queue.push(sent)
-        self.queue.sent(sent, id, now)
         return sent, result
 
     def _drop(self, id, why):

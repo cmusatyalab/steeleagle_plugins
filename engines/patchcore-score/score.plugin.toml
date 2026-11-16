@@ -36,7 +36,7 @@ default = "patchcore_retrain"
 [[args]]
 name = "verifier"
 type = "string"
-description = "Service name of the engine on the remote daemon the anomalous frames go to (e.g. the decoder at the far end); each stays queued until that engine finishes it, and the reintegration producer resends the waiting ones, most anomalous first. Empty for no queue: frames are forwarded once"
+description = "Service name of the engine on the remote daemon the anomalous frames go to (e.g. the decoder at the far end); the reintegration producer delivers them, one at a time, most anomalous first, each until that engine finishes it; leave the engine a dead end then. Empty for no queue: frames are forwarded once"
 default = ""
 
 [[args]]
@@ -44,12 +44,6 @@ name = "max_queue"
 type = "number"
 description = "Most anomalous frames waiting for the verifier (each a 1280x720 RGB frame); past it, the least anomalous is dropped"
 default = 32
-
-[[args]]
-name = "resend_after_ms"
-type = "number"
-description = "Milliseconds a sent frame waits for the verifier's RESULT, with no other word, before it is sent again; keep it above the verifier's edge timeout plus its processing time"
-default = 5000
 
 [[args]]
 name = "log_sent"
@@ -71,8 +65,8 @@ inputs = ["steeleagle_protocol/v1/messages/result/FrameWithEmbedding"]
 forwards = "steeleagle_protocol/v1/messages/frame/RawFrame"
 
 [[engine.producers]]
-# With a verifier: sends the queued anomalous frames the verifier doesn't have
-# yet, most anomalous first, whether or not frames come in. Route it to the
-# same engine as the engine's output.
+# With a verifier: delivers the queued anomalous frames to the verifier, most
+# anomalous first, one at a time, each until the verifier's RESULT for it,
+# whether or not frames come in. Give it one token.
 name = "reintegration"
 output = "steeleagle_protocol/v1/messages/frame/RawFrame"

@@ -3,11 +3,12 @@ in, then replaced with its crop and the crop's ClassificationResult, or
 dropped. An engine holds one input at a time, so later frames wait at the
 server meanwhile; a replaced input keeps its id.
 
-Each crop sent is queued too (send_queue.py), until the verifier's RESULT for
-it, and the engine's reintegration producer (Reintegration) sends the queue's
-waiting crops, best first, as the flow has room for them. So a crop not yet
-confirmed (lost, timed out, or found while the link was down) still reaches
-the verifier when no frames come in, or when every frame's token is taken.
+The crop forwarded is not tracked: in a flow where the engine is a dead end
+(no edge out of it), it goes nowhere. Each crop is queued (send_queue.py),
+and the engine's reintegration producer (Reintegration) delivers the queue:
+one crop at a time, best first, each until the verifier's RESULT for it, sent
+again when its turn in the flow ends without one. Give the producer one
+token: the flow then paces it.
 """
 
 import logging
@@ -21,7 +22,7 @@ logger = logging.getLogger("detection_crop")
 
 # How long the engine waits for an input or event before it reads its
 # producer's events, sends a queued crop, and checks whether to stop. It
-# bounds how long the producer takes to see its last crop admitted.
+# bounds how long the producer takes to see its last crop's turn end.
 POLL_INTERVAL_S = 0.02
 # The producer that sends queued crops, as detection-crop.plugin.toml
 # advertises it; the engine publishes on {engine name}.{this}.
@@ -35,58 +36,41 @@ def producer_name(engine, producer):
 
 
 class Reintegration:
-    """The engine's reintegration producer: sends the crops waiting in
-    `queue`, best first, whether or not inputs come in.
-
-    Uriel's client keeps only a producer's newest input until the flow has
-    room for it, and an input it replaces there never enters the flow, with no
-    event. So one crop at a time waits to be admitted: the next goes once an
-    event (`on_event`) shows the last one entered the flow, unless a better
-    crop turns up, which replaces it, and it waits again. A crop admitted is
-    in flight like any other until the verifier's events settle it
-    (send_queue.py)."""
+    """The engine's reintegration producer: delivers the crops waiting in
+    `queue`, best first, whether or not inputs come in, one at a time: the
+    next goes only once the last one's turn in the flow ended (the queue
+    settles it on the flow's events; see send_queue.py). Its producer has one
+    token, so the flow paces it, and with only one input published at a time
+    the client never replaces one before it enters the flow."""
 
     def __init__(self, queue):
         self.queue = queue
-        # The crop published last and its input id, until admitted
-        self._pending = None
+        # The crop published last and its input id, until its turn ends
+        self._current = None
         self.published = 0
-
-    def on_event(self, event):
-        """Takes an event about the producer's inputs, at any engine, or of
-        the verifier: any event about the crop waiting means it was
-        admitted."""
-        if self._pending is not None and event.id == self._pending[1]:
-            self._pending = None
 
     def step(self, now, publish):
         """Publishes the best waiting crop with `publish(payload)`, which
-        returns its input id, unless the crop published last still waits to
-        be admitted and is no worse. Returns the crop published, or None."""
-        best = self.queue.best(now)
-        if self._pending is not None:
-            crop, id = self._pending
-            if crop not in self.queue or not crop.in_flight or crop.carriers[-1] != id:
-                self._pending = None  # confirmed, dropped, or put back to wait
-            elif best is None or best.priority <= crop.priority:
+        returns its input id, unless the crop published last is still in the
+        flow. Returns the crop published, or None."""
+        if self._current is not None:
+            crop, id = self._current
+            if crop in self.queue and crop.in_flight and crop.carriers[-1] == id:
                 return None
-            else:
-                # The better crop replaces it at the client, so it never leaves
-                self.queue.unsend(crop, id)
-                self._pending = None
-                best = self.queue.best(now)
+            self._current = None  # confirmed, dropped, or put back to wait
+        best = self.queue.best()
         if best is None:
             return None
         id = publish(best.payload)
         self.queue.sent(best, id, now)
-        self._pending = (best, id)
+        self._current = (best, id)
         self.published += 1
         logger.info(
-            "reintegration: sending the crop of frame %d (score %.3f); queue %d (%d in flight)",
+            "reintegration: sending the crop of frame %d (score %.3f)%s; queue %d",
             best.frame_id,
             best.score,
+            f", try {len(best.carriers)}" if len(best.carriers) > 1 else "",
             len(self.queue),
-            self.queue.in_flight,
         )
         return best
 
@@ -94,18 +78,18 @@ class Reintegration:
 def run(name, cropper, *, stop, on_ready=None):
     """Serves the engine `name`, cropping the frames it gets by the events of
     `cropper.detector` with the Cropper `cropper`, and its reintegration
-    producer, which sends the crops `cropper.verifier` doesn't have yet,
-    until the threading.Event `stop` is set."""
+    producer, which delivers the crops to `cropper.verifier`, following the
+    events about its inputs at every engine, until the threading.Event `stop`
+    is set."""
     producer = producer_name(name, REINTEGRATION)
     reintegration = Reintegration(cropper.queue)
     size = cropper.max_output_size
     with (
         uriel.Engine(name, result_type=CLASSIFICATION_RESULT_TYPE, max_output_size=size) as engine,
         uriel.Producer(producer, input_type=RAW_FRAME_TYPE, max_input_size=size) as crops,
-        uriel.Subscription.producer(producer) as admissions,
+        uriel.Subscription.producer(producer) as events,
     ):
         engine.subscribe(cropper.detector)
-        engine.subscribe(cropper.verifier)
 
         def publish(payload):
             return uriel.InputId(producer, crops.session, crops.send(payload))
@@ -132,11 +116,13 @@ def run(name, cropper, *, stop, on_ready=None):
             while (event := engine.poll_event()) is not None:
                 try:
                     cropper.on_event(event)
-                    reintegration.on_event(event)
                 except Exception:
                     logger.exception("failed to handle a %s event", event.kind)
-            while (event := admissions.poll()) is not None:
-                reintegration.on_event(event)
+            while (event := events.poll()) is not None:
+                try:
+                    cropper.queue.on_event(event, cropper.verifier)
+                except Exception:
+                    logger.exception("failed to handle a %s event", event.kind)
             # Each input finished leaves room for the next, with no waiting
             while True:
                 if held is None:

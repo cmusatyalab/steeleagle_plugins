@@ -33,7 +33,6 @@ DEFAULTS = {
     "max_width": 1920,
     "max_height": 1080,
     "max_queue": 64,
-    "resend_after_ms": 5000,
     "log_sent": "",
 }
 
@@ -66,7 +65,6 @@ def parse_args(content):
     args["max_width"] = _positive_int(args, "max_width", "pixels")
     args["max_height"] = _positive_int(args, "max_height", "pixels")
     args["max_queue"] = _positive_int(args, "max_queue", "crops")
-    args["resend_after_ms"] = _positive_int(args, "resend_after_ms", "milliseconds")
     args["log_sent"] = str(args["log_sent"]).strip()
     return args
 
@@ -101,7 +99,7 @@ def main():
         detector=detector,
         class_name=normalize_class(args["class"]),
         verifier=verifier,
-        queue=SendQueue(max_size=args["max_queue"], resend_after_s=args["resend_after_ms"] / 1000),
+        queue=SendQueue(max_size=args["max_queue"]),
         timeout_ns=args["timeout"] * 1_000_000,
         max_output_size=max_output_size(args["max_width"], args["max_height"]),
         clock=time.monotonic_ns,
