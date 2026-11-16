@@ -42,7 +42,8 @@ class RawFramePublisher:
         """Publishes `rgb`, an RGB image as GstCapture decodes it, with the
         vehicle's PositionInfo and GimbalInfo when it was taken, if given. A
         frame that finds no free input buffer is dropped: newer frames
-        follow."""
+        follow. Returns the frame's (id, capture timestamp in ns, the Uriel
+        input's sequence number, or None if it was not sent)."""
         if self.dimensions is not None and rgb.shape[1::-1] != self.dimensions:
             rgb = cv2.resize(rgb, self.dimensions, interpolation=cv2.INTER_AREA)
         timestamp = Timestamp()
@@ -62,9 +63,11 @@ class RawFramePublisher:
         if len(data) > self._max_input_size:
             self._resize(len(data))
         try:
-            self._producer.send(data)
+            seq = self._producer.send(data)
         except uriel.AgainError:
             logger.debug('no free input buffer; dropping frame %d', frame.id)
+            return frame.id, timestamp.ToNanoseconds(), None
+        return frame.id, timestamp.ToNanoseconds(), seq
 
     def close(self):
         """Closes the producer, if a frame created it."""

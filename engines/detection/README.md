@@ -1,6 +1,6 @@
 # Object Detection
 
-A SteelEagle engine plugin that detects objects in camera frames with YOLO26 or RF-DETR. It takes `RawFrame`s and reports a `DetectionResult` (class, score, normalized box) for each, forwarding the frame unchanged. Detections can be limited to some classes and to a geofence.
+A SteelEagle engine plugin that detects objects in camera frames with YOLO26 or RF-DETR. It takes `RawFrame`s and reports a `DetectionResult` (class, score, normalized box) for each, forwarding the frame unchanged (or, with `early_discard`, dropping it if nothing was detected). Detections can be limited to some classes and to a geofence.
 
 ## Args
 
@@ -13,13 +13,41 @@ A SteelEagle engine plugin that detects objects in camera frames with YOLO26 or 
 | `confidence` | `0.5` | Confidence threshold. |
 | `geofence` | `""` | KML file (e.g. from Google Maps) in the daemon's files directory. Only detections whose estimated location is inside it are reported. |
 | `hfov`, `vfov` | `69`, `43` | Camera field of view, in degrees. |
-| `save_frames` | `""` | Directory in the daemon's files directory to save every received frame to, as a quality-95 JPEG, before inference. Empty saves none. |
+| `early_discard` | `false` | Drop frames with no detections instead of forwarding them. Their empty result still reaches subscribers. |
+| `letterbox` | `false` | Scale each frame evenly until its longer side is the model's input size (RF-DETR's resolution, YOLO's imgsz), then pad it with gray to that square, instead of letting the model resize it. See below. |
 
 Transfer models and the KML to the daemon with its `TransferService`.
 
-## Saving frames
+## Letterboxing
 
-To inspect the quality of the frames the engine receives, set `save_frames` to a directory name, e.g. `"frames"`. Each frame is written to `<files>/frames/<producer>/<UTC time>_<seq>.jpg`, where `<files>` is the daemon's files directory (`STEELEAGLE_FILES`). Frames are written on a separate thread so inference is not slowed; if the disk falls behind, frames are skipped and a warning is logged. Nothing is deleted, so turn it off when done: 720p at 10 fps is on the order of 1 GB per 10 minutes.
+Every model runs on a square of a fixed size: 384 px for RF-DETR Nano up to 704 px for Large, 640 px for YOLO. RF-DETR resizes any frame to its square without keeping the aspect ratio, so a tall crop of a person comes out twice as wide as it should. With `letterbox`, the frame is scaled evenly until its longer side fills the square, up or down, and padded with gray (114, Ultralytics' letterbox fill) to the rest of it. Boxes are still reported as fractions of the frame, and a detection wholly in the padding is left out.
+
+For whole camera frames it changes little, but for small crops it matters. On person crops of Ultralytics' bus photo shrunk to a given height, stock RF-DETR's best person confidence was:
+
+| Crop height | Nano, model's resize | Nano, `letterbox` | Medium, model's resize | Medium, `letterbox` |
+| --- | --- | --- | --- | --- |
+| 32 px | 0.03 | 0.35 | 0.00 | 0.53 |
+| 48 px | 0.36 | 0.77 | 0.30 | 0.71 |
+| 64 px | 0.83 | 0.82 | 0.67 | 0.78 |
+| 96 px | 0.87 | 0.89 | 0.76 | 0.93 |
+
+Padding the crop up to the square without scaling it did worse than both at 48 px and up: it leaves the person a small object in a big gray square.
+
+## As a verifier after detection-crop
+
+detection-crop sends the remote verifier crops of one class and keeps each queued until the verifier's `RESULT` for it. This engine can be that verifier, confirming each crop with RF-DETR:
+
+```json
+{
+  "model": "rfdetr",
+  "rfdetr_size": "medium",
+  "only_classes": ["person"],
+  "early_discard": true,
+  "letterbox": true
+}
+```
+
+`only_classes` is the class detection-crop crops to, so a crop goes on only if RF-DETR finds that class in it, with its detections as the result. `early_discard` drops the rest. Every crop gets a `RESULT` either way, which is what clears it from detection-crop's queue. Leave `geofence` off: a crop keeps the frame's pose, but its boxes are fractions of the crop, so the location estimate would be wrong.
 
 ## Location estimate
 

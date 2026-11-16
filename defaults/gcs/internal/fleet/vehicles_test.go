@@ -15,8 +15,10 @@ import (
 	common "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/common"
 	telemetrypb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/telemetry"
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
+	"github.com/cmusatyalab/steeleagle/config"
 	"github.com/rs/zerolog"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -79,7 +81,8 @@ func TestToVehicleJSONNegativeAlt(t *testing.T) {
 
 func TestToVehicleJSONNil(t *testing.T) {
 	got := ToVehicleJSON(Vehicle{Name: v1}, nil, "", time.Now())
-	if got.LastUpdated != 1e6 || got.Current != (Location{}) || got.Home != nil || got.Velocity != nil {
+	if got.LastUpdated != 1e6 || got.Current != (Location{}) || got.Home != nil || got.Velocity != nil ||
+		got.Camera != nil || got.Setpoint != nil {
 		t.Errorf("got %+v", got)
 	}
 	b, _ := json.Marshal(got)
@@ -90,6 +93,136 @@ func TestToVehicleJSONNil(t *testing.T) {
 	}
 	if _, ok := m["current"]; !ok {
 		t.Error("current missing from JSON")
+	}
+}
+
+// pose builds a gimbal pose; a nil angle is left unset.
+func pose(pitch, yaw *float32) *common.Pose {
+	return common.Pose_builder{Pitch: pitch, Yaw: yaw}.Build()
+}
+
+// cameraOf is the camera of a vehicle at heading 90 with gimbal g.
+func cameraOf(g *telemetrypb.GimbalInfo) *CameraView {
+	now := time.Now()
+	tel := testTelemetry(now, 40, 90)
+	tel.SetGimbalInfo(g)
+	return ToVehicleJSON(Vehicle{Name: v1}, tel, "", now).Camera
+}
+
+func TestToVehicleJSONCamera(t *testing.T) {
+	got := cameraOf(telemetrypb.GimbalInfo_builder{
+		PoseNeu:  pose(proto.Float32(-30), proto.Float32(-110)),
+		PoseBody: pose(proto.Float32(-10), proto.Float32(5)),
+	}.Build())
+	if got == nil || *got != (CameraView{Yaw: 250, Pitch: -30}) {
+		t.Errorf("camera = %+v, want yaw 250 pitch -30", got)
+	}
+}
+
+// cameraWith is the camera of a vehicle looking down 30 degrees whose driver
+// has cameras.
+func cameraWith(cameras ...config.DriverCamera) *CameraView {
+	now := time.Now()
+	tel := testTelemetry(now, 40, 90)
+	tel.SetGimbalInfo(telemetrypb.GimbalInfo_builder{PoseNeu: pose(proto.Float32(-30), proto.Float32(90))}.Build())
+	v := Vehicle{Name: v1, Driver: &config.DriverCap{Cameras: cameras}}
+	return ToVehicleJSON(v, tel, "", now).Camera
+}
+
+func TestToVehicleJSONCameraFOV(t *testing.T) {
+	front := config.DriverCamera{Name: "front", Primary: true, HFov: 90, VFov: 60}
+	gimbal := config.DriverCamera{Name: "main", Gimbal: true, HFov: 69, VFov: 42}
+	other := config.DriverCamera{Name: "down", HFov: 120, VFov: 90}
+	if got := cameraWith(other, front, gimbal); got == nil || got.HFov != 69 || got.VFov != 42 {
+		t.Errorf("with a gimbal camera: %+v, want its 69x42", got)
+	}
+	if got := cameraWith(other, front); got == nil || got.HFov != 90 || got.VFov != 60 {
+		t.Errorf("with a primary camera: %+v, want its 90x60", got)
+	}
+	if got := cameraWith(other); got == nil || got.HFov != 120 || got.VFov != 90 {
+		t.Errorf("with one camera: %+v, want its 120x90", got)
+	}
+	if got := cameraWith(); got == nil || got.HFov != 0 || got.VFov != 0 {
+		t.Errorf("without cameras: %+v, want no FOV", got)
+	}
+}
+
+func TestToVehicleJSONCameraBodyFallback(t *testing.T) {
+	got := cameraOf(telemetrypb.GimbalInfo_builder{PoseBody: pose(proto.Float32(-45), nil)}.Build())
+	if got == nil || *got != (CameraView{Yaw: 90, Pitch: -45}) {
+		t.Errorf("camera = %+v, want yaw 90 pitch -45", got)
+	}
+	got = cameraOf(telemetrypb.GimbalInfo_builder{PoseBody: pose(proto.Float32(-45), proto.Float32(30))}.Build())
+	if got == nil || *got != (CameraView{Yaw: 120, Pitch: -45}) {
+		t.Errorf("camera = %+v, want yaw 120 pitch -45", got)
+	}
+}
+
+func TestToVehicleJSONNoCamera(t *testing.T) {
+	if got := cameraOf(nil); got != nil {
+		t.Errorf("no gimbal: camera = %+v", got)
+	}
+	if got := cameraOf(telemetrypb.GimbalInfo_builder{}.Build()); got != nil {
+		t.Errorf("no pose: camera = %+v", got)
+	}
+}
+
+// setpointOf is the setpoint of a vehicle at global altitude 312 and
+// relative altitude 40 whose telemetry carries setpoint (nil for none).
+func setpointOf(t *testing.T, setpoint proto.Message) *Location {
+	t.Helper()
+	now := time.Now()
+	tel := testTelemetry(now, 40, 90)
+	if setpoint != nil {
+		a, err := anypb.New(setpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tel.GetPositionInfo().SetSetpoint(a)
+	}
+	return ToVehicleJSON(Vehicle{Name: v1}, tel, "", now).Setpoint
+}
+
+func TestToVehicleJSONSetpoint(t *testing.T) {
+	got := setpointOf(t, common.GlobalPosition_builder{
+		Latitude: proto.Float64(40.3), Longitude: proto.Float64(-79.7), Altitude: proto.Float32(330),
+	}.Build())
+	if got == nil || *got != (Location{Lat: 40.3, Long: -79.7, Alt: 58}) {
+		t.Errorf("setpoint = %+v, want 40.3,-79.7 at 58", got)
+	}
+}
+
+func TestToVehicleJSONSetpointBelowTakeoff(t *testing.T) {
+	got := setpointOf(t, common.GlobalPosition_builder{
+		Latitude: proto.Float64(40.3), Longitude: proto.Float64(-79.7), Altitude: proto.Float32(250),
+	}.Build())
+	if got == nil || got.Alt != 0 {
+		t.Errorf("setpoint = %+v, want alt 0", got)
+	}
+}
+
+func TestToVehicleJSONSetpointNoGPSFix(t *testing.T) {
+	now := time.Now()
+	tel := testTelemetry(now, 40, 90)
+	a, err := anypb.New(common.GlobalPosition_builder{
+		Latitude: proto.Float64(40.3), Longitude: proto.Float64(-79.7), Altitude: proto.Float32(330),
+	}.Build())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tel.GetPositionInfo().SetSetpoint(a)
+	tel.GetPositionInfo().ClearGlobalPosition()
+	if got := ToVehicleJSON(Vehicle{Name: v1}, tel, "", now).Setpoint; got != nil {
+		t.Errorf("setpoint without a GPS fix = %+v", got)
+	}
+}
+
+func TestToVehicleJSONSetpointNotGlobal(t *testing.T) {
+	if got := setpointOf(t, common.Velocity_builder{XVel: proto.Float32(2)}.Build()); got != nil {
+		t.Errorf("velocity setpoint = %+v", got)
+	}
+	if got := setpointOf(t, nil); got != nil {
+		t.Errorf("no setpoint = %+v", got)
 	}
 }
 
@@ -288,4 +421,49 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// TestVehiclesAuto checks that a vehicle is listed as auto from when its
+// mission starts until it is stopped.
+func TestVehiclesAuto(t *testing.T) {
+	_, f, h := vehiclesFixture(t)
+	f.SetAuto([]string{v1}, true)
+	_, out, _ := getVehicles(t, h)
+	f.Wait()
+	if !out[0].Auto || out[1].Auto {
+		t.Fatalf("auto = %v, %v; want only %s", out[0].Auto, out[1].Auto, v1)
+	}
+	f.SetAuto([]string{v1}, false)
+	_, out, _ = getVehicles(t, h)
+	f.Wait()
+	if out[0].Auto {
+		t.Fatal("still auto after the mission stopped")
+	}
+}
+
+func TestToVehicleJSONModeMotionAlerts(t *testing.T) {
+	tel := testTelemetry(time.Now(), 10, 0)
+	tel.SetMode(telemetrypb.Mode_MODE_RETURN_TO_HOME)
+	tel.SetMotionStatus(telemetrypb.MotionStatus_MOTION_STATUS_IN_TRANSIT)
+	tel.SetAlertInfo(telemetrypb.AlertInfo_builder{
+		BatteryWarning:      telemetrypb.AlertInfo_BATTERY_WARNING_CRITICAL,
+		GpsWarning:          telemetrypb.AlertInfo_GPS_WARNING_NO_FIX,
+		MagnetometerWarning: telemetrypb.AlertInfo_MAGNETOMETER_WARNING_PERTURBATIONS,
+		ConnectionWarning:   telemetrypb.AlertInfo_CONNECTION_WARNING_WEAK_CONNECTION,
+		CompassWarning:      telemetrypb.AlertInfo_COMPASS_WARNING_WEAK_LOCK,
+	}.Build())
+	got := ToVehicleJSON(Vehicle{Name: v1}, tel, "ok", time.Now())
+	if got.Mode != "RETURN_TO_HOME" || got.Motion != "IN_TRANSIT" {
+		t.Errorf("mode, motion = %q, %q", got.Mode, got.Motion)
+	}
+	want := Alerts{Battery: "CRITICAL", GPS: "NO_FIX", Magnetometer: "PERTURBATIONS", Connection: "WEAK_CONNECTION", Compass: "WEAK_LOCK"}
+	if got.Alerts != want {
+		t.Errorf("alerts = %+v, want %+v", got.Alerts, want)
+	}
+	quiet := testTelemetry(time.Now(), 10, 0)
+	quiet.ClearAlertInfo()
+	b, _ := json.Marshal(ToVehicleJSON(Vehicle{Name: v1}, quiet, "ok", time.Now()))
+	if !strings.Contains(string(b), `"alerts":{}`) || !strings.Contains(string(b), `"mode":""`) {
+		t.Errorf("unset mode and alerts JSON = %s", b)
+	}
 }

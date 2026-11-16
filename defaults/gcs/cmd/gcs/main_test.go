@@ -20,6 +20,7 @@ import (
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/daemons"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/metrics"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/pins"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/presence"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/rtc"
 	"github.com/coder/websocket"
@@ -36,7 +37,7 @@ func TestServesUIConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, uiConfig{Mapbox: "pk.test"}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, pins.NewStore(), uiConfig{Mapbox: "pk.test"}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/config")
 	if err != nil {
@@ -109,7 +110,7 @@ func TestServesPresence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, uiConfig{}, web, zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, pins.NewStore(), uiConfig{}, web, zerolog.Nop()))
 	defer server.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -140,7 +141,7 @@ func TestHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), nil, uiConfig{}, web, zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), nil, pins.NewStore(), uiConfig{}, web, zerolog.Nop()))
 	defer server.Close()
 
 	for path, want := range map[string]string{
@@ -189,7 +190,7 @@ func TestHandlerWithoutWeb(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), nil, uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), stubVehicles, testMissions(), testDaemons(), nil, pins.NewStore(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/streams")
 	if err != nil {
@@ -209,7 +210,7 @@ func TestHandlerWithoutDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, pins.NewStore(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/remote/vehicles")
 	if err != nil {
@@ -249,7 +250,7 @@ func TestNoDaemonMissionRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, pins.NewStore(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	for _, path := range []string{"/api/upload", "/api/deploy", "/api/flows/push"} {
 		resp, err := http.Post(server.URL+path, "application/json", strings.NewReader("{}"))
@@ -285,7 +286,7 @@ func TestCompilerRoutesRegistered(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, pins.NewStore(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/schema")
 	if err != nil {
@@ -316,7 +317,7 @@ func TestCatalogRoute503WithoutDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), nil, pins.NewStore(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/flows/catalog")
 	if err != nil {
@@ -407,7 +408,7 @@ func TestServesMetrics(t *testing.T) {
 	defer hub.Close()
 	reg := prometheus.NewRegistry()
 	metrics.NewFrameAge(reg).Observe("drone", framepb.EncodedFrame_builder{Timestamp: timestamppb.Now()}.Build(), time.Now())
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), newMetricsRoutes(reg), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), newMetricsRoutes(reg), pins.NewStore(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 
 	resp, err := http.Get(server.URL + "/metrics")
@@ -429,7 +430,7 @@ func TestServesNoTargetsWithoutADaemon(t *testing.T) {
 	defer hub.Close()
 	routes := newMetricsRoutes(prometheus.NewRegistry())
 	routes["GET /api/metrics/targets"] = metrics.NewTargetsHandler(noDaemonConfigs{}, zerolog.Nop())
-	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), routes, uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
+	server := httptest.NewServer(newHandler(hub, control.New(nil, control.DefaultTimeout, zerolog.Nop()), noDaemonHandler(), testMissions(), testDaemons(), routes, pins.NewStore(), uiConfig{}, filepath.Join(t.TempDir(), "missing"), zerolog.Nop()))
 	defer server.Close()
 
 	resp, err := http.Get(server.URL + "/api/metrics/targets")

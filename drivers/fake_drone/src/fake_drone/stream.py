@@ -1,14 +1,21 @@
-"""Stream Service of the fake drone: replays a looping .mp4 file as its camera.
+"""Stream Service of the fake drone: replays an .mp4 file as its camera,
+looping it, or, with no_loop, playing it once and then stopping the plugin,
+or, with pad_after too, sending blank frames at 30 fps after it ends.
 
-As in parrot_anafi, the camera is read from the first StreamCameras call on,
-for good, and each frame is published to the producer the vehicle last asked
-for, if any. With telemetry on, each frame carries the position and gimbal
+The vehicle calls StreamCameras when a flow is pushed, so the video plays
+from its start each time the camera is asked for, as an experiment's trial
+expects, and stops when it is no longer asked for (e.g. after a push fails
+with no flow set). Each frame is published to the producer the vehicle asked
+for. With telemetry on, each frame carries the position and gimbal
 pose a Parrot drone recorded with it (see vmeta.py). There's no vehicle, so
 there's no telemetry stream: StreamTelemetry starts nothing.
 """
+import csv
 import logging
 import threading
 import time
+
+import numpy as np
 
 import grpc
 
@@ -28,6 +35,11 @@ CAPTURE_RETRY_DELAY = 1.0
 MAX_FAILED_READS = 10
 # Name of the fake camera, matching fake_drone.plugin.toml
 CAMERA_NAME = 'rgb'
+# Framerate of the blank frames sent after the video ends, with pad_after
+PAD_FPS = 30
+# (height, width) of the blank frames if the video gave none to match, as
+# the camera's resolution in fake_drone.plugin.toml
+PAD_DEFAULT_SHAPE = (720, 1280)
 
 RESOLUTION_DIMENSIONS = {
     stream_proto.RESOLUTION_360P: (640, 360),
@@ -40,46 +52,118 @@ RESOLUTION_DIMENSIONS = {
 
 class Stream(StreamServiceServicer):
     """Stream Service implementation. `telemetry` is the vmeta.Telemetry
-    recorded in the video, which goes with each frame, or None."""
+    recorded in the video, which goes with each frame, or None. Unless
+    `loop`, the video plays once, and then `on_end` is called, or, if
+    `pad_after`, blank frames are sent at PAD_FPS until the playback is
+    stopped."""
 
-    def __init__(self, video_path, decoder, telemetry=None):
+    def __init__(self, video_path, decoder, telemetry=None, loop=True, on_end=None,
+                 pad_after=False, open_capture=None, frame_log=None):
         self.video_path = video_path
+        # Path of the CSV each published frame is logged to, or None
+        self.frame_log = frame_log
+        self._frame_log_writer = None
+        # Opens the source as a capture (isOpened, read, release, ended):
+        # by default the video, through GStreamer; for a directory of
+        # images, an ImageCapture
+        self._open_capture = open_capture or (
+            lambda loop: GstCapture(self.video_path, self.decoder, loop=loop))
         # H.264 decoder of the video, in gst-launch syntax
         self.decoder = decoder
         self.telemetry = telemetry
+        self.loop = loop
+        self.on_end = on_end
+        self.pad_after = pad_after
+        # (height, width) of the last frame read, which blank frames match
+        self._frame_shape = None
         self._capture_lock = threading.Lock()
         self._grabber_thread = None
+        # Set to stop the current playback
+        self._stop = threading.Event()
         # The camera stream the vehicle asked for, as (uri, dimensions), or
         # None. The reading thread publishes it, since the publisher must
         # stay on one thread, so it is only handed over here.
         self._camera_request = None
         self._raw_frames = None
 
-    def _start_capture(self):
-        """Starts reading the video, once."""
+    def _stop_capture(self):
+        """Stops the current playback, if any, and waits for it to end. The
+        caller must hold _capture_lock."""
+        if self._grabber_thread is None:
+            return
+        self._stop.set()
+        self._grabber_thread.join()
+        self._grabber_thread = None
+
+    def _restart_capture(self):
+        """Plays the video from its start, stopping the current playback."""
         with self._capture_lock:
-            if self._grabber_thread is not None:
-                return
-            self._grabber_thread = threading.Thread(target=self._grab_frames, daemon=True)
+            self._stop_capture()
+            self._stop = threading.Event()
+            self._grabber_thread = threading.Thread(
+                target=self._grab_frames, args=(self._stop,), daemon=True)
             self._grabber_thread.start()
 
-    def _grab_frames(self):
-        """Reads the video for good, reopening it whenever it fails to open or
-        stops giving frames. The publisher is used only here, on this thread.
+    def _grab_frames(self, stop):
+        """Reads the video until `stop` is set, reopening it whenever it fails
+        to open or stops giving frames, or, unless looping, until it ends, and
+        then calls on_end, or, with pad_after, sends blank frames until `stop`
+        is set. The publisher is used only here, on this thread.
         """
+        ended = False
+        padded = False
         try:
-            while True:
-                cap = GstCapture(self.video_path, self.decoder)
+            while not stop.is_set():
+                cap = self._open_capture(self.loop)
                 if cap.isOpened():
-                    self._read_frames(cap)
+                    logger.info('playing the video from its start')
+                    self._read_frames(cap, stop)
+                    if cap.ended:
+                        ended = True
+                        cap.release()
+                        break
+                    if stop.is_set():
+                        cap.release()
+                        break
                     logger.warning(f'video stopped; reopening it in {CAPTURE_RETRY_DELAY} s')
                 else:
                     logger.warning(f'video could not be opened; retrying in {CAPTURE_RETRY_DELAY} s')
                 cap.release()
-                time.sleep(CAPTURE_RETRY_DELAY)
+                stop.wait(CAPTURE_RETRY_DELAY)
+            if ended and self.pad_after:
+                padded = True
+                self._send_blank_frames(stop)
         finally:
             if self._raw_frames is not None:
                 self._raw_frames.close()
+                self._raw_frames = None
+            self._close_frame_log()
+        if not ended or padded:
+            logger.info('video stopped')
+            return
+        logger.info('video ended')
+        if self.on_end is not None:
+            self.on_end()
+
+    def _log_frame(self, published, source):
+        """Logs a published frame, (id, capture timestamp ns, Uriel seq or
+        None if it was not sent), with
+        `source` (its index in the video or image order, or "pad"), to the
+        frame log, if there is one."""
+        if self.frame_log is None or published is None:
+            return
+        if self._frame_log_writer is None:
+            # Line-buffered, so the rows are on disk even if the plugin is killed
+            self._frame_log_file = open(self.frame_log, 'w', newline='', buffering=1)
+            self._frame_log_writer = csv.writer(self._frame_log_file)
+            self._frame_log_writer.writerow(('frame_id', 'timestamp_ns', 'seq', 'source'))
+        frame_id, timestamp_ns, seq = published
+        self._frame_log_writer.writerow((frame_id, timestamp_ns, '' if seq is None else seq, source))
+
+    def _close_frame_log(self):
+        if self._frame_log_writer is not None:
+            self._frame_log_file.close()
+            self._frame_log_writer = None
 
     def _update_publisher(self):
         """Replaces the publisher if the vehicle asked for another camera
@@ -97,18 +181,27 @@ class Stream(StreamServiceServicer):
             uri, dimensions = request
             self._raw_frames = RawFramePublisher(uri, dimensions)
 
-    def _read_frames(self, cap):
+    def _read_frames(self, cap, stop):
         """Reads frames from `cap`, and publishes each one to Uriel, if the
         vehicle asked for the camera. Returns once MAX_FAILED_READS reads in
-        a row fail.
+        a row fail, or `stop` is set.
         """
         failed_reads = 0
-        while failed_reads < MAX_FAILED_READS:
+        source = -1
+        while failed_reads < MAX_FAILED_READS and not stop.is_set():
             ret, frame, pts = cap.read()
             if not ret:
+                if cap.ended:
+                    return
                 failed_reads += 1
                 continue
             failed_reads = 0
+            # The frame's number in the video (or image order), from its
+            # time: a capture skips frames when the reader falls behind, so
+            # counting reads would misnumber every frame after a skip
+            index = cap.frame_index(pts) if hasattr(cap, 'frame_index') else None
+            source = index if index is not None else source + 1
+            self._frame_shape = frame.shape[:2]
             self._update_publisher()
             if self._raw_frames is None:
                 continue
@@ -116,9 +209,33 @@ class Stream(StreamServiceServicer):
             if self.telemetry is not None and pts is not None:
                 position_info, gimbal_info = self.telemetry.pose(pts)
             try:
-                self._raw_frames.publish(frame, position_info, gimbal_info)
+                self._log_frame(self._raw_frames.publish(frame, position_info, gimbal_info), source)
             except Exception as e:
                 logger.warning(f'raw frame could not be published, reason: {e}')
+
+    def _send_blank_frames(self, stop):
+        """Publishes black frames, the size of the video's, at PAD_FPS until
+        `stop` is set, if the vehicle asks for the camera."""
+        height, width = self._frame_shape or PAD_DEFAULT_SHAPE
+        blank = np.zeros((height, width, 3), dtype=np.uint8)
+        logger.info(f'video ended; sending {width}x{height} blank frames at {PAD_FPS} fps')
+        period = 1.0 / PAD_FPS
+        deadline = time.monotonic()
+        while not stop.is_set():
+            self._update_publisher()
+            if self._raw_frames is not None:
+                try:
+                    self._log_frame(self._raw_frames.publish(blank), 'pad')
+                except Exception as e:
+                    logger.warning(f'blank frame could not be published, reason: {e}')
+            deadline += period
+            delay = deadline - time.monotonic()
+            if delay < 0:
+                # Fell behind, e.g. on a slow publish: skip the missed frames
+                # rather than sending them in a burst
+                deadline = time.monotonic()
+                delay = 0
+            stop.wait(delay)
 
     def StreamCameras(self, request, context):
         # The fake drone has one camera, so it is streamed if it is requested,
@@ -134,13 +251,15 @@ class Stream(StreamServiceServicer):
             )
         if not requests:
             self._camera_request = None
+            with self._capture_lock:
+                self._stop_capture()
             return stream_proto.StreamCamerasResponse()
         camera = requests[0]
         dimensions = None
         if camera.HasField('target_resolution'):
             dimensions = RESOLUTION_DIMENSIONS.get(camera.target_resolution)
         self._camera_request = (camera.uri, dimensions)
-        self._start_capture()
+        self._restart_capture()
         return stream_proto.StreamCamerasResponse()
 
     def StreamTelemetry(self, request, context):

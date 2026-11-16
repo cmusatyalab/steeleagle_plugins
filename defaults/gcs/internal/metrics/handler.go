@@ -28,7 +28,7 @@ type FlowFetcher func(ctx context.Context, vehicle string) ([]byte, error)
 // can't be read. Otherwise it answers 200, with the state saying whether
 // the vehicle runs no flow, or Prometheus couldn't be asked, in which case
 // the flow comes without numbers.
-func NewFlowHandler(flows FlowFetcher, d DaemonConfigs, q Querier, log zerolog.Logger) http.HandlerFunc {
+func NewFlowHandler(flows FlowFetcher, d DaemonConfigs, q Querier, orchestratorIP string, log zerolog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		vehicle := r.URL.Query().Get("vehicle")
 		window := r.URL.Query().Get("window")
@@ -54,7 +54,7 @@ func NewFlowHandler(flows FlowFetcher, d DaemonConfigs, q Querier, log zerolog.L
 			writeDetail(w, http.StatusBadGateway, status.Convert(err).Message())
 			return
 		}
-		view, err := BuildView(flowTOML, vehicle, hostnames(r.Context(), d))
+		view, err := BuildView(flowTOML, vehicle, orchestratorIP, hostnames(r.Context(), d))
 		if err != nil {
 			writeDetail(w, http.StatusBadGateway, "the vehicle's flow can't be parsed: "+err.Error())
 			return

@@ -1,48 +1,74 @@
 # SwiftMap
 
-SteelEagle engine plugins for mapping with a [SwiftMap](https://github.com/cmusatyalab/swiftmap) server: `swiftmap` sends frames to the server, and `keyframe` discards the frames the server would not keep before they are sent.
+SteelEagle plugins for mapping with a [SwiftMap](https://github.com/cmusatyalab/swiftmap) server.
+
+```
+vehicle:  camera → preprocess → reachback ══► remote:  swiftmap → SwiftMap server
+                                   ↑                      │
+                                   └─ NFN status ─────────┘  (reachback subscribes to swiftmap)
+```
+
+| Plugin | Runs on | Code | Does |
+| --- | --- | --- | --- |
+| `preprocess` | vehicle | `onboard.py` | Shrinks each frame to the VGGT-Omega model input and sends lossless WebP |
+| `reachback` | vehicle | `reachback.py`, `onboard.py` | Forwards keyframes; sends back stored frames covering a plan's weak targets |
+| `swiftmap` | remote | `remote.py` | Sends frames to the server; turns its plans into reachback requests |
+
+`protocol.py` holds what both sides share; `main.py` starts the plugin eagled names. Each arg's default lives only in its `.plugin.toml`.
+
+## `preprocess`
+
+Does VGGT-Omega's preprocessing on board: center-crop an aspect ratio outside [0.5, 2], then PIL-bicubic resize to the `balanced` shape, whole `patch_size` patches about (`image_resolution`/`patch_size`)² in all (688×384 for 16:9 at 512). Sent lossless, the server's own preprocessing changes nothing, so the model input is exactly what it would make from the full frame, at about a quarter of the bytes. `image_resolution` and `patch_size` must match the server's `VGGT_OMEGA_IMAGE_RESOLUTION`. WebP goes as `CODEC_UNSPECIFIED` (the protocol has no WebP codec yet) and is recognised by its RIFF header.
+
+| Arg | Default | |
+| --- | --- | --- |
+| `image_resolution` | `512` | The server's `VGGT_OMEGA_IMAGE_RESOLUTION` |
+| `patch_size` | `16` | Model patch size, px |
+| `lossless` | `true` | `false` for lossy WebP at `quality` |
+| `quality` | `90` | WebP quality when not lossless |
+| `max_output_size` | `6237184` | Largest frame sent, bytes |
+
+## `reachback`
+
+**Keyframes.** A frame is forwarded if it was taken at least `send_distance` m from the last one forwarded (no GPS fix fails, unless 0) and is a keyframe by the server's optical-flow test: the last keyframe's features moved more than `min_disparity` px on average. Each camera and session is tracked on its own.
+
+**Store.** One frame every 0.2 s per camera, plus every keyframe, with its GPS and gimbal yaw/pitch, in SQLite (newest 6000).
+
+**Reach back.** For each new request in the NFN status, it picks one frame per target, for up to `count` targets: the unsent stored frame seeing it nearest the view's centre, within 25° and 50 m. A target no frame covers gets none. It sends them one at a time, in place of incoming frames as `swiftmap/ReachbackFrame`, then a `swiftmap/ReachbackDone`. While the status says hold, nothing is forwarded.
+
+| Arg | Default | |
+| --- | --- | --- |
+| `remote` | `swiftmap` | Service name of the `swiftmap` engine |
+| `send_distance` | `5.0` | Meters between keyframes; 0 turns it off |
+| `min_disparity` | `40.0` | Px at the frame's resolution; scale with preprocess (14 at 688 wide); 0 turns it off |
+| `max_output_size` | `6237184` | Largest frame sent back, bytes |
 
 ## `swiftmap`
 
-Forwards each camera frame (`RawFrame`, or `EncodedFrame` in JPEG) unchanged, and sends it with the GPS fix it was taken at to a SwiftMap mapping server over TCP. A `RawFrame` is encoded as a JPEG first; a JPEG `EncodedFrame` is sent as it is. H.264 frames are not sent.
+Sends each WebP frame, with its GPS (NaN if none), to the server over TCP on its own thread, and forwards the input unchanged. A plan the server sends back is the next frame's `GenericResult`; its `<LookAt>` targets and `reachback` count become the current request. `{"nfn": "hold"}` / `{"nfn": "release"}` replies set the hold; while held it polls the server every second.
 
-Every frame the engine gets is sent; a frame without a GPS fix is sent with a NaN one. Choosing which frames to send is the job of the `keyframe` engine in front of it. If the server is unreachable the frame is not mapped, and the engine reconnects on the next frame.
-
-When the server plans a next-flight area, the KML it sends back is that frame's result, as it is. Every other result is empty. The engine's result type is `GenericResult`: the vehicle stores each non-empty result in a `ComputeResult` whose `generic_result.payload` is the KML, and missions read it with `GetGenericResult`.
-
-| Arg | Default | Description |
+| Arg | Default | |
 | --- | --- | --- |
-| `server` | `localhost` | Hostname or IP of the SwiftMap mapping server |
+| `server` | `localhost` | SwiftMap server host |
 | `server_port` | `43322` | Its TCP port |
-| `jpeg_quality` | `95` | JPEG quality `RawFrame`s are encoded at |
-| `max_output_size` | `1048576` | Largest result sent, in bytes |
+| `max_output_size` | `1048576` | Largest result (KML), bytes |
 
-### Wire protocol
+**Wire.** `[BE uint32 size][WebP][3 × BE float64 lat, lon, alt][uint8 kind]`, kind 0 frame, 1 sent back, 2 end (no image), 3 poll. Reply: 3 native float64 (status, keyframes, total), BE uint32 length, payload.
 
-The engine sends `[uint32 size][JPEG][3 × float64 lat, lon, alt]`, big-endian. The server replies with 3 native float64 (status, keyframe count, total frames; status 1 is a keyframe), then a big-endian uint32 length and that many bytes of KML (0 for an ordinary ack).
+## Delivery in NFN mode
 
-## `keyframe`
+Uriel never resends, so NFN messages are made reliable on top:
 
-Early discard for SwiftMap. A camera frame (`RawFrame`, or `EncodedFrame` in JPEG) is forwarded unchanged if it passes two checks, and dropped otherwise, so it never crosses the network. It has no result.
+- **Status** (`swiftmap/NfnStatus`, `{"hold": bool, "request": {"id", "targets", "count"} | null}`) goes when it changes and every second. Request ids are never reused.
+- **Frames sent back** are stamped (8-byte request id, 4-byte number; on the end, the count). Reachback reads each outcome from its subscription: skipped or timed out goes again, up to 3 tries; the end until it arrives. After a disconnect or 30 s without word, what is out goes again without counting a try; nothing goes while no status has come for 3 s.
+- **Duplicates** are dropped: reachback starts each request once; swiftmap passes each frame and the end to the server once.
 
-1. **Distance.** The frame was taken at least `send_distance` meters from the last frame forwarded. A frame without a GPS fix fails, unless `send_distance` is 0, which turns this check off.
-2. **Keyframe.** The frame is a keyframe by the SwiftMap server's own optical-flow test (below). A `min_disparity` of 0 turns this check off.
+## Running by hand
 
-The distance is checked first. It is cheaper, and a frame dropped for being too close never reaches the keyframe test, so the last keyframe is always the last frame forwarded. A frame that passes the distance check but is not a keyframe does not move where the distance is measured from. The distance is measured from the last frame this engine forwarded, whether or not the server got it.
-
-The keyframe test is the SwiftMap server's own keyframe selector, ported from `swiftmap/server/transport/keyframe_selector`. The features of the last keyframe are tracked into each frame with Lucas-Kanade optical flow. The frame is the next keyframe if they moved more than `min_disparity` pixels on average. With the same threshold, it keeps the same frames as the server. A frame with too few features to track is dropped, and the next frame is tried as the keyframe instead. Each producer (camera) is tracked on its own, and starts over with each new session or resolution.
-
-The disparity is the server's: the mean of |dx| and |dy| together, not the mean Euclidean displacement, so a feature that moves 60 px sideways counts 30. It is kept so that one threshold means the same in both places; change it in both together.
-
-Run it on the daemon whose camera takes the frames, between the camera and the `swiftmap` engine (or a JPEG encoder in front of it). Since it already selects keyframes, run the server with `SWIFTMAP_MIN_DISPARITY=0` (or the keyframe filter off in its viewer), so it keeps every frame it gets. Every 5 s it logs how many frames it kept, and how many it dropped for each reason (no GPS fix, within `send_distance`, not a keyframe).
-
-| Arg | Default | Description |
-| --- | --- | --- |
-| `send_distance` | `5.0` | Meters of travel between frames forwarded; 0 turns the distance check off |
-| `min_disparity` | `40.0` | Disparity from the last keyframe, in pixels at the frame's resolution, that makes a frame the next keyframe; 0 turns the keyframe check off |
-
-## Development
-
-```
-pixi run -e test test   # all tests, against a stand-in SwiftMap server
+```sh
+STEELEAGLE_PLUGIN=swiftmap.plugin.toml STEELEAGLE_PLUGIN_ARGS='{"server": "localhost"}' \
+  STEELEAGLE_ENGINE_ENDPOINT=swiftmap pixi run start
+STEELEAGLE_PLUGIN=reachback.plugin.toml STEELEAGLE_PLUGIN_ARGS='{"min_disparity": 14}' \
+  STEELEAGLE_ENGINE_ENDPOINT=reachback STEELEAGLE_REMOTE_QUALIFIER=<remote daemon IP> pixi run start
+pixi run -e test test
 ```

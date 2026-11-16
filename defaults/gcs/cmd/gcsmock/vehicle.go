@@ -8,6 +8,7 @@ import (
 	common "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/common"
 	telemetrypb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/telemetry"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -112,6 +113,41 @@ type Vehicle struct {
 // NewVehicle returns a landed vehicle at home with a full battery.
 func NewVehicle(name string, home LatLon) *Vehicle {
 	return &Vehicle{name: name, home: home, pos: home, mode: Landed, battery: 100}
+}
+
+// CameraPose is where the vehicle's camera is and points: its position,
+// altitude above home, yaw (its heading, as the gimbal doesn't yaw) and
+// gimbal pitch, and whether the vehicle is in the air.
+func (v *Vehicle) CameraPose() (pos LatLon, alt, yaw, pitch float64, flying bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.pos, v.alt, v.heading, v.gimbalPitch, v.mode != Landed && v.alt > 0
+}
+
+// Home is where the vehicle took off from.
+func (v *Vehicle) Home() LatLon {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.home
+}
+
+// SetBattery sets the battery's charge, in percent.
+func (v *Vehicle) SetBattery(percent float64) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.battery = math.Max(0, math.Min(100, percent))
+}
+
+// batteryWarning is the warning for the charge: low below 30%, critical
+// below 15%.
+func batteryWarning(percent float64) telemetrypb.AlertInfo_BatteryWarning {
+	switch {
+	case percent < 15:
+		return telemetrypb.AlertInfo_BATTERY_WARNING_CRITICAL
+	case percent < 30:
+		return telemetrypb.AlertInfo_BATTERY_WARNING_LOW
+	}
+	return telemetrypb.AlertInfo_BATTERY_WARNING_UNSPECIFIED
 }
 
 // TakeOff climbs (or descends) to alt meters. It succeeds if already airborne.
@@ -354,6 +390,31 @@ func (v *Vehicle) stepMission(dt time.Duration) {
 	v.curVx = MissionSpeed
 }
 
+// missionCorner is the corner of the square the current leg flies to.
+func (v *Vehicle) missionCorner() LatLon {
+	ahead := MissionSide - v.legElapsed.Seconds()*MissionSpeed
+	h := v.heading * math.Pi / 180
+	return offsetFrom(v.pos, ahead*math.Cos(h), ahead*math.Sin(h))
+}
+
+// setpoint is the driver's setpoint: on a mission, the corner it flies to,
+// as a GlobalPosition at the mission's altitude above sea level; nil
+// otherwise, as the Anafi clears it on Hold, Land and return to home.
+func (v *Vehicle) setpoint() *anypb.Any {
+	if v.mode != Mission {
+		return nil
+	}
+	c := v.missionCorner()
+	a, err := anypb.New(common.GlobalPosition_builder{
+		Latitude: proto.Float64(c.Lat), Longitude: proto.Float64(c.Lon),
+		Altitude: proto.Float32(float32(groundAltitude + missionAltitude)),
+	}.Build())
+	if err != nil {
+		return nil
+	}
+	return a
+}
+
 func (v *Vehicle) telemetryMode() telemetrypb.Mode {
 	switch v.mode {
 	case TakingOff:
@@ -385,6 +446,7 @@ func (v *Vehicle) Telemetry(now time.Time) *telemetrypb.Telemetry {
 		GpsInfo:     telemetrypb.GpsInfo_builder{Satellites: proto.Uint32(satellites)}.Build(),
 		AlertInfo: telemetrypb.AlertInfo_builder{
 			MagnetometerWarning: telemetrypb.AlertInfo_MAGNETOMETER_WARNING_UNSPECIFIED,
+			BatteryWarning:      batteryWarning(v.battery),
 		}.Build(),
 		PositionInfo: telemetrypb.PositionInfo_builder{
 			Home: common.GlobalPosition_builder{
@@ -404,6 +466,7 @@ func (v *Vehicle) Telemetry(now time.Time) *telemetrypb.Telemetry {
 				XVel: proto.Float32(float32(v.curVx)), YVel: proto.Float32(float32(v.curVy)),
 				ZVel: proto.Float32(float32(v.curVz)), AngularVel: proto.Float32(float32(v.curYr)),
 			}.Build(),
+			Setpoint: v.setpoint(),
 		}.Build(),
 		GimbalInfo: telemetrypb.GimbalInfo_builder{
 			PoseBody: common.Pose_builder{Pitch: proto.Float32(float32(v.gimbalPitch))}.Build(),

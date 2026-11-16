@@ -2,18 +2,19 @@
 // docs/superpowers/specs/2026-10-16-gcs-flow-builder-design.md.
 //
 // A flow is bound to one vehicle (its full service name); its producers are
-// that vehicle's streams and its engines are engine services on the
-// vehicle's daemon ("local") or the orchestrator ("remote"). Producers and
-// engines are named "{host}.{name}" as in the flow template, where host is a
-// daemon's hostname or address. The document stores references only (host
+// that vehicle's streams, or producers its engines advertise, and its engines
+// are engine services on the vehicle's daemon ("local") or the orchestrator
+// ("remote"). Engines are named "{host}.{name}" as in the flow template, where
+// host is a daemon's hostname or address; vehicle producers
+// "{vehicle}.{stream}" and engine producers "{host}.{engine}.{producer}". The document stores references only (host
 // and stream, template name); types and events are looked up in the catalog
 // (flowCatalog.js) whenever they're needed, so a flow loaded after the setup
 // changed shows what no longer resolves rather than silently dropping it.
 // Every function here is pure: it returns a new flow and never mutates its
 // input.
 import {
-    engineLocation, findDaemon, findVehicle, hostLabel, resolveNode, serviceName, shortType,
-    splitTemplateName, templateName,
+    engineLocation, findDaemon, findTemplateEngine, findVehicle, hostLabel, isEngineProducer, orchestrator, resolveNode,
+    serviceName, shortType, splitTemplateName, templateName,
 } from './flowCatalog.js';
 import { daemonRequest, describeFailure } from './daemonApi.js';
 import { daemonOf, displayName } from './vehicleNames.js';
@@ -42,13 +43,18 @@ export function nodeById(flow, id) {
     return flow.nodes.find((n) => n.id === id) ?? null;
 }
 
-// A node's template name: "{vehicle}.{stream}" for a producer, where the
-// vehicle is the flow's (only a label: each Deploy target uses its own stream
-// of that name), and "{host}.{name}" for an engine.
+// A node's template name: "{vehicle}.{stream}" for a vehicle producer, where
+// the vehicle is the flow's (only a label: each Deploy target uses its own
+// stream of that name), "{host}.{engine}.{producer}" for an engine producer,
+// and "{host}.{name}" for an engine.
 export function nodeLabel(flow, node) {
+    if (isEngineProducer(node)) return `${node.engine}.${node.producer}`;
     if (node.kind === 'producer') return flow.vehicle ? `${displayName(flow.vehicle)}.${node.stream}` : node.stream;
     return node.engine;
 }
+
+// Producers on a stream of the flow's vehicle, as opposed to an engine's.
+const isVehicleProducer = (node) => node.kind === 'producer' && !isEngineProducer(node);
 
 // The name a node has in the flow template: the same template name the
 // builder shows.
@@ -56,12 +62,62 @@ export function exportName(flow, catalog, node) {
     return nodeLabel(flow, node);
 }
 
+// A flow config names its nodes relative to the vehicle that runs it, which
+// qualifies them itself (internal/fleet/flownames.go), so it holds no host
+// names or addresses: vehicle.<stream>, local.<engine>.<producer>, and
+// local.<engine> or remote.<engine> for an engine on the vehicle's daemon or
+// the orchestrator. Deploy sends a flow with these names, and the TOML export
+// and import use them too.
+const VEHICLE_PREFIX = 'vehicle.';
+const LOCAL_PREFIX = 'local.';
+const REMOTE_PREFIX = 'remote.';
+
+// A node's name in a flow config for the flow's vehicle (see above). Throws
+// for an engine (or an engine producer's engine) on neither the vehicle's
+// daemon nor the orchestrator, and for a producer of an orchestrator engine,
+// which a vehicle can't take.
+export function flowName(flow, catalog, node) {
+    if (isVehicleProducer(node)) return VEHICLE_PREFIX + node.stream;
+    const parts = splitTemplateName(node.engine);
+    const location = engineLocation(catalog, flow.vehicle, node.engine);
+    if (!parts || location === null) {
+        throw new Error(`${nodeLabel(flow, node)} is neither on the vehicle's daemon nor on the orchestrator`);
+    }
+    if (isEngineProducer(node)) {
+        if (location !== 'local') throw new Error(`${nodeLabel(flow, node)} is a producer of an engine not on the vehicle's daemon`);
+        return `${LOCAL_PREFIX}${parts.bare}.${node.producer}`;
+    }
+    return `${location}.${parts.bare}`;
+}
+
+// The template name (nodeLabel) of a flow config node name for `vehicle`:
+// the inverse of flowName. Throws for a name with none of the prefixes, or
+// whose daemon the catalog doesn't list.
+function templateNameOf(catalog, vehicle, name) {
+    const rest = (prefix) => (name.startsWith(prefix) && name.length > prefix.length ? name.slice(prefix.length) : null);
+    const stream = rest(VEHICLE_PREFIX);
+    if (stream !== null) return `${displayName(vehicle)}.${stream}`;
+    const local = rest(LOCAL_PREFIX);
+    if (local !== null) {
+        const daemon = findDaemon(catalog, daemonOf(vehicle));
+        if (!daemon) throw new Error(`${name}: ${displayName(vehicle)}'s daemon isn't in the flow catalog`);
+        return `${hostLabel(catalog, daemon)}.${local}`;
+    }
+    const remote = rest(REMOTE_PREFIX);
+    if (remote !== null) {
+        const daemon = orchestrator(catalog);
+        if (!daemon) throw new Error(`${name}: the orchestrator isn't in the flow catalog`);
+        return `${hostLabel(catalog, daemon)}.${remote}`;
+    }
+    throw new Error(`flow node ${name} isn't named vehicle.<stream>, local.<engine> or remote.<engine>; export the flow again from the Flow Builder`);
+}
+
 // The producer (other than `exceptId`) on a primary camera, if any. Primary
 // cameras can't stream alongside each other, so a flow has at most one.
 function primaryProducer(flow, catalog, exceptId) {
     const vehicle = findVehicle(catalog, flow.vehicle);
     const primary = new Set(vehicle?.streams.filter((s) => s.primary).map((s) => s.name) ?? []);
-    return flow.nodes.find((n) => n.kind === 'producer' && n.id !== exceptId && primary.has(n.stream));
+    return flow.nodes.find((n) => isVehicleProducer(n) && n.id !== exceptId && primary.has(n.stream));
 }
 
 // The streams a producer can be on: the bound vehicle's streams no other
@@ -70,7 +126,7 @@ function primaryProducer(flow, catalog, exceptId) {
 export function streamChoices(flow, catalog, nodeId = null) {
     const vehicle = findVehicle(catalog, flow.vehicle);
     const own = nodeId && nodeById(flow, nodeId)?.stream;
-    const others = new Set(flow.nodes.filter((n) => n.kind === 'producer' && n.id !== nodeId).map((n) => n.stream));
+    const others = new Set(flow.nodes.filter((n) => isVehicleProducer(n) && n.id !== nodeId).map((n) => n.stream));
     const blocker = primaryProducer(flow, catalog, nodeId);
     const choices = (vehicle?.streams ?? [])
         .filter((s) => !others.has(s.name))
@@ -100,9 +156,16 @@ export function isEnginePlaced(flow, catalog, service) {
     return flow.nodes.some((n) => n.kind === 'engine' && serviceName(catalog, n.engine).name === service);
 }
 
+// Whether the producer `producer` of the catalog engine `service` (a full
+// service name) is on the canvas, however its node spells the host.
+export function isEngineProducerPlaced(flow, catalog, service, producer) {
+    return flow.nodes.some((n) => isEngineProducer(n) && n.producer === producer
+        && serviceName(catalog, n.engine).name === service);
+}
+
 export function addProducer(flow, catalog, stream, position) {
     if (!flow.vehicle) throw new Error('Select a vehicle first');
-    if (flow.nodes.some((n) => n.kind === 'producer' && n.stream === stream)) {
+    if (flow.nodes.some((n) => isVehicleProducer(n) && n.stream === stream)) {
         throw new Error(`${displayName(flow.vehicle)}.${stream} is already on the canvas`);
     }
     const node = { id: nextId(flow.nodes, 'p'), kind: 'producer', stream, tokens: DEFAULT_TOKENS, position };
@@ -120,6 +183,28 @@ export function addEngine(flow, catalog, service, position) {
     }
     if (isEnginePlaced(flow, catalog, service)) throw new Error(`${engine} is already on the canvas`);
     const node = { id: nextId(flow.nodes, 'e'), kind: 'engine', engine, position };
+    return { ...flow, nodes: [...flow.nodes, node] };
+}
+
+// Why the producers of `engine` (a template name) can't feed a flow on the
+// flow's vehicle, or null if they can: the vehicle only takes the producers of
+// engines on its own daemon, since Uriel's producers run with its client.
+export function engineProducerProblem(flow, catalog, engine) {
+    if (engineLocation(catalog, flow.vehicle, engine) === 'local') return null;
+    const vehicle = flow.vehicle ? `${displayName(flow.vehicle)}'s daemon` : "the vehicle's daemon";
+    return `${engine} is not on ${vehicle}; only producers of engines on the vehicle's daemon can be used`;
+}
+
+// `service` is the catalog service name of the engine advertising
+// `producer`; the node stores the engine's template name. The engine must be
+// on the vehicle's daemon (engineProducerProblem).
+export function addEngineProducer(flow, catalog, service, producer, position) {
+    if (!flow.vehicle) throw new Error('Select a vehicle first');
+    const engine = templateName(catalog, service);
+    const problem = engineProducerProblem(flow, catalog, engine);
+    if (problem) throw new Error(problem);
+    if (isEngineProducerPlaced(flow, catalog, service, producer)) throw new Error(`${engine}.${producer} is already on the canvas`);
+    const node = { id: nextId(flow.nodes, 'p'), kind: 'producer', engine, producer, tokens: DEFAULT_TOKENS, position };
     return { ...flow, nodes: [...flow.nodes, node] };
 }
 
@@ -143,11 +228,11 @@ export function removeEdge(flow, id) {
     return { ...flow, edges: flow.edges.filter((e) => e.id !== id) };
 }
 
-// Producers are streams of the bound vehicle, so binding a different
-// vehicle drops them (and their edges); engines stay.
+// Vehicle producers are streams of the bound vehicle, so binding a different
+// vehicle drops them (and their edges); engines and their producers stay.
 export function setVehicle(flow, vehicle) {
     if (flow.vehicle === vehicle) return flow;
-    const producers = new Set(flow.nodes.filter((n) => n.kind === 'producer').map((n) => n.id));
+    const producers = new Set(flow.nodes.filter(isVehicleProducer).map((n) => n.id));
     return {
         ...flow,
         vehicle,
@@ -162,6 +247,15 @@ const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const isPosition = (v) => isObject(v) && Number.isFinite(v.x) && Number.isFinite(v.y);
 
 function parseNode(n) {
+    if (n.kind === 'producer' && n.engine !== undefined) {
+        if (typeof n.engine !== 'string' || typeof n.producer !== 'string') {
+            throw new Error(`node ${n.id}: engine producer nodes need an engine template name and a producer name`);
+        }
+        return {
+            id: n.id, kind: 'producer', engine: n.engine, producer: n.producer,
+            tokens: n.tokens ?? DEFAULT_TOKENS, position: n.position,
+        };
+    }
     if (n.kind === 'producer') {
         if (typeof n.stream !== 'string') throw new Error(`node ${n.id}: producer nodes need a stream name`);
         return { id: n.id, kind: 'producer', stream: n.stream, tokens: n.tokens ?? DEFAULT_TOKENS, position: n.position };
@@ -235,22 +329,24 @@ export function acceptsAll(accepts, types) {
     return accepts.includes('*') || types.every((t) => t === UNKNOWN_TYPE || accepts.includes(t));
 }
 
-// What a filter forwards: unknown, since engine plugin files don't declare
-// what a filter replaces its input with (an H.264 encoder takes RawFrames and
-// forwards EncodedFrames), so whatever follows a filter isn't type-checked.
+// What an untyped engine forwards: unknown, since it has no readable plugin
+// file to declare it, so whatever follows it isn't type-checked.
 export const UNKNOWN_TYPE = '*';
 
-function isFilter(flow, catalog, node) {
-    return node?.kind === 'engine' && resolveNode(flow, catalog, node).category === 'filter';
-}
-
-// The source types reaching an engine: its producer inputs' stream types plus
-// whatever its engine parent forwards. Engines forward the source data they
-// receive; their results travel as events, not along output edges.
+// The source types an engine forwards along its output edges. An engine
+// whose `forwards` is '*' passes on every type that reaches it: its producer
+// inputs' types plus whatever its engine parent forwards. One that forwards one
+// of its input types passes on only that type, when it arrives (or something
+// of unknown type does). One that forwards any other type converts what it
+// takes (an encoder or a decoder), so it sends on that type whenever anything
+// arrives. New data an engine makes leaves as its producers' own inputs, and
+// its results travel as events, not along output edges.
 export function forwardedTypes(flow, catalog, nodeId, seen = new Set()) {
     if (seen.has(nodeId)) return [];
     seen.add(nodeId);
-    if (isFilter(flow, catalog, nodeById(flow, nodeId))) return [UNKNOWN_TYPE];
+    const node = nodeById(flow, nodeId);
+    const self = node?.kind === 'engine' ? resolveNode(flow, catalog, node) : null;
+    if (self?.resolved && !self.typed) return [UNKNOWN_TYPE];
     const types = [];
     for (const edge of flow.edges) {
         if (edge.kind !== 'output' || edge.target !== nodeId) continue;
@@ -261,7 +357,10 @@ export function forwardedTypes(flow, catalog, nodeId, seen = new Set()) {
             : forwardedTypes(flow, catalog, source.id, seen);
         for (const t of arriving) if (!types.includes(t)) types.push(t);
     }
-    return types;
+    const forwards = self?.forwards ?? '*';
+    if (forwards === '*') return types;
+    if (!self.accepts.includes(forwards)) return types.length ? [forwards] : [];
+    return types.some((t) => t === forwards || t === UNKNOWN_TYPE) ? [forwards] : [];
 }
 
 // What an output edge from `source` carries.
@@ -394,6 +493,7 @@ const TIMEOUT_PATTERN = /^\d+(\.\d+)?(ms|s|m)$/;
 // What makes two nodes the same one: its resolved daemon and bare name, so
 // "swap03.yolo" and "100.64.0.2.yolo" count as one engine.
 function nodeKey(catalog, node) {
+    if (isEngineProducer(node)) return `ep:${serviceName(catalog, node.engine).name ?? node.engine}.${node.producer}`;
     if (node.kind === 'producer') return `p:${node.stream}`;
     return `e:${serviceName(catalog, node.engine).name ?? node.engine}`;
 }
@@ -434,10 +534,15 @@ export function validateFlow(flow, catalog) {
             continue;
         }
         resolved.add(node.id);
+        const ofEngine = node.kind === 'engine' || isEngineProducer(node);
         if (node.kind === 'engine' && resolution.location === null) {
             errors.push({ nodeId: node.id, message: `${label}: neither on ${flow.vehicle ? `${displayName(flow.vehicle)}'s daemon` : "the vehicle's daemon"} nor on the orchestrator` });
         }
-        const engineProblem = node.kind === 'engine' ? resolution.problem : null;
+        if (isEngineProducer(node)) {
+            const problem = engineProducerProblem(flow, catalog, node.engine);
+            if (problem) errors.push({ nodeId: node.id, message: `${label}: ${problem}` });
+        }
+        const engineProblem = ofEngine ? resolution.problem : null;
         if (!resolution.typed) {
             const why = engineProblem ? ` (${engineProblem})` : '';
             warnings.push({ nodeId: node.id, message: `${label}: no type information${why}; connections are not type-checked` });
@@ -449,7 +554,7 @@ export function validateFlow(flow, catalog) {
         }
     }
 
-    const primaries = flow.nodes.filter((n) => n.kind === 'producer' && resolved.has(n.id) && resolveNode(flow, catalog, n).stream?.primary);
+    const primaries = flow.nodes.filter((n) => isVehicleProducer(n) && resolved.has(n.id) && resolveNode(flow, catalog, n).stream?.primary);
     for (const node of primaries.slice(1)) {
         errors.push({
             nodeId: node.id,
@@ -459,12 +564,6 @@ export function validateFlow(flow, catalog) {
 
     for (const edge of flow.edges) {
         if (!resolved.has(edge.source) || !resolved.has(edge.target)) continue;
-        if (edge.kind === 'output' && isFilter(flow, catalog, nodeById(flow, edge.source))) {
-            warnings.push({
-                edgeId: edge.id,
-                message: `${nodeLabel(flow, nodeById(flow, edge.source))} → ${nodeLabel(flow, nodeById(flow, edge.target))}: ${nodeLabel(flow, nodeById(flow, edge.source))} is a filter, so what it forwards is not type-checked`,
-            });
-        }
         const problem = edgeProblem(flow, catalog, edge);
         if (problem) {
             const where = `${nodeLabel(flow, nodeById(flow, edge.source))} → ${nodeLabel(flow, nodeById(flow, edge.target))}`;
@@ -519,30 +618,43 @@ export function toTemplate(flow, catalog) {
     };
 }
 
+// The flow's template when it can name the mission's engines (the DSL routes
+// name them as in the mission built for the flow's vehicle), else null: the
+// flow is empty, the catalog isn't loaded, or the flow has errors.
+export function templateIfValid(flow, catalog) {
+    if (!flow || flow.nodes.length === 0 || !catalog) return null;
+    try {
+        return validateFlow(flow, catalog).errors.length === 0 ? toTemplate(flow, catalog) : null;
+    } catch {
+        return null;
+    }
+}
+
 // The flow as a config.FlowConfig TOML document: top-level [[producers]],
-// [[engines]] and [[edges]] tables. Engines carry their location relative to
-// the flow's vehicle. Callbacks have no TOML representation, so they're left
-// out (and counted in a comment).
+// [[engines]] and [[edges]] tables, with the names and locations Deploy would
+// send the flow's vehicle (flowName). Callbacks have no TOML representation,
+// so they're left out (and counted in a comment).
 export function toFlowToml(flow, catalog) {
     const { errors } = validateFlow(flow, catalog);
     if (errors.length) throw new Error(`flow has ${errors.length} error(s); fix them before exporting TOML`);
 
-    const template = toTemplate(flow, catalog);
-    const producers = template.producers.flatMap((p) => [
+    const byId = new Map(flow.nodes.map((n) => [n.id, n]));
+    const name = (node) => flowName(flow, catalog, node);
+    const producers = flow.nodes.filter((n) => n.kind === 'producer').flatMap((n) => [
         '[[producers]]',
-        `name = ${tomlString(p.name)}`,
+        `name = ${tomlString(name(n))}`,
         // Always written: left out, Uriel computes its own count, not 1
-        `tokens = ${p.tokens}`,
+        `tokens = ${n.tokens}`,
     ]);
-    const engines = template.engines.flatMap((e) => [
+    const engines = flow.nodes.filter((n) => n.kind === 'engine').flatMap((n) => [
         '[[engines]]',
-        `name = ${tomlString(e.name)}`,
-        `location = ${tomlString(engineLocation(catalog, flow.vehicle, e.name))}`,
+        `name = ${tomlString(name(n))}`,
+        `location = ${tomlString(engineLocation(catalog, flow.vehicle, n.engine))}`,
     ]);
-    const edges = template.edges.flatMap((e) => [
+    const edges = flow.edges.filter((e) => e.kind === 'output').flatMap((e) => [
         '[[edges]]',
-        `from = ${tomlString(e.from)}`,
-        `to = ${tomlString(e.to)}`,
+        `from = ${tomlString(name(byId.get(e.source)))}`,
+        `to = ${tomlString(name(byId.get(e.target)))}`,
         `timeout = ${tomlString(e.timeout)}`,
     ]);
 
@@ -559,29 +671,29 @@ export function toFlowToml(flow, catalog) {
 const COLUMN_WIDTH = 250;
 const ROW_HEIGHT = 150;
 
-// The inverse of toTemplate for `vehicle`. Producers become the vehicle's
-// streams of their names, whatever vehicle their prefix names. An engine name
-// with no host (an old TOML export, where bare meant the vehicle's own daemon)
-// is qualified with that daemon's name. Engine hosts and engines the catalog doesn't know are kept, so
-// validateFlow flags them. Nodes are laid out in columns: producers, then
+// The inverse of toTemplate for `vehicle`. A producer named
+// "{host}.{engine}.{producer}" for a catalog engine becomes that engine's
+// producer (kept even if the engine doesn't advertise it, so validateFlow
+// flags it); any other becomes the vehicle's stream of its name, whatever
+// vehicle its prefix names. Engine hosts and engines the catalog doesn't
+// know are kept, so validateFlow flags them. Nodes are laid out in columns: producers, then
 // engines by depth.
 export function fromTemplate(template, catalog, vehicle) {
-    const daemon = vehicle ? findDaemon(catalog, daemonOf(vehicle)) : null;
-    const home = daemon ? hostLabel(catalog, daemon) : null;
     // The server sends empty lists as JSON null.
     const tProducers = template.producers ?? [];
     const tEngines = template.engines ?? [];
     const tEdges = template.edges ?? [];
     const producers = tProducers.map((p, i) => {
         const parts = splitTemplateName(p.name);
-        return {
-            id: `p${i + 1}`, kind: 'producer', stream: parts?.bare ?? p.name,
-            tokens: p.tokens ?? DEFAULT_TOKENS, position: { x: 0, y: 0 },
-        };
+        const base = { id: `p${i + 1}`, kind: 'producer', tokens: p.tokens ?? DEFAULT_TOKENS, position: { x: 0, y: 0 } };
+        if (catalog && parts && splitTemplateName(parts.host) && findTemplateEngine(catalog, parts.host)) {
+            return { ...base, engine: parts.host, producer: parts.bare };
+        }
+        return { ...base, stream: parts?.bare ?? p.name };
     });
     const engines = tEngines.map((e, i) => ({
         id: `e${i + 1}`, kind: 'engine',
-        engine: home && !splitTemplateName(e.name) ? `${home}.${e.name}` : e.name, position: { x: 0, y: 0 },
+        engine: e.name, position: { x: 0, y: 0 },
     }));
     const ids = new Map();
     for (const [i, p] of tProducers.entries()) if (!ids.has(p.name)) ids.set(p.name, producers[i].id);
@@ -615,11 +727,24 @@ export function fromTemplate(template, catalog, vehicle) {
     return { ...emptyFlow(), vehicle, nodes, edges };
 }
 
-// Parses flow TOML text on the server and builds a flow for `vehicle`.
-// Throws the server's reason (unknown keys, the old format, parse errors).
+// The template of a flow config parsed by the server, whose nodes are named
+// relative to `vehicle` (flowName), with every name made a template name.
+export function fromFlowConfig(config, catalog, vehicle) {
+    const name = (n) => templateNameOf(catalog, vehicle, n);
+    return {
+        vehicle,
+        producers: (config.producers ?? []).map((p) => ({ ...p, name: name(p.name) })),
+        engines: (config.engines ?? []).map((e) => ({ ...e, name: name(e.name) })),
+        edges: (config.edges ?? []).map((e) => ({ ...e, from: name(e.from), to: name(e.to) })),
+    };
+}
+
+// Parses flow TOML text on the server and builds a flow for `vehicle`. Throws
+// the server's reason (unknown keys, the old format, parse errors), or why a
+// node name isn't one a flow config gives it (flowName).
 export async function importFlowToml(text, catalog, vehicle) {
     const result = await daemonRequest('POST', '/api/flows/from_toml', { toml: text });
     const failure = describeFailure(result);
     if (failure) throw new Error(failure);
-    return fromTemplate(result.body, catalog, vehicle);
+    return fromTemplate(fromFlowConfig(result.body, catalog, vehicle), catalog, vehicle);
 }

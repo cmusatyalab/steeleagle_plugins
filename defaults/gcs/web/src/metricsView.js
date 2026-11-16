@@ -19,6 +19,11 @@ const PERCENT = 100;
 // Below this many milliseconds, a time shows a decimal (e.g. "0.2 ms").
 const WHOLE_MS_FROM = 1;
 const NONE = '–';
+// How an edge that crosses the network is drawn. Its label is small, so it
+// fits in the gap between the nodes.
+const NETWORK_EDGE_DASH = '6 4';
+export const EDGE_LABEL_FONT_SIZE = 9;
+const EDGE_LABEL_PADDING = [2, 1];
 
 // Positions (top-left corners) of the nodes, left to right along the edges.
 export function layout(nodes, edges) {
@@ -43,12 +48,37 @@ export function formatSeconds(s) {
     return ms < WHOLE_MS_FROM ? `${ms.toFixed(1)} ms` : `${Math.round(ms)} ms`;
 }
 
+// A time Prometheus estimated from a histogram's buckets (a median or p95),
+// marked as approximate.
+export function formatEstimate(s) {
+    return s == null ? NONE : `≈${formatSeconds(s)}`;
+}
+
+// Why the medians and p95s are approximate, for where they are shown.
+export const ESTIMATE_NOTE =
+    'Medians and p95s (≈) are estimated from histogram buckets, so a time anywhere in a wide bucket reads about the same; means are exact.';
+
 export function formatShare(x) {
     return x == null ? NONE : `${Math.round(x * PERCENT)}%`;
 }
 
 export function formatRate(r) {
     return r == null ? NONE : `${r.toFixed(1)}/s`;
+}
+
+// An edge that crosses the network is dashed, and labeled with the round
+// trip's mean over the window, what frames crossing it typically see, when
+// there is one.
+function networkEdge(network) {
+    const style = { strokeDasharray: NETWORK_EDGE_DASH };
+    const rtt = network?.rtt_mean_seconds;
+    if (rtt == null) return { style };
+    return {
+        style,
+        label: `RTT ${formatSeconds(rtt)}`,
+        labelStyle: { fontSize: EDGE_LABEL_FONT_SIZE },
+        labelBgPadding: EDGE_LABEL_PADDING,
+    };
 }
 
 // React Flow's nodes and edges for a view from /api/metrics/flow.
@@ -61,6 +91,11 @@ export function toReactFlow(view) {
             position: at[n.id],
             data: { kind: n.kind, label: n.label, host: n.host, metrics: n.metrics, bottleneck: n.bottleneck },
         })),
-        edges: view.edges.map((e) => ({ id: `${e.from}->${e.to}`, source: e.from, target: e.to })),
+        edges: view.edges.map((e) => ({
+            id: `${e.from}->${e.to}`,
+            source: e.from,
+            target: e.to,
+            ...(e.crosses_network ? networkEdge(view.network) : {}),
+        })),
     };
 }

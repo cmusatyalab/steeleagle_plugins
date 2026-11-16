@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -580,13 +581,13 @@ func TestCompileWithFlow(t *testing.T) {
 	if b.Arch != "amd64" || b.Plugin != nil {
 		t.Errorf("arch %q plugin %q", b.Arch, b.Plugin)
 	}
-	if !strings.Contains(string(b.Flow), "100.64.0.1.yolo") {
+	if !strings.Contains(string(b.Flow), `name = "local.yolo"`) {
 		t.Errorf("flow %s", b.Flow)
 	}
-	if got := manifestEngines(t, b.Manifest); !reflect.DeepEqual(got, []string{"100.64.0.1.yolo"}) {
+	if got := manifestEngines(t, b.Manifest); !reflect.DeepEqual(got, []string{"local.yolo"}) {
 		t.Errorf("manifest engines %v", got)
 	}
-	eq(t, engineIdent(t, b.Ast), "DetectionEngine_100_64_0_1_yolo")
+	eq(t, engineIdent(t, b.Ast), "DetectionEngine_local_yolo")
 }
 
 func TestCompileFlowUnknownVehicleResolvesOnOrchestrator(t *testing.T) {
@@ -600,7 +601,8 @@ func TestCompileFlowUnknownVehicleResolvesOnOrchestrator(t *testing.T) {
 	if rec.Code != 200 || len(f.builds) != 1 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
-	if !strings.Contains(string(f.builds[0].Flow), testGCSIP+".yolo") {
+	// Resolved for a target on the orchestrator's daemon, where yolo is local
+	if !strings.Contains(string(f.builds[0].Flow), `name = "local.yolo"`) {
 		t.Errorf("flow %s", f.builds[0].Flow)
 	}
 }
@@ -612,7 +614,7 @@ func TestCompileFlowDesignedForNamedHost(t *testing.T) {
 	if rec.Code != 200 || !reflect.DeepEqual(decodeMap(t, rec), map[string]any{"ok": true}) {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
-	eq(t, engineIdent(t, f.builds[0].Ast), "DetectionEngine_100_64_0_2_yolo")
+	eq(t, engineIdent(t, f.builds[0].Ast), "DetectionEngine_local_yolo")
 }
 
 func TestCompileFlowCheckFailure(t *testing.T) {
@@ -650,15 +652,119 @@ func TestCompileEngineReferenceWithoutFlow(t *testing.T) {
 	}
 }
 
-func TestBuildAndRenderKeepEngineNamesVerbatim(t *testing.T) {
+func TestBuildEngineReferenceWithoutFlow(t *testing.T) {
 	f := engineFake(t)
 	s := newService(t, f)
 	body := trackBody(t, "yolo", nil, func(m map[string]any) { m["arch"] = "arm64" })
-	if rec := do(s.ServeBuild, "POST", "/api/build", body); rec.Code != 200 {
-		t.Fatalf("build status %d: %s", rec.Code, rec.Body)
+	rec := do(s.ServeBuild, "POST", "/api/build", body)
+	want := "Build failed for arm64: mission uses engine yolo in trk.Engine, but the flow has no such engine"
+	if rec.Code != 422 || decodeMap(t, rec)["detail"] != want {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
-	eq(t, engineIdent(t, f.builds[0].Ast), "DetectionEngine_yolo")
-	if rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", body); rec.Code != 200 {
+	if len(f.builds) != 0 {
+		t.Error("compiler was called")
+	}
+}
+
+func TestRenderWithoutFlowKeepsEngineNamesVerbatim(t *testing.T) {
+	s := newService(t, engineFake(t))
+	rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", trackBody(t, "yolo", nil, nil))
+	if rec.Code != 200 || !strings.Contains(decodeMap(t, rec)["dsl"].(string), "yolo") {
 		t.Fatalf("render status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+// With a flow, the DSL names engines as the mission Deploy builds for the
+// flow's vehicle does, and parsing it with the same flow gives back the
+// canvas's template names.
+func TestRenderAndParseDSLWithFlow(t *testing.T) {
+	cat := flowCatalog("100.64.0.1", "100.64.0.2")
+	// The remote engine's legacy template alias also names the relative local
+	// engine. Parsing rendered DSL must choose the relative name.
+	cat.Daemons[0].Hostname = "local"
+	s := newFlowService(t, engineFake(t), cat)
+	tpl := &flows.Template{
+		Vehicle:   "100.64.0.2.charlie",
+		Producers: []flows.TemplateProducer{{Name: "100.64.0.2.telemetry"}},
+		Engines:   []flows.TemplateEngine{{Name: "swap03.yolo"}, {Name: "local.yolo"}},
+		Edges: []flows.TemplateEdge{
+			{From: "100.64.0.2.telemetry", To: "swap03.yolo", Timeout: "1s"},
+			{From: "100.64.0.2.telemetry", To: "local.yolo", Timeout: "1s"},
+		},
+	}
+	for engine, ident := range map[string]string{
+		"swap03.yolo": "DetectionEngine_local_yolo",
+		"local.yolo":  "DetectionEngine_remote_yolo",
+	} {
+		rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", trackBody(t, engine, tpl, nil))
+		if rec.Code != 200 {
+			t.Fatalf("render %s: status %d: %s", engine, rec.Code, rec.Body)
+		}
+		dsl := decodeMap(t, rec)["dsl"].(string)
+		if !strings.Contains(dsl, ident) || strings.Contains(dsl, "swap03") || strings.Contains(dsl, "local.yolo") {
+			t.Fatalf("render %s: want %s, got\n%s", engine, ident, dsl)
+		}
+		for _, input := range []string{dsl, strings.Replace(dsl, ident, strconv.Quote(engine), 1)} {
+			body, _ := json.Marshal(map[string]any{"dsl": input, "flow": tpl})
+			rec = do(s.ServeParseDSL, "POST", "/api/parse_dsl", body)
+			if rec.Code != 200 {
+				t.Fatalf("parse %s: status %d: %s", engine, rec.Code, rec.Body)
+			}
+			g := decodeMap(t, rec)
+			eq(t, g["nodes"].([]any)[0].(map[string]any)["params"].(map[string]any)["Engine"], engine)
+			eq(t, g["warnings"], []any{})
+		}
+	}
+}
+
+func TestRenderDSLFlowThatDoesNotResolveIs422(t *testing.T) {
+	s := newFlowService(t, engineFake(t), flowCatalog())
+	rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", trackBody(t, "100.64.0.1.det", remoteDet(), nil))
+	if rec.Code != 422 || decodeMap(t, rec)["detail"] != "flow engine 100.64.0.1.det is not on 100.64.0.1" {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestParseDSLWarnsOfEngineNotInFlow(t *testing.T) {
+	s := newFlowService(t, engineFake(t), flowCatalog("100.64.0.1"))
+	rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", trackBody(t, "100.64.0.1.yolo", localYolo(), nil))
+	dsl := strings.ReplaceAll(decodeMap(t, rec)["dsl"].(string), "local_yolo", "local_ghost")
+	body, _ := json.Marshal(map[string]any{"dsl": dsl, "flow": localYolo()})
+	rec = do(s.ServeParseDSL, "POST", "/api/parse_dsl", body)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	g := decodeMap(t, rec)
+	eq(t, g["nodes"].([]any)[0].(map[string]any)["params"].(map[string]any)["Engine"], "local_ghost")
+	eq(t, g["warnings"], []any{"Engine DetectionEngine_local_ghost is not in the flow"})
+}
+
+func TestBuildWithFlow(t *testing.T) {
+	f := engineFake(t)
+	s := newFlowService(t, f, flowCatalog("100.64.0.1", "100.64.0.2"))
+	body := trackBody(t, "100.64.0.1.yolo", localYolo(), func(m map[string]any) { m["arch"] = "arm64" })
+	if rec := do(s.ServeBuild, "POST", "/api/build", body); rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	b := f.builds[0]
+	if b.Arch != "arm64" || !strings.Contains(string(b.Flow), `name = "local.yolo"`) {
+		t.Errorf("arch %q flow %s", b.Arch, b.Flow)
+	}
+	if got := manifestEngines(t, b.Manifest); !reflect.DeepEqual(got, []string{"local.yolo"}) {
+		t.Errorf("manifest engines %v", got)
+	}
+	eq(t, engineIdent(t, b.Ast), "DetectionEngine_local_yolo")
+}
+
+func TestBuildFlowCheckFailureIs422(t *testing.T) {
+	f := engineFake(t)
+	s := newFlowService(t, f, flowCatalog())
+	body := trackBody(t, "100.64.0.1.det", remoteDet(), func(m map[string]any) { m["arch"] = "amd64" })
+	rec := do(s.ServeBuild, "POST", "/api/build", body)
+	if rec.Code != 422 || decodeMap(t, rec)["detail"] != "Build failed for amd64: flow engine 100.64.0.1.det is not on 100.64.0.1" {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if len(f.builds) != 0 {
+		t.Error("compiler was called")
 	}
 }

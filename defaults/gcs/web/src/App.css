@@ -65,6 +65,11 @@
 .vehicle-label-popup {
   z-index: 2;
 }
+/* A detection pin's hover card goes over every marker (pins, setpoints,
+   vehicles), so it can be read where pins crowd together. */
+.pin-card-popup {
+  z-index: 5;
+}
 
 .vehicle-label-popup .mapboxgl-popup-content {
   background: transparent;
@@ -179,3 +184,25 @@
   height: 14px;
   border-width: 2px;
 }
+
+/* A vehicle's state badges (vehicleState.js), on its status card and map
+   label: AUTO/MANUAL, then TAKEOFF, LAND, RTH or EMERG. */
+.vehicle-badge {
+  display: inline-block;
+  font-size: 0.625rem;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0.03em;
+  padding: 0 0.3rem;
+  margin-left: 0.25rem;
+  border-radius: 3px;
+  white-space: nowrap;
+  vertical-align: middle;
+  text-shadow: none;
+}
+.vehicle-badge-auto { background: #6d28d9; color: #ffffff; }
+.vehicle-badge-manual { background: #374151; color: #d1d5db; }
+.vehicle-badge-takeoff { background: #22c55e; color: #111111; }
+.vehicle-badge-land { background: #0ea5e9; color: #111111; }
+.vehicle-badge-rth { background: #f59e0b; color: #111111; }
+.vehicle-badge-emerg { background: #dc2626; color: #ffffff; }

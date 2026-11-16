@@ -9,16 +9,13 @@ import (
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 )
 
-// genericResult is the result declared for an engine whose result type isn't
-// one the SDK generates a typed engine field for.
-const genericResult = "messages/result/GenericResult"
-
 // telemetryProducer is the producer every vehicle has, which needs no camera.
 const telemetryProducer = "telemetry"
 
-// TemplateProducer is a producer of a flow template. Name is {vehicle}.{stream},
-// where the vehicle is the one the flow was designed on, only as a label: each
-// target uses its own stream of that name.
+// TemplateProducer is a producer of a flow template. Name is either
+// {vehicle}.{stream}, where the vehicle is the one the flow was designed on,
+// only as a label: each target uses its own stream of that name; or
+// {host}.{engine}.{producer}, a producer the engine advertises.
 type TemplateProducer struct {
 	Name   string `json:"name"`
 	Tokens *int   `json:"tokens,omitempty"`
@@ -47,7 +44,8 @@ type Template struct {
 }
 
 // Resolved is a template resolved for one vehicle. Flow and Manifest are TOML.
-// Engines maps each template engine name to its resolved full name, {ip}.{name}.
+// Engines maps each template engine name to its name in the vehicle's flow
+// and mission, local.<engine> or remote.<engine>.
 type Resolved struct {
 	Flow     []byte
 	Manifest []byte
@@ -90,13 +88,56 @@ func ParseTemplateTOML(data []byte) (Template, error) {
 }
 
 // hostName is a template name split into the IP of the daemon its host names
-// and its bare name.
-type hostName struct{ IP, Bare string }
+// and its bare name. A vehicle stream has only a Bare stream name; an engine
+// producer has its engine's IP and Bare name, and its Producer name.
+type hostName struct{ IP, Bare, Producer string }
 
-// resolveNames splits every producer into its stream, and resolves the host of
-// every engine, returning the results in template order. A producer's vehicle
-// prefix is only a label, so it isn't resolved. Each engine must exist in the
-// catalog, and no two may be the same engine.
+// flowName is the node's name in a flow config: a vehicle stream's bare name
+// (the vehicle qualifies it), an engine's full name, or an engine producer's
+// {ip}.{engine}.{producer}, the name its engine advertises it under.
+func (h hostName) flowName() string {
+	switch {
+	case h.IP == "":
+		return h.Bare
+	case h.Producer == "":
+		return h.IP + "." + h.Bare
+	default:
+		return h.IP + "." + h.Bare + "." + h.Producer
+	}
+}
+
+// engineProducer resolves name as {host}.{engine}.{producer}. ok is false if
+// name isn't of that form or doesn't name a catalog engine, so it is a
+// vehicle stream; err is set if it names a catalog engine that doesn't
+// advertise the producer.
+func (c Catalog) engineProducer(name string) (h hostName, ok bool, err error) {
+	engine, producer, found := SplitTemplateName(name)
+	if !found {
+		return hostName{}, false, nil
+	}
+	host, bare, found := SplitTemplateName(engine)
+	if !found {
+		return hostName{}, false, nil
+	}
+	ip, resolveErr := c.ResolveHost(host)
+	if resolveErr != nil {
+		return hostName{}, false, nil
+	}
+	e, found := c.Engine(ip + "." + bare)
+	if !found {
+		return hostName{}, false, nil
+	}
+	if _, found := e.Producer(producer); !found {
+		return hostName{}, true, fmt.Errorf("flow producer %s: engine %s has no producer %s", name, engine, producer)
+	}
+	return hostName{IP: ip, Bare: bare, Producer: producer}, true, nil
+}
+
+// resolveNames splits every producer into its stream, or resolves it to the
+// engine producer it names, and resolves the host of every engine, returning
+// the results in template order. A vehicle stream's vehicle prefix is only a
+// label, so it isn't resolved. Each engine must exist in the catalog, no two
+// may be the same engine, and no two producers the same producer.
 func (t Template) resolveNames(c Catalog) (producers, engines []hostName, err error) {
 	resolve := func(name string) (hostName, error) {
 		host, bare, ok := SplitTemplateName(name)
@@ -107,14 +148,26 @@ func (t Template) resolveNames(c Catalog) (producers, engines []hostName, err er
 		if err != nil {
 			return hostName{}, err
 		}
-		return hostName{ip, bare}, nil
+		return hostName{IP: ip, Bare: bare}, nil
 	}
+	seenProducer := make(map[string]string, len(t.Producers))
 	for _, p := range t.Producers {
-		_, stream, ok := SplitTemplateName(p.Name)
-		if !ok {
-			stream = p.Name
+		h, ok, err := c.engineProducer(p.Name)
+		if err != nil {
+			return nil, nil, err
 		}
-		producers = append(producers, hostName{Bare: stream})
+		if !ok {
+			_, stream, found := SplitTemplateName(p.Name)
+			if !found {
+				stream = p.Name
+			}
+			h = hostName{Bare: stream}
+		}
+		if first, dup := seenProducer[h.flowName()]; dup {
+			return nil, nil, fmt.Errorf("flow producers %s and %s are the same producer", first, p.Name)
+		}
+		seenProducer[h.flowName()] = p.Name
+		producers = append(producers, h)
 	}
 	seen := make(map[string]string, len(t.Engines))
 	for _, e := range t.Engines {
@@ -136,42 +189,63 @@ func (t Template) resolveNames(c Catalog) (producers, engines []hostName, err er
 	return producers, engines, nil
 }
 
-// EngineNames maps each engine's template name to its full name, {ip}.{name},
-// failing as Check does if a name doesn't resolve.
+// EngineNames maps each engine's template name to its name in a flow and a
+// mission, local.<engine> or remote.<engine>, relative to the daemon of the
+// vehicle the flow was designed for (all remote if that is unknown), failing
+// as Check does if a name doesn't resolve. Each target's own names come with
+// its Resolve.
 func (t Template) EngineNames(c Catalog) (map[string]string, error) {
 	_, engines, err := t.resolveNames(c)
 	if err != nil {
 		return nil, err
 	}
-	return engineMap(t, engines), nil
+	return engineMap(t, engines, t.vehicleIP(c)), nil
 }
 
-func engineMap(t Template, engines []hostName) map[string]string {
+// vehicleIP is the daemon IP of the vehicle the flow was designed for, or ""
+// if it is unset or not in the catalog.
+func (t Template) vehicleIP(c Catalog) string {
+	if v, ok := c.VehicleByName(t.Vehicle); ok {
+		ip, _ := fleet.SplitName(v.Name)
+		return ip
+	}
+	return ""
+}
+
+func engineMap(t Template, engines []hostName, daemonIP string) map[string]string {
 	m := make(map[string]string, len(engines))
 	for i, e := range t.Engines {
-		m[e.Name] = engines[i].IP + "." + engines[i].Bare
+		m[e.Name], _ = fleet.FlowEngine(engines[i].IP+"."+engines[i].Bare, daemonIP)
 	}
 	return m
 }
 
-// flowConfig builds the flow config of the template for a daemon: producers
-// take their bare stream names, engines their full names, and an engine is
-// local if it is on daemonIP and remote otherwise.
-func (t Template) flowConfig(producers, engines []hostName, daemonIP string) *config.FlowConfig {
+// flowConfig builds the flow config of the template for a vehicle on the
+// daemon daemonIP, with the names the vehicle qualifies itself (see
+// fleet/flownames.go): vehicle.<stream>, local.<engine>.<producer>, and
+// local.<engine> or remote.<engine>, local if it is on daemonIP and remote
+// otherwise. An engine producer must be of an engine on daemonIP, since the
+// vehicle only takes its local engines' producers; with daemonIP unknown ("")
+// that check is left to each target.
+func (t Template) flowConfig(producers, engines []hostName, daemonIP string) (*config.FlowConfig, error) {
 	rename := make(map[string]string, len(producers)+len(engines))
 	f := &config.FlowConfig{}
 	for i, p := range t.Producers {
-		rename[p.Name] = producers[i].Bare
-		f.Producers = append(f.Producers, config.Producer{Name: producers[i].Bare, Tokens: p.Tokens})
+		h := producers[i]
+		name := fleet.VehicleStream(h.Bare)
+		if h.Producer != "" {
+			if daemonIP != "" && h.IP != daemonIP {
+				return nil, fmt.Errorf("flow producer %s is of a remote engine; only producers of engines on the vehicle's daemon can be used", p.Name)
+			}
+			name = fleet.LocalEngineProducer(h.Bare, h.Producer)
+		}
+		rename[p.Name] = name
+		f.Producers = append(f.Producers, config.Producer{Name: name, Tokens: p.Tokens})
 	}
 	for i, e := range t.Engines {
-		full := engines[i].IP + "." + engines[i].Bare
-		rename[e.Name] = full
-		loc := config.LocationRemote
-		if engines[i].IP == daemonIP {
-			loc = config.LocationLocal
-		}
-		f.Engines = append(f.Engines, config.Engine{Name: full, Location: loc})
+		name, loc := fleet.FlowEngine(engines[i].IP+"."+engines[i].Bare, daemonIP)
+		rename[e.Name] = name
+		f.Engines = append(f.Engines, config.Engine{Name: name, Location: loc})
 	}
 	// An endpoint that names no node is left for Validate to reject.
 	name := func(n string) string {
@@ -183,7 +257,7 @@ func (t Template) flowConfig(producers, engines []hostName, daemonIP string) *co
 	for _, e := range t.Edges {
 		f.Edges = append(f.Edges, config.Edge{From: name(e.From), To: name(e.To), Timeout: e.Timeout})
 	}
-	return f
+	return f, nil
 }
 
 // Check runs the checks that don't depend on the target: every engine resolves
@@ -191,26 +265,30 @@ func (t Template) flowConfig(producers, engines []hostName, daemonIP string) *co
 // config.FlowConfig.Validate. Engines are located relative to the daemon of
 // the vehicle the flow was designed for, or all remote if that vehicle is
 // unset or not in the catalog; only the flow's structure is being checked, so
-// the orchestrator's IP isn't needed.
+// the orchestrator's IP isn't needed. With the vehicle known, its engine
+// producers must be of engines on its daemon.
 func (t Template) Check(c Catalog, _ string) error {
 	producers, engines, err := t.resolveNames(c)
 	if err != nil {
 		return err
 	}
-	vehicleIP := ""
-	if v, ok := c.VehicleByName(t.Vehicle); ok {
-		vehicleIP, _ = fleet.SplitName(v.Name)
+	fc, err := t.flowConfig(producers, engines, t.vehicleIP(c))
+	if err != nil {
+		return err
 	}
-	return t.flowConfig(producers, engines, vehicleIP).Validate()
+	return fc.Validate()
 }
 
 // Resolve resolves the template for target. The target uses its own stream of
-// each producer's name, so every producer other than telemetry must be one of
-// cameras. If cameras is nil the camera check is skipped (Validate resolves for
-// a synthetic target whose cameras are unknown); a non-nil slice, even an empty
-// one, is checked. An engine on the target's daemon is local, one on the
-// orchestrator's daemon (orchestratorIP) is remote, and any other fails.
-// missionName and roles go to the manifest.
+// each vehicle producer's name, so every one other than telemetry must be one
+// of cameras. If cameras is nil the camera check is skipped (Validate
+// resolves for a synthetic target whose cameras are unknown); a non-nil
+// slice, even an empty one, is checked. An engine producer must be of an
+// engine on the target's daemon. An engine on the target's daemon is local,
+// one on the orchestrator's daemon (orchestratorIP) is remote, and any other
+// fails. The flow, manifest and Engines name engines relative to the target,
+// as local.<engine> or remote.<engine>. missionName and roles go to the
+// manifest.
 func (t Template) Resolve(c Catalog, orchestratorIP string, target fleet.Vehicle, cameras []string, missionName string, roles []string) (Resolved, error) {
 	producers, engines, err := t.resolveNames(c)
 	if err != nil {
@@ -221,7 +299,7 @@ func (t Template) Resolve(c Catalog, orchestratorIP string, target fleet.Vehicle
 		have[n] = true
 	}
 	for i := range t.Producers {
-		if cameras != nil && producers[i].Bare != telemetryProducer && !have[producers[i].Bare] {
+		if producers[i].Producer == "" && cameras != nil && producers[i].Bare != telemetryProducer && !have[producers[i].Bare] {
 			return Resolved{}, fmt.Errorf("flow needs camera %s, which this vehicle lacks", producers[i].Bare)
 		}
 	}
@@ -229,15 +307,18 @@ func (t Template) Resolve(c Catalog, orchestratorIP string, target fleet.Vehicle
 		Info:    config.InfoField{Name: missionName, Version: "", Roles: roles, Squawks: []string{}},
 		Engines: []config.MissionEngineField{},
 	}
+	names := engineMap(t, engines, target.DaemonIP)
 	for i, e := range t.Engines {
 		if ip := engines[i].IP; ip != target.DaemonIP && ip != orchestratorIP {
 			return Resolved{}, fmt.Errorf("flow engine %s is neither on this vehicle's daemon nor on the orchestrator", e.Name)
 		}
-		full := engines[i].IP + "." + engines[i].Bare
-		ce, _ := c.Engine(full) // resolveNames found it
-		manifest.Engines = append(manifest.Engines, config.MissionEngineField{Name: full, Result: ManifestResult(ce.Result)})
+		ce, _ := c.Engine(engines[i].IP + "." + engines[i].Bare) // resolveNames found it
+		manifest.Engines = append(manifest.Engines, config.MissionEngineField{Name: names[e.Name], Result: ce.Result})
 	}
-	fc := t.flowConfig(producers, engines, target.DaemonIP)
+	fc, err := t.flowConfig(producers, engines, target.DaemonIP)
+	if err != nil {
+		return Resolved{}, err
+	}
 	if err := fc.Validate(); err != nil {
 		return Resolved{}, err
 	}
@@ -249,18 +330,5 @@ func (t Template) Resolve(c Catalog, orchestratorIP string, target fleet.Vehicle
 	if err != nil {
 		return Resolved{}, err
 	}
-	return Resolved{Flow: flow, Manifest: mb, Engines: engineMap(t, engines)}, nil
-}
-
-// ManifestResult returns the result type to declare in a manifest for an
-// engine whose result is result: the result itself if its last path segment is
-// one of the five result types the SDK generates engine fields for, otherwise
-// the Generic stand-in.
-func ManifestResult(result string) string {
-	seg := result[strings.LastIndex(result, "/")+1:]
-	switch seg {
-	case "DetectionResult", "ClassificationResult", "GuidanceResult", "PositionResult", "GenericResult":
-		return result
-	}
-	return genericResult
+	return Resolved{Flow: flow, Manifest: mb, Engines: names}, nil
 }

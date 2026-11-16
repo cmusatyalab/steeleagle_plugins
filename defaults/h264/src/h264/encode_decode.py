@@ -22,7 +22,7 @@ from google.protobuf.message import DecodeError
 import steeleagle_protocol.v1.messages.frame.frame_pb2 as frame_proto
 
 from h264 import h264_pb2
-from h264.common import RGB_CHANNELS, Gst, Pipeline, pad_rows, unpad_rows
+from h264.common import RGB_CHANNELS, Gst, Pipeline, unpad_rows
 
 logger = logging.getLogger("h264")
 
@@ -30,6 +30,9 @@ logger = logging.getLogger("h264")
 RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
 ENCODED_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
 DECODE_RESULT_TYPE = "h264/v1/DecodeResult"
+
+# The software encoder, whose input the encoder constrains to I420.
+X264_ENCODER = "x264enc"
 
 # Fields copied from a frame to what it is encoded or decoded to.
 _FRAME_FIELDS = ("timestamp", "gimbal_info", "position_info")
@@ -85,15 +88,15 @@ class KeyframePolicy:
 class EncodeStream:
     """The H.264 stream of one producer, at one resolution."""
 
-    def __init__(self, encoder, fps, width, height, convert_threads=1):
+    def __init__(self, encoder, converter, fps, width, height):
         uses_iframe_action = "qtic2venc" in encoder
         encoder_desc = encoder if " name=" in encoder else f"{encoder} name=enc"
-        # Converting RGB to 4:2:0 takes a core's worth of time per frame
-        # unless it is split across threads
-        convert = f"videoconvert n-threads={convert_threads}"
-        # Browsers decode 4:2:0 only, which x264enc makes only from I420
-        if not uses_iframe_action:
-            convert = f"{convert} ! video/x-raw,format=I420"
+        # Browsers decode 4:2:0 only, which x264enc makes only from I420: given
+        # RGB, it encodes 4:4:4. Hardware encoders take 4:2:0 formats only,
+        # often other than I420 (omxh264enc takes NV12), so the converter sets
+        # their format itself.
+        uses_x264 = encoder.split(maxsplit=1)[0] == X264_ENCODER
+        convert = f"{converter} ! video/x-raw,format=I420" if uses_x264 else converter
         self.width = width
         self.height = height
         self.pipeline = Pipeline(
@@ -146,7 +149,9 @@ def _encode_frame(engine, streams, input, args):
         if stream is not None:
             stream.pipeline.stop()
         logger.info("encoding %s at %dx%d", producer, width, height)
-        stream = streams[producer] = EncodeStream(args["encoder"], args["fps"], width, height, args["convert_threads"])
+        stream = streams[producer] = EncodeStream(
+            args["encoder"], args["converter"], args["fps"], width, height
+        )
     pipeline, policy = stream.pipeline, stream.policy
 
     pts_ns = int((time.monotonic() - stream.start) * 1e9)
@@ -162,7 +167,7 @@ def _encode_frame(engine, streams, input, args):
     stream.last_pts_ns = pts_ns
     if policy.needed:
         pipeline.force_keyframe()
-    pipeline.push(pad_rows(frame.data, width, height), pts_ns)
+    pipeline.push_frame(frame.data, width, height, pts_ns)
     sample, dropped_late = pipeline.pull(pts_ns, args["timeout_ms"])
     if dropped_late:
         policy.needed = True

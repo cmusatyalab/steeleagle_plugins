@@ -88,5 +88,8 @@ def test_the_default_model_is_accepted():
     parse_args(json.dumps({"model": Config().model}))
 
 
-def test_frames_are_not_saved_by_default():
-    assert parse_args(None).save_frames == ""
+def test_letterbox_is_off_unless_set_and_must_be_a_boolean():
+    assert parse_args(None).letterbox is False
+    assert parse_args(json.dumps({"letterbox": True})).letterbox is True
+    with pytest.raises(ConfigError, match="letterbox"):
+        parse_args(json.dumps({"letterbox": "yes"}))

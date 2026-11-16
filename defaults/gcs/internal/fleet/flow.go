@@ -29,19 +29,17 @@ type FlowSpec struct {
 }
 
 // BuildFlow builds the dataflow that carries a vehicle's telemetry, and its
-// video if it can, to the GCS engine. Producer names are the short ones the
-// vehicle qualifies itself; engine names are full service names. noVideo is
-// empty if the flow carries video, and otherwise says why it does not.
+// video if it can, to the GCS engine. Nodes have the names a flow gives them
+// relative to the vehicle (see flownames.go), which it qualifies itself.
+// noVideo is empty if the flow carries video, and otherwise says why it does
+// not.
 func BuildFlow(v Vehicle, snap Snapshot, spec FlowSpec) (flow *config.FlowConfig, noVideo string) {
-	gcsIP, _ := SplitName(spec.Engine)
-	gcsLoc := config.LocationRemote
-	if gcsIP == v.DaemonIP {
-		gcsLoc = config.LocationLocal
-	}
+	gcs, gcsLoc := FlowEngine(spec.Engine, v.DaemonIP)
+	telemetry := VehicleStream("telemetry")
 	flow = &config.FlowConfig{
-		Producers: []config.Producer{{Name: "telemetry"}},
-		Engines:   []config.Engine{{Name: spec.Engine, Location: gcsLoc}},
-		Edges:     []config.Edge{{From: "telemetry", To: spec.Engine, Timeout: edgeTimeout}},
+		Producers: []config.Producer{{Name: telemetry}},
+		Engines:   []config.Engine{{Name: gcs, Location: gcsLoc}},
+		Edges:     []config.Edge{{From: telemetry, To: gcs, Timeout: edgeTimeout}},
 	}
 
 	encoder, hasEncoder := snap.Encoders[v.DaemonIP]
@@ -59,15 +57,16 @@ func BuildFlow(v Vehicle, snap Snapshot, spec FlowSpec) (flow *config.FlowConfig
 			EncoderPlugin, EncoderPackage, v.DaemonIP)
 	}
 
-	cam := v.Driver.Cameras[0].Name
+	cam := VehicleStream(v.Driver.Cameras[0].Name)
+	enc, _ := FlowEngine(encoder, v.DaemonIP) // on the vehicle's daemon
 	tokens := cameraTokens
 	flow.Producers = append(flow.Producers, config.Producer{Name: cam, Tokens: &tokens})
 	flow.Engines = []config.Engine{
-		{Name: encoder, Location: config.LocationLocal},
+		{Name: enc, Location: config.LocationLocal},
 		flow.Engines[0],
 	}
 	flow.Edges = append(flow.Edges,
-		config.Edge{From: cam, To: encoder, Timeout: edgeTimeout},
-		config.Edge{From: encoder, To: spec.Engine, Timeout: edgeTimeout})
+		config.Edge{From: cam, To: enc, Timeout: edgeTimeout},
+		config.Edge{From: enc, To: gcs, Timeout: edgeTimeout})
 	return flow, ""
 }

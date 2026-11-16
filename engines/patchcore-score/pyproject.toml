@@ -17,7 +17,7 @@ dependencies = [
 # Regenerate and re-copy them in if/when that's resolved.
 
 [tool.setuptools]
-py-modules = ["main", "score"]
+py-modules = ["main", "score", "reintegration"]
 
 [tool.setuptools.packages.find]
 include = ["steeleagle_protocol*"]
@@ -28,6 +28,10 @@ platforms = ["linux-aarch64"]
 
 [tool.pixi.pypi-dependencies]
 patchcore-score = { path = ".", editable = true }
+# CPU-only torch: the drone has no CUDA GPU, and the CUDA build's nvidia and
+# triton packages take ~5 GB of its disk
+torch = { version = "*", index = "https://download.pytorch.org/whl/cpu" }
+torchvision = { version = "*", index = "https://download.pytorch.org/whl/cpu" }
 
 [tool.pixi.dependencies]
 cython = "*"

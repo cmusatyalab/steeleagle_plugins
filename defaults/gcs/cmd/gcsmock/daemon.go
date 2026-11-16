@@ -164,8 +164,8 @@ func driverConfig() ([]byte, error) {
 		Driver: &config.DriverCap{
 			Type: "copter",
 			Cameras: []config.DriverCamera{{
-				Name: "front", Type: "steeleagle_protocol/v1/messages/frame/RawFrame", HRes: 1280, VRes: 720, HFov: 90, VFov: 60,
-				Fps: 30, Primary: true, Encode: true,
+				Name: "front", Output: "steeleagle_protocol/v1/messages/frame/RawFrame", HRes: 1280, VRes: 720, HFov: 90, VFov: 60,
+				Fps: 30, Gimbal: true, Primary: true, Encode: true,
 			}},
 			Supported: config.DriverSupported{Services: []string{
 				"steeleagle_protocol/v1/services/driver/ControlService",
@@ -177,7 +177,8 @@ func driverConfig() ([]byte, error) {
 }
 
 // ListServices lists the vehicles, the encoders, the detector and the GCS engine, and the
-// remote daemons with their architectures. A daemon that is restarting, or
+// remote daemons with their architectures. A service stopped by request is
+// listed as stopped and not running. A daemon that is restarting, or
 // whose config names a package it doesn't have, lists no services: the
 // GCS's own fails the call, a remote is listed with the reason as its error.
 func (d *Daemon) ListServices(
@@ -202,6 +203,10 @@ func (d *Daemon) ListServices(
 	var services []*daemonpb.Service
 	for _, s := range resp.GetServices() {
 		if ip, _ := fleet.SplitName(s.GetName()); down[ip] == "" {
+			if d.store.isStopped(s.GetName()) {
+				s.SetRunning(false)
+				s.SetStopped(true)
+			}
 			services = append(services, s)
 		}
 	}
@@ -286,21 +291,48 @@ func (d *Daemon) listAll(
 }
 
 // RestartService pretends to restart one of the services ListServices lists,
-// and is NotFound for any other name, as the daemon is.
+// starting it if it was stopped, and is NotFound for any other name, as the
+// daemon is.
 func (d *Daemon) RestartService(
 	ctx context.Context, req *daemonpb.RestartServiceRequest,
 ) (*daemonpb.RestartServiceResponse, error) {
-	resp, err := d.ListServices(ctx, &daemonpb.ListServicesRequest{})
-	if err != nil {
+	name := req.GetServiceNames()
+	if err := d.findService(ctx, name); err != nil {
 		return nil, err
 	}
+	d.store.setStopped(name, false)
+	d.log.Info().Str("service", name).Msg("restarted service")
+	return &daemonpb.RestartServiceResponse{}, nil
+}
+
+// StopService pretends to stop one of the services ListServices lists, which
+// it then lists as stopped until it is restarted, and is NotFound for any
+// other name, as the daemon is.
+func (d *Daemon) StopService(
+	ctx context.Context, req *daemonpb.StopServiceRequest,
+) (*daemonpb.StopServiceResponse, error) {
+	name := req.GetServiceName()
+	if err := d.findService(ctx, name); err != nil {
+		return nil, err
+	}
+	d.store.setStopped(name, true)
+	d.log.Info().Str("service", name).Msg("stopped service")
+	return &daemonpb.StopServiceResponse{}, nil
+}
+
+// findService is nil if ListServices lists the service name, and otherwise
+// why not: NotFound, or why the listing failed.
+func (d *Daemon) findService(ctx context.Context, name string) error {
+	resp, err := d.ListServices(ctx, &daemonpb.ListServicesRequest{})
+	if err != nil {
+		return err
+	}
 	for _, s := range resp.GetServices() {
-		if s.GetName() == req.GetServiceNames() {
-			d.log.Info().Str("service", s.GetName()).Msg("restarted service")
-			return &daemonpb.RestartServiceResponse{}, nil
+		if s.GetName() == name {
+			return nil
 		}
 	}
-	return nil, status.Errorf(codes.NotFound, "no service %q", req.GetServiceNames())
+	return status.Errorf(codes.NotFound, "no service %q", name)
 }
 
 // GetTelemetry returns the vehicle's current telemetry.
@@ -349,7 +381,10 @@ func (d *Daemon) setFlow(st *vehicleState, name string, spec []byte) error {
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "invalid dataflow: %v", err)
 	}
-	qualified := d.qualify(name, flow)
+	qualified, err := d.qualify(name, flow)
+	if err != nil {
+		return err
+	}
 	if d.top.Detector != "" {
 		qualified = withDetector(qualified, d.top.Detector)
 	}
@@ -360,26 +395,28 @@ func (d *Daemon) setFlow(st *vehicleState, name string, spec []byte) error {
 	return nil
 }
 
-// qualify returns flow with producers named as the real vehicle does and
-// remote engines made local, as the mock has one process.
-func (d *Daemon) qualify(vehicle string, flow *config.FlowConfig) *config.FlowConfig {
+// qualify returns flow with its names qualified as the real vehicle does
+// (see fleet/flownames.go): vehicle.<stream> with the vehicle's name,
+// local.<...> with its daemon's IP, and remote.<engine> with the GCS's. Like
+// the vehicle, it refuses a producer of a remote engine. Remote engines are
+// made local, as the mock runs every engine in one process.
+func (d *Daemon) qualify(vehicle string, flow *config.FlowConfig) (*config.FlowConfig, error) {
+	vehicleIP, _ := fleet.SplitName(vehicle)
+	name := func(n string) string { return fleet.QualifyFlowName(n, vehicle, vehicleIP, d.top.GCSIP) }
 	out := &config.FlowConfig{
 		Producers: make([]config.Producer, len(flow.Producers)),
 		Engines:   make([]config.Engine, len(flow.Engines)),
 		Edges:     make([]config.Edge, len(flow.Edges)),
 	}
-	copy(out.Producers, flow.Producers)
-	copy(out.Engines, flow.Engines)
-	copy(out.Edges, flow.Edges)
-	for i, p := range out.Producers {
-		out.Producers[i].Name = vehicle + "." + p.Name
-		for j, e := range out.Edges {
-			if e.From == p.Name {
-				out.Edges[j].From = out.Producers[i].Name
-			}
+	for i, p := range flow.Producers {
+		if strings.HasPrefix(p.Name, fleet.RemotePrefix) {
+			return nil, status.Errorf(codes.InvalidArgument,
+				"producer %q is of a remote engine; only the vehicle's streams and local engines' producers can be used", p.Name)
 		}
+		out.Producers[i] = config.Producer{Name: name(p.Name), Tokens: p.Tokens}
 	}
-	for i, e := range out.Engines {
+	for i, e := range flow.Engines {
+		out.Engines[i] = config.Engine{Name: name(e.Name), Location: e.Location}
 		if e.Location == config.LocationRemote {
 			d.remoteOnce.Do(func() {
 				d.log.Info().Msg("rewriting remote engines to local: the mock runs everything in one process")
@@ -387,7 +424,10 @@ func (d *Daemon) qualify(vehicle string, flow *config.FlowConfig) *config.FlowCo
 			out.Engines[i].Location = config.LocationLocal
 		}
 	}
-	return out
+	for i, e := range flow.Edges {
+		out.Edges[i] = config.Edge{From: name(e.From), To: name(e.To), Timeout: e.Timeout}
+	}
+	return out, nil
 }
 
 // TakeOff takes off.
@@ -462,14 +502,25 @@ func (d *Daemon) SetGimbalAngleTarget(
 	return &driverpb.SetGimbalAngleTargetResponse{}, nil
 }
 
-// missionFlow is the flow of a started mission: telemetry only, to a sink.
-func missionFlow(vehicle string) []byte {
+// missionFlow is the flow of a started mission: telemetry only, to a sink
+// and to gcsEngine, so the GCS still sees the vehicle while it flies the
+// mission. Being a mission's flow, the GCS leaves it as it is.
+// Its names are relative to the vehicle, as a mission's are.
+func missionFlow(vehicle, gcsEngine string) []byte {
 	ip, _ := fleet.SplitName(vehicle)
-	sink := ip + ".mission_sink"
+	sink, _ := fleet.FlowEngine(ip+".mission_sink", ip)
+	gcs, gcsLoc := fleet.FlowEngine(gcsEngine, ip)
+	telemetry := fleet.VehicleStream("telemetry")
 	b, _ := (&config.FlowConfig{
-		Producers: []config.Producer{{Name: "telemetry"}},
-		Engines:   []config.Engine{{Name: sink, Location: config.LocationLocal}},
-		Edges:     []config.Edge{{From: "telemetry", To: sink, Timeout: "2s"}},
+		Producers: []config.Producer{{Name: telemetry}},
+		Engines: []config.Engine{
+			{Name: sink, Location: config.LocationLocal},
+			{Name: gcs, Location: gcsLoc},
+		},
+		Edges: []config.Edge{
+			{From: telemetry, To: sink, Timeout: "2s"},
+			{From: telemetry, To: gcs, Timeout: "2s"},
+		},
 	}).ToBytes()
 	return b
 }
@@ -482,7 +533,7 @@ func (d *Daemon) StartMission(
 	if err != nil {
 		return nil, err
 	}
-	if err := d.setFlow(st, name, missionFlow(name)); err != nil {
+	if err := d.setFlow(st, name, missionFlow(name, d.top.GCSIP+".gcs")); err != nil {
 		return nil, err
 	}
 	st.v.StartMission()

@@ -31,8 +31,10 @@ type Message struct {
 	Producer string
 	// Vehicle is the vehicle the producer belongs to.
 	Vehicle string
-	// Seq is the input's sequence number from its producer.
-	Seq uint64
+	// Seq is the input's sequence number from its producer, in the
+	// producer's Session: seqs start again when it restarts.
+	Session uint64
+	Seq     uint64
 	// Exactly one of Frame and Telemetry is set.
 	Frame     *framepb.EncodedFrame
 	Telemetry *telemetrypb.Telemetry
@@ -108,7 +110,7 @@ func Run(ctx context.Context, name string, maxInputSize int, log zerolog.Logger,
 			log.Warn().Err(decodeErr).Str("producer", in.ID.Producer).Uint64("seq", in.ID.Seq).Msg("skipping input")
 			continue
 		}
-		msg.Seq = in.ID.Seq
+		msg.Session, msg.Seq = in.ID.Session, in.ID.Seq
 		handle(msg)
 	}
 }

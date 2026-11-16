@@ -193,3 +193,22 @@ receive:
 		t.Fatal("SubscribeResults did not return once its context was done")
 	}
 }
+
+func TestOfferedWallTime(t *testing.T) {
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	mono := uriel.Timestamp(100 * time.Second)
+	for _, tt := range []struct {
+		name                string
+		offered, at, recved uriel.Timestamp
+		want                time.Time
+	}{
+		{"offered", uriel.Timestamp(99 * time.Second), uriel.Timestamp(99500 * time.Millisecond), 0, now.Add(-time.Second)},
+		{"no offer uses at", 0, uriel.Timestamp(98 * time.Second), 0, now.Add(-2 * time.Second)},
+		{"remote clock uses now", uriel.Timestamp(5 * time.Second), uriel.Timestamp(6 * time.Second), uriel.Timestamp(99 * time.Second), now},
+		{"nothing uses now", 0, 0, 0, now},
+	} {
+		if got := offeredWallTime(now, mono, tt.offered, tt.at, tt.recved); !got.Equal(tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}

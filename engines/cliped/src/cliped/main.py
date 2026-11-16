@@ -1,8 +1,11 @@
-"""Entrypoint of the cliped engine, which eagled starts with `pixi run start`.
+"""Entrypoint of the cliped plugins, which eagled starts with `pixi run start`:
+the edge filter (cliped.plugin.toml) and the verifier (verifier.plugin.toml).
 
-eagled passes the plugin's args in STEELEAGLE_PLUGIN_ARGS (a JSON object), the
-name to serve the engine as in STEELEAGLE_ENGINE_ENDPOINT, and the remote
-daemon's IP, which qualifies the verifier's name, in
+eagled names the plugin to run in STEELEAGLE_PLUGIN, its args in
+STEELEAGLE_PLUGIN_ARGS (a JSON object), the name to serve the engine as in
+STEELEAGLE_ENGINE_ENDPOINT, the daemon's files directory, which holds image
+prompts and the images log_tiles writes, in STEELEAGLE_FILES, and, for the
+edge filter, the remote daemon's IP, which qualifies the verifier's name, in
 STEELEAGLE_REMOTE_QUALIFIER.
 """
 import json
@@ -13,11 +16,16 @@ import sys
 import threading
 
 from cliped.clip import BACKGROUNDS, FP32_WEIGHTS, LIBS_DIR, QUANTIZED_MODEL
+from cliped.files import FilesError, TileLog, files_dir, read_rgb, resolve
+
+CLIPED_PLUGIN = "cliped.plugin.toml"
+VERIFIER_PLUGIN = "verifier.plugin.toml"
 
 # Defaults of the args of cliped.plugin.toml. The daemon passes only the args
 # set in its config, so any arg left unset is defaulted here.
 DEFAULTS = {
     "prompt": "",
+    "image": "",
     "quantized": True,
     "tile_size": 200,
     "stride": 150,
@@ -28,13 +36,31 @@ DEFAULTS = {
     "k": 2,
     "ema": 0.9,
     "max_queue": 64,
-    "resend_after_ms": 5000,
     "npu": True,
     "threads": 4,
+    "log_scores": False,
     "log_tiles": False,
+    "learn": True,
+    "learn_similarity": 0.85,
+    "confirmations": 2,
+    "good_similarity": 0.9,
+    "good_confirmations": 2,
+    "max_learned": 32,
+    "log_sent": "",
+    "log_scored": "",
 }
-REQUIRED = ("prompt", "verifier")
-POSITIVE_INTS = ("tile_size", "stride", "max_send", "k", "max_queue", "threads")
+# Defaults of the args of verifier.plugin.toml
+VERIFIER_DEFAULTS = {
+    "prompt": "",
+    "image": "",
+    "model": "qwen3-vl:8b-instruct",
+    "host": "",
+    "timeout_ms": 30000,
+    "log_tiles": False,
+    "question": "",
+}
+POSITIVE_INTS = ("tile_size", "stride", "max_send", "k", "max_queue", "threads", "confirmations",
+                 "good_confirmations", "max_learned")
 
 LD_LIBRARY_PATH = "LD_LIBRARY_PATH"
 ADSP_LIBRARY_PATH = "ADSP_LIBRARY_PATH"
@@ -47,40 +73,110 @@ class ConfigError(Exception):
     pass
 
 
-def parse_args(content):
-    """The args in the JSON object `content`, with every unset arg defaulted.
-    Raises ConfigError for args that are missing or out of range."""
+def _load(content, defaults):
     args = json.loads(content or "{}")
     if not isinstance(args, dict):
         raise ConfigError("the args must be a JSON object")
-    for name, default in DEFAULTS.items():
+    for name, default in defaults.items():
         if args.get(name) is None:
             args[name] = default
-    for name in REQUIRED:
-        if not isinstance(args[name], str) or not args[name].strip():
-            raise ConfigError(f"the {name!r} arg must be set")
+    return args
+
+
+def _strings(args, *names):
+    for name in names:
+        if not isinstance(args[name], str):
+            raise ConfigError(f"{name} must be a string, not {args[name]!r}")
         args[name] = args[name].strip()
+
+
+def _prompt_or_image(args):
+    """Checks that the prompt or the image is set; the image wins over the
+    prompt, which is then cleared."""
+    _strings(args, "prompt", "image")
+    if not args["prompt"] and not args["image"]:
+        raise ConfigError("the 'prompt' or 'image' arg must be set")
+    if args["image"]:
+        args["prompt"] = ""
+
+
+def parse_args(content):
+    """The args of cliped.plugin.toml in the JSON object `content`, with every
+    unset arg defaulted. Raises ConfigError for args that are missing or out
+    of range."""
+    args = _load(content, DEFAULTS)
+    _prompt_or_image(args)
+    _strings(args, "verifier")
+    if not args["verifier"]:
+        raise ConfigError("the 'verifier' arg must be set")
     for name in POSITIVE_INTS:
         value = args[name]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value) or value < 1:
             raise ConfigError(f"{name} must be a positive integer, not {value!r}")
         args[name] = int(value)
-    for name in ("margin", "ema", "resend_after_ms"):
+    for name in ("margin", "ema", "learn_similarity", "good_similarity"):
         if isinstance(args[name], bool) or not isinstance(args[name], (int, float)):
             raise ConfigError(f"{name} must be a number, not {args[name]!r}")
     if not 0 <= args["ema"] < 1:
         raise ConfigError("ema must be in [0, 1)")
-    if args["resend_after_ms"] <= 0:
-        raise ConfigError("resend_after_ms must be positive")
+    for name in ("learn_similarity", "good_similarity"):
+        if not 0 < args[name] <= 1:
+            raise ConfigError(f"{name} must be in (0, 1]")
     backgrounds = args["backgrounds"]
     if (not isinstance(backgrounds, list) or not backgrounds
             or not all(isinstance(bg, str) and bg.strip() for bg in backgrounds)):
         raise ConfigError("backgrounds must be a non-empty list of prompts")
     args["backgrounds"] = [bg.strip() for bg in backgrounds]
-    for name in ("quantized", "npu", "log_tiles"):
+    for name in ("quantized", "npu", "log_scores", "log_tiles", "learn"):
         if not isinstance(args[name], bool):
             raise ConfigError(f"{name} must be true or false")
+    for name in ("log_sent", "log_scored"):
+        if not isinstance(args[name], str):
+            raise ConfigError(f"{name} must be a file name")
+        args[name] = args[name].strip()
     return args
+
+
+def parse_verifier_args(content):
+    """The args of verifier.plugin.toml in the JSON object `content`, with
+    every unset arg defaulted."""
+    args = _load(content, VERIFIER_DEFAULTS)
+    _prompt_or_image(args)
+    _strings(args, "model", "host", "question")
+    if not args["model"]:
+        raise ConfigError("the 'model' arg must be set")
+    if args["question"]:
+        try:
+            args["question"].format(prompt="")
+        except (KeyError, IndexError, ValueError) as err:
+            raise ConfigError(f"question: only {{prompt}} may be in braces ({err!r})") from None
+    timeout = args["timeout_ms"]
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise ConfigError(f"timeout_ms must be a positive number, not {timeout!r}")
+    if not isinstance(args["log_tiles"], bool):
+        raise ConfigError("log_tiles must be true or false")
+    return args
+
+
+def image_path(args):
+    """The image prompt's file, under the files directory, or None for a text
+    prompt."""
+    if not args["image"]:
+        return None
+    try:
+        return resolve(files_dir(), args["image"])
+    except FilesError as err:
+        raise ConfigError(f"image: {err}") from None
+
+
+def tile_log(args, name):
+    """The TileLog of the engine `name` if log_tiles is set, or None."""
+    if not args["log_tiles"]:
+        return None
+    try:
+        return TileLog.for_engine(name)
+    except (FilesError, OSError) as err:
+        raise ConfigError(f"log_tiles: {err}") from None
 
 
 def ensure_qnn_on_library_path():
@@ -99,11 +195,12 @@ def ensure_qnn_on_library_path():
     os.execv(sys.executable, [sys.executable, "-m", "cliped.main", *sys.argv[1:]])
 
 
-def build(args, verifier):
-    """The Cliped of `args`, verified by the engine `verifier`."""
+def build(args, verifier, *, image=None, tile_log=None):
+    """The Cliped of `args`, verified by the engine `verifier`, searching for
+    the image file `image` if given and for the text prompt if not."""
     import torch
 
-    from cliped.clip import Encoder, NpuImageEncoder, Selector, text_vectors
+    from cliped.clip import Encoder, NpuImageEncoder, Selector, image_vector, text_vectors
     from cliped.engine import Cliped
     from cliped.send_queue import SendQueue
 
@@ -111,7 +208,7 @@ def build(args, verifier):
     torch.set_num_threads(args["threads"])
     # The text encoder always runs FP32 on the CPU, once, for the prompt
     text_encoder = Encoder(visual_weights=None if args["quantized"] else FP32_WEIGHTS)
-    t, b = text_vectors(text_encoder, args["prompt"], args["backgrounds"])
+    t, b = text_vectors(text_encoder, None if image else args["prompt"], args["backgrounds"])
     if args["quantized"]:
         qnn_dir = LIBS_DIR if args["npu"] else None
         image_encoder = NpuImageEncoder(QUANTIZED_MODEL, qnn_dir, num_threads=args["threads"])
@@ -120,42 +217,95 @@ def build(args, verifier):
     else:
         image_encoder = text_encoder
         log.info("FP32 image encoder %s on the CPU", FP32_WEIGHTS.name)
+    if image is not None:
+        t = image_vector(image_encoder, read_rgb(image))
+        log.info("searching for the image %s", image)
 
-    selector = Selector(t, b, k=args["k"], ema=args["ema"], margin=args["margin"], max_send=args["max_send"])
-    queue = SendQueue(max_size=args["max_queue"], resend_after_s=args["resend_after_ms"] / 1000)
+    if args["learn"]:
+        log.info("learning from the verifier's answers (similarity %.2f, %d no's to gate; good similarity %.2f, "
+                 "%d yes's to force; at most %d of each)", args["learn_similarity"], args["confirmations"],
+                 args["good_similarity"], args["good_confirmations"], args["max_learned"])
+    selector = Selector(t, b, k=args["k"], ema=args["ema"], margin=args["margin"], max_send=args["max_send"],
+                        learn=args["learn"], similarity=args["learn_similarity"],
+                        confirmations=args["confirmations"], max_learned=args["max_learned"],
+                        good_similarity=args["good_similarity"], good_confirmations=args["good_confirmations"])
+    from cliped.sent_log import ScoredLog, SentLog
+
+    queue = SendQueue(max_size=args["max_queue"])
     return Cliped(
         image_encoder,
         selector,
         queue,
-        prompt=args["prompt"],
+        prompt=args["image"] or args["prompt"],
         verifier=verifier,
         tile_size=args["tile_size"],
         stride=args["stride"],
-        log_tiles=args["log_tiles"],
+        log_scores=args["log_scores"],
+        tile_log=tile_log,
+        sent_log=SentLog(args["log_sent"]) if args.get("log_sent") else None,
+        scored_log=ScoredLog(args["log_scored"]) if args.get("log_scored") else None,
     )
 
 
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    name = os.environ.get("STEELEAGLE_ENGINE_ENDPOINT")
-    if not name:
-        sys.exit("STEELEAGLE_ENGINE_ENDPOINT is not set")
+def stop_on_signals():
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    return stop
+
+
+def main_cliped(name):
     try:
         args = parse_args(os.environ.get("STEELEAGLE_PLUGIN_ARGS"))
+        image = image_path(args)
     except (ConfigError, ValueError) as err:
         sys.exit(f"Bad args for the cliped engine: {err}")
     if args["quantized"] and args["npu"]:
         ensure_qnn_on_library_path()
+    try:
+        log = tile_log(args, name)
+    except ConfigError as err:
+        sys.exit(f"Bad args for the cliped engine: {err}")
 
     from cliped.engine import max_output_size, qualify, run
 
     verifier = qualify(os.environ.get("STEELEAGLE_REMOTE_QUALIFIER", ""), args["verifier"])
-    cliped = build(args, verifier)
+    cliped = build(args, verifier, image=image, tile_log=log)
+    run(name, cliped, max_output_size=max_output_size(args["tile_size"]), stop=stop_on_signals())
 
-    stop = threading.Event()
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    signal.signal(signal.SIGINT, lambda *_: stop.set())
-    run(name, cliped, max_output_size=max_output_size(args["tile_size"]), stop=stop)
+
+def main_verifier(name):
+    from cliped.verifier import DEFAULT_HOST, Ollama, OllamaError, Verifier, encode_png, run, shrink
+
+    try:
+        args = parse_verifier_args(os.environ.get("STEELEAGLE_PLUGIN_ARGS"))
+        image = image_path(args)
+        reference = encode_png(shrink(read_rgb(image))) if image is not None else None
+        log = tile_log(args, name)
+    except (ConfigError, FilesError, ValueError) as err:
+        sys.exit(f"Bad args for the verifier engine: {err}")
+    host = args["host"] or os.environ.get("OLLAMA_HOST") or DEFAULT_HOST
+    ollama = Ollama(host, args["model"], timeout_s=args["timeout_ms"] / 1000)
+    try:
+        ollama.ensure_model()
+    except OllamaError as err:
+        sys.exit(f"Ollama at {ollama.host} can't serve {args['model']}: {err}")
+    logging.getLogger("cliped.verifier").info("asking %s at %s", args["model"], ollama.host)
+    verifier = Verifier(ollama.ask, label=args["image"] or args["prompt"], reference=reference, tile_log=log,
+                        question=args["question"] or None)
+    run(name, verifier, stop=stop_on_signals())
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    plugin = os.environ.get("STEELEAGLE_PLUGIN", CLIPED_PLUGIN)
+    plugins = {CLIPED_PLUGIN: main_cliped, VERIFIER_PLUGIN: main_verifier}
+    if plugin not in plugins:
+        sys.exit(f"Unrecognized plugin {plugin!r}; expected one of {sorted(plugins)}")
+    name = os.environ.get("STEELEAGLE_ENGINE_ENDPOINT")
+    if not name:
+        sys.exit("STEELEAGLE_ENGINE_ENDPOINT is not set")
+    plugins[plugin](name)
 
 
 if __name__ == "__main__":

@@ -33,6 +33,40 @@ type = "string"
 description = "Local name patchcore-retrain registers its engine as (joined with STEELEAGLE_REMOTE_QUALIFIER to subscribe to it)"
 default = "patchcore_retrain"
 
+[[args]]
+name = "verifier"
+type = "string"
+description = "Service name of the engine on the remote daemon the anomalous frames go to (e.g. the decoder at the far end); the reintegration producer delivers them, one at a time, most anomalous first, each until that engine finishes it; leave the engine a dead end then. Empty for no queue: frames are forwarded once"
+default = ""
+
+[[args]]
+name = "max_queue"
+type = "number"
+description = "Most anomalous frames waiting for the verifier (each a 1280x720 RGB frame); past it, the least anomalous is dropped"
+default = 32
+
+[[args]]
+name = "log_sent"
+type = "string"
+description = "CSV file to log each anomalous frame forwarded to, as producer, session and seq (of the camera input it was scored from), timestamp_ns (the timestamp this engine stamps on it), score and threshold; a relative path is in the daemon's files directory. Empty for none"
+default = ""
+
+[[args]]
+name = "log_scored"
+type = "string"
+description = "CSV file to log each frame scored to, anomalous or not, as producer, session and seq (of the camera input), score, threshold, anomalous (1 or 0) and ms (time to score it); the frames missing from it were never scored. A relative path is in the daemon's files directory. Empty for none"
+default = ""
+
 [engine]
 type = "filter"
 inputs = ["steeleagle_protocol/v1/messages/result/FrameWithEmbedding"]
+# Each input is converted, so this is what the engine sends on; its id is the
+# sequence number of the camera input it was scored from
+forwards = "steeleagle_protocol/v1/messages/frame/RawFrame"
+
+[[engine.producers]]
+# With a verifier: delivers the queued anomalous frames to the verifier, most
+# anomalous first, one at a time, each until the verifier's RESULT for it,
+# whether or not frames come in. Give it one token.
+name = "reintegration"
+output = "steeleagle_protocol/v1/messages/frame/RawFrame"

@@ -253,8 +253,8 @@ describe('vehicleStatusMapColor', () => {
         expect(vehicleStatusMapColor('online')).toBe(vehicleStatusColor('online'));
     });
 
-    it('uses a muted grey (not red) for "offline" -- red markers scattered across the map read as too busy', () => {
-        expect(vehicleStatusMapColor('offline')).toBe('var(--gray-500)');
+    it('uses red for offline markers so they remain visible on satellite imagery', () => {
+        expect(vehicleStatusMapColor('offline')).toBe('var(--red-500)');
     });
 });
 
@@ -268,8 +268,8 @@ describe('vehicleStatusTextColor', () => {
         expect(vehicleStatusTextColor('selected')).toBe('#ffffff');
     });
 
-    it('stays a neutral grey scale for offline/online, independent of the blue marker chevron', () => {
-        expect(vehicleStatusTextColor('offline')).toBe('var(--gray-500)');
+    it('uses red for offline labels and light grey for online labels', () => {
+        expect(vehicleStatusTextColor('offline')).toBe(vehicleStatusMapColor('offline'));
         expect(vehicleStatusTextColor('online')).toBe('var(--gray-200)');
         expect(vehicleStatusTextColor('online')).not.toBe(vehicleStatusMapColor('online'));
     });
@@ -380,17 +380,41 @@ describe('vehicleTrackLabelsGeoJSON', () => {
         current: { lat: 40.002, long: -79.7, alt: 20 }, track, ...extra,
     });
 
-    it('labels the track every so many meters back from the vehicle', () => {
-        const fc = vehicleTrackLabelsGeoJSON([v('100.64.0.1.alpha', [[-79.7, 40.0, 0]])], [], 50);
-        // ~222 m of track: labels at 50, 100, 150, 200 m back
-        expect(fc.features).toHaveLength(4);
+    // Straight north from 40.0, a point every ~111 m
+    const north = (from, n) => Array.from({ length: n }, (_, i) => [-79.7, from + i * 0.001, 0]);
+    const latAt = (m) => 40.0 + m / 111195;
+
+    it('labels the track every so many meters of the path flown', () => {
+        const fc = vehicleTrackLabelsGeoJSON([v('100.64.0.1.alpha', north(40.0, 3))], [], 50);
+        // ~222 m recorded: labels at 50, 100 and 150 m; 200 m is too near the vehicle
+        expect(fc.features).toHaveLength(3);
         const f = fc.features[0];
         expect(f.geometry.type).toBe('Point');
         expect(f.geometry.coordinates[0]).toBeCloseTo(-79.7);
-        expect(f.geometry.coordinates[1]).toBeCloseTo(40.002 - 50 / 111195, 6);
+        expect(f.geometry.coordinates[1]).toBeCloseTo(latAt(50), 6);
         expect(f.properties).toMatchObject({ label: 'alpha', status: 'online' });
-        // Altitude interpolated along the leg, 50 m of ~222 m back from 20
-        expect(f.properties.alt).toBeCloseTo(20 * (1 - 50 / 222.4), 0);
+        expect(fc.features.map((g) => g.geometry.coordinates[1])).toEqual(
+            [50, 100, 150].map((m) => expect.closeTo(latAt(m), 6)));
+    });
+
+    it('keeps each label where it was as the track moves on', () => {
+        const before = vehicleTrackLabelsGeoJSON([v('d1', north(40.0, 3))], [], 50);
+        // Flown ~111 m on: the oldest point dropped, ~111 m flown before the rest
+        const after = vehicleTrackLabelsGeoJSON([v('d1', north(40.001, 3), {
+            current: { lat: 40.003, long: -79.7, alt: 0 }, track_start: 111.195,
+        })], [], 50);
+        const lats = (fc) => fc.features.map((f) => f.geometry.coordinates[1]);
+        // 150 m is in both, at the same spot; 200, 250 and 300 m are new
+        expect(lats(after)).toEqual([150, 200, 250, 300].map((m) => expect.closeTo(latAt(m), 6)));
+        expect(lats(after)[0]).toBeCloseTo(lats(before)[2], 8);
+    });
+
+    it('ignores the live leg to the vehicle\'s current position', () => {
+        const fc = vehicleTrackLabelsGeoJSON([v('d1', north(40.0, 2), {
+            current: { lat: 40.003, long: -79.7, alt: 0 },
+        })], [], 50);
+        // Only the ~111 m recorded: 50 m; 100 m is too near the newest point
+        expect(fc.features).toHaveLength(1);
     });
 
     it('labels nothing on a track shorter than the spacing', () => {

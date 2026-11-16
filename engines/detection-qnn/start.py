@@ -14,6 +14,8 @@ DEFAULTS = {
     "nms_iou_threshold": 0.3,
     "log_level": "info",
     "max_output_size": 65536,
+    "early_discard": False,
+    "letterbox_interpolation": "linear",
 }
 
 args = json.loads(os.environ.get("STEELEAGLE_PLUGIN_ARGS") or "{}")
@@ -67,11 +69,18 @@ else:
     if not os.path.isfile(labels):
         labels = None
 
+libs_dir = os.path.join(plugin_dir, "libs")
+
 # Prepend rather than replace: ADSP_LIBRARY_PATH overrides the DSP's default
 # search path, so the system skel dirs must stay on it (separator is ';').
 os.environ["ADSP_LIBRARY_PATH"] = ";".join(
-    [os.path.join(plugin_dir, "libs"), os.environ.get("ADSP_LIBRARY_PATH", ""),
+    [libs_dir, os.environ.get("ADSP_LIBRARY_PATH", ""),
      "/usr/lib/rfsa/adsp", "/usr/lib/dsp/cdsp", "/dsp"]
+)
+# A backend loads its stub (e.g. libQnnDsp.so loads libQnnDspV66Stub.so) by
+# name, so the stubs shipped in libs/ must be on the loader's path.
+os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
+    filter(None, [libs_dir, os.environ.get("LD_LIBRARY_PATH")])
 )
 
 server_args = [
@@ -80,11 +89,14 @@ server_args = [
     "--backend", resolve(args["backend"]),
     "--uriel_engine", name,
     "--uriel_task", "detect",
+    # Forward every frame, or only the frames with detections
+    "--uriel_forward", "detections" if args["early_discard"] else "always",
     "--confidence_threshold", str(args["confidence"]),
     "--nms_score_threshold", str(args["nms_score_threshold"]),
     "--nms_iou_threshold", str(args["nms_iou_threshold"]),
     "--log_level", str(args["log_level"]),
     "--uriel_max_result_size", str(args["max_output_size"]),
+    "--letterbox_interpolation", str(args["letterbox_interpolation"]),
 ]
 if labels:
     server_args += ["--labels", labels]

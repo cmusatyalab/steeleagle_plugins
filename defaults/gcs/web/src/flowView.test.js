@@ -150,9 +150,11 @@ describe('display helpers', () => {
 
     it('builds palette tooltips', () => {
         const yolo = catalog.daemons[1].engines.find((e) => e.name === `${SWAP.ip}.yolo`);
-        expect(paletteTitle(yolo)).toBe('accepts RawFrame · events: result, dropped');
+        expect(paletteTitle(yolo)).toBe('accepts RawFrame · forwards what it accepts · events: result, dropped');
+        expect(paletteTitle({ ...yolo, forwards: TYPES.raw })).toBe('accepts RawFrame · forwards RawFrame · events: result, dropped');
+        expect(paletteTitle({ ...yolo, forwards: TYPES.encoded })).toBe('accepts RawFrame · converts to EncodedFrame · events: result, dropped');
         const untyped = { name: 'x', accepts: ['*'], events: [{ label: 'result', type: null }], typed: false, problem: 'no plugin file' };
-        expect(paletteTitle(untyped)).toBe('accepts * · events: result · no plugin file');
+        expect(paletteTitle(untyped)).toBe('accepts * · forwards what it accepts · events: result · no plugin file');
     });
 
     it('is consistent with validateFlow output for Flow B', () => {

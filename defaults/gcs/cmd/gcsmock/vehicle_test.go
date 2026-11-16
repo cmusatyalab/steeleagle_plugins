@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	common "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/common"
 	telemetrypb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/telemetry"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 )
@@ -186,6 +187,34 @@ func TestMissionSquare(t *testing.T) {
 	}
 }
 
+func TestTelemetryMissionSetpoint(t *testing.T) {
+	v, c := flying(10)
+	v.StartMission()
+	c.run(time.Second)
+	a := v.Telemetry(c.now).GetPositionInfo().GetSetpoint()
+	if a == nil {
+		t.Fatal("no setpoint on a mission")
+	}
+	var sp common.GlobalPosition
+	if err := a.UnmarshalTo(&sp); err != nil {
+		t.Fatalf("setpoint is not a GlobalPosition: %v", err)
+	}
+	n, e := metersBetween(v.pos, LatLon{Lat: sp.GetLatitude(), Lon: sp.GetLongitude()})
+	if d := math.Hypot(n, e); math.Abs(d-45) > 0.5 {
+		t.Errorf("setpoint %v m ahead, want 45", d)
+	}
+	if b := wrap360(math.Atan2(e, n) * 180 / math.Pi); math.Abs(b-v.heading) > 0.5 {
+		t.Errorf("setpoint bearing %v, want heading %v", b, v.heading)
+	}
+	if sp.GetAltitude() != 310 {
+		t.Errorf("setpoint altitude %v, want 310", sp.GetAltitude())
+	}
+	v.Hold()
+	if a := v.Telemetry(c.now).GetPositionInfo().GetSetpoint(); a != nil {
+		t.Errorf("setpoint after Hold = %v", a)
+	}
+}
+
 func TestHoldCancelsMission(t *testing.T) {
 	v, c := flying(10)
 	v.StartMission()
@@ -269,4 +298,25 @@ func TestTelemetryModes(t *testing.T) {
 	want(telemetrypb.Mode_MODE_SIT)
 	v.TakeOff(10)
 	want(telemetrypb.Mode_MODE_TAKEOFF)
+}
+
+// TestTelemetryBatteryWarnings checks that the battery warning follows the
+// charge: low below 30%, critical below 15%.
+func TestTelemetryBatteryWarnings(t *testing.T) {
+	for _, tt := range []struct {
+		battery float64
+		want    telemetrypb.AlertInfo_BatteryWarning
+	}{
+		{100, telemetrypb.AlertInfo_BATTERY_WARNING_UNSPECIFIED},
+		{30, telemetrypb.AlertInfo_BATTERY_WARNING_UNSPECIFIED},
+		{29.5, telemetrypb.AlertInfo_BATTERY_WARNING_LOW},
+		{15, telemetrypb.AlertInfo_BATTERY_WARNING_LOW},
+		{14.5, telemetrypb.AlertInfo_BATTERY_WARNING_CRITICAL},
+	} {
+		v := NewVehicle("alpha", LatLon{40, -80})
+		v.SetBattery(tt.battery)
+		if got := v.Telemetry(time.Now()).GetAlertInfo().GetBatteryWarning(); got != tt.want {
+			t.Errorf("battery %v%%: warning %v, want %v", tt.battery, got, tt.want)
+		}
+	}
 }

@@ -64,6 +64,7 @@ type options struct {
 	noEncoder                     map[string]bool
 	noYolo                        map[string]bool
 	noDetector                    bool
+	battery                       float64
 	denyConfig                    map[string]bool
 	archs                         map[string]string // daemon IP -> architecture
 }
@@ -111,6 +112,7 @@ func parseFlags(args []string) (options, error) {
 	noEncoder := fs.String("no-encoder-daemons", "", "comma-separated IPs of daemons without an h264_encoder")
 	noYolo := fs.String("no-yolo-daemons", "", "comma-separated IPs of daemons without a yolo engine")
 	fs.BoolVar(&o.noDetector, "no-detector", false, "don't run the mock detector on the GCS's daemon")
+	fs.Float64Var(&o.battery, "battery", 100, "battery charge the vehicles start with, in percent (low below 30, critical below 15)")
 	denyConfig := fs.String("deny-config-daemons", "", "comma-separated IPs of daemons that refuse config, restart and package changes with PermissionDenied")
 	archs := fs.String("daemon-arch", "",
 		"comma-separated ip=arch entries (amd64 or arm64) for daemon architectures; others are amd64")
@@ -255,13 +257,14 @@ func run(o options, log zerolog.Logger) (int, error) {
 	vehicles := map[string]*Vehicle{}
 	for i, name := range o.vehicles {
 		v := NewVehicle(name, offsetFrom(cmu, 0, float64(i)*15))
+		v.SetBattery(o.battery)
 		vehicles[name] = v
 		if err := startVehicle(u, name, v); err != nil {
 			return 1, err
 		}
 	}
 	if top.Detector != "" {
-		if err := u.StartEngine(top.Detector, detectionID, detectorMaxOutput, Detector); err != nil {
+		if err := u.StartEngine(top.Detector, detectionID, detectorMaxOutput, NewDetector(vehicles)); err != nil {
 			return 1, err
 		}
 	}

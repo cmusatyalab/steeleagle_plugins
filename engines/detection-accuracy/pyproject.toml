@@ -3,7 +3,7 @@ name = "detection-accuracy"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "uriel>=0.2.0",
+    "uriel>=0.3.1",
     "protobuf",
 ]
 
@@ -15,10 +15,16 @@ include = ["steeleagle_protocol*"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64", "linux-aarch64"]
+platforms = [
+    { name = "linux-64-glibc-2-27", platform = "linux-64", glibc = "2.27" },
+    { name = "linux-aarch64-glibc-2-27", platform = "linux-aarch64", glibc = "2.27" },
+]
+
+[tool.pixi.dependencies]
+python = "3.12.*"
 
 [tool.pixi.pypi-dependencies]
 detection-accuracy = { path = ".", editable = true }
 
 [tool.pixi.tasks]
-start = "uv run main.py"
+start = "python main.py"

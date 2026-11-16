@@ -2,12 +2,21 @@
 
 Both take an RGB image and return the same Detected list, so the engine does
 not care which one is running.
+
+Each model runs on a square of a fixed size (its input size), and stretches
+any other image to it: RF-DETR to its resolution, ignoring the aspect ratio;
+YOLO to its imgsz, keeping it. A small image, such as a crop, is blown up to
+fill that square, and RF-DETR stretches a tall crop to a square too.
+LetterboxPredictor (the letterbox arg) instead scales the image evenly until
+its longer side is the input size, up or down, and centers it on a gray square
+of that size, so the model never stretches it.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import supervision as sv
+from PIL import Image
 
 from detection.config import RFDETR_SIZE_CLASSES, RFDETR_STOCK_MODEL
 from detection.paths import resolve
@@ -20,6 +29,13 @@ class Detected:
     box: tuple[
         float, float, float, float
     ]  # y_min, x_min, y_max, x_max, as fractions of the image
+
+
+# Ultralytics' default predict size, when a YOLO model does not record one
+YOLO_DEFAULT_IMGSZ = 640
+# The gray letterbox pads with: Ultralytics' letterbox fill, which is close to
+# the ImageNet mean RF-DETR normalizes by, so the padding reads as nothing.
+PAD_VALUE = 114
 
 
 def keep_classes(detected, classes):
@@ -46,6 +62,70 @@ def from_supervision(detections, width, height):
     ]
 
 
+def pad_to_square(rgb, size):
+    """`rgb` centered on a gray square whose side is `size`, or the image's
+    longer side if that is longer; and the (top, left) of the image in it."""
+    height, width = rgb.shape[:2]
+    side = max(size, height, width)
+    top, left = (side - height) // 2, (side - width) // 2
+    padded = np.full((side, side, rgb.shape[2]), PAD_VALUE, dtype=np.uint8)
+    padded[top : top + height, left : left + width] = rgb
+    return padded, top, left
+
+
+def _clip(fraction):
+    return min(max(fraction, 0.0), 1.0)
+
+
+def scale_to_fit(rgb, size):
+    """`rgb` scaled evenly so that its longer side is `size` pixels."""
+    height, width = rgb.shape[:2]
+    scale = size / max(height, width)
+    if scale == 1:
+        return rgb
+    new_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    # Bilinear up; averaging every pixel down, so a big frame does not alias
+    resample = Image.Resampling.BILINEAR if scale > 1 else Image.Resampling.BOX
+    return np.asarray(Image.fromarray(rgb).resize(new_size, resample))
+
+
+def unpad(detected, side, top, left, width, height):
+    """The detections `detected` in a padded square of `side` (pad_to_square),
+    with boxes as fractions of the `width` x `height` image at (top, left) in
+    it. Boxes are clipped to the image, and a detection wholly in the padding
+    is left out."""
+    out = []
+    for d in detected:
+        y_min, x_min, y_max, x_max = d.box
+        box = (
+            _clip((y_min * side - top) / height),
+            _clip((x_min * side - left) / width),
+            _clip((y_max * side - top) / height),
+            _clip((x_max * side - left) / width),
+        )
+        if box[2] > box[0] and box[3] > box[1]:
+            out.append(replace(d, box=box))
+    return out
+
+
+class LetterboxPredictor:
+    """Runs `predictor` on each image letterboxed to its input size: scaled
+    evenly to fit it, then padded to its square, rather than letting the model
+    resize the image to it. Boxes are fractions of the image, as unscaled
+    boxes would be."""
+
+    def __init__(self, predictor):
+        self.predictor = predictor
+        self.input_size = predictor.input_size
+
+    def predict(self, rgb):
+        scaled = scale_to_fit(rgb, self.input_size)
+        height, width = scaled.shape[:2]
+        padded, top, left = pad_to_square(scaled, self.input_size)
+        detected = self.predictor.predict(padded)
+        return unpad(detected, padded.shape[0], top, left, width, height)
+
+
 class YoloPredictor:
     def __init__(self, weights, confidence):
         from ultralytics import YOLO
@@ -53,6 +133,12 @@ class YoloPredictor:
         # A stock name that is not on disk yet is downloaded to `weights`.
         self.model = YOLO(str(weights))
         self.confidence = confidence
+
+    @property
+    def input_size(self):
+        """The side of the square the model runs on."""
+        imgsz = self.model.overrides.get("imgsz") or YOLO_DEFAULT_IMGSZ
+        return max(imgsz) if isinstance(imgsz, (list, tuple)) else int(imgsz)
 
     def predict(self, rgb):
         bgr = np.ascontiguousarray(rgb[..., ::-1])  # Ultralytics reads arrays as BGR
@@ -83,6 +169,12 @@ class RfDetrPredictor:
         self.confidence = confidence
         self.labels = labels
 
+    @property
+    def input_size(self):
+        """The side of the square the model runs on: the resolution its
+        predict resizes every image to."""
+        return int(self.model.model.resolution)
+
     def predict(self, rgb):
         detections = self.model.predict(rgb, threshold=self.confidence)
         if self.labels:
@@ -105,6 +197,11 @@ class RfDetrPredictor:
 def load_predictor(config, models_dir):
     """The predictor `config` asks for. A model file is looked for in
     `models_dir`, where eagled saves transferred models."""
+    predictor = _load(config, models_dir)
+    return LetterboxPredictor(predictor) if config.letterbox else predictor
+
+
+def _load(config, models_dir):
     if config.architecture == "rfdetr":
         weights = (
             None

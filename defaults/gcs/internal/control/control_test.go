@@ -547,3 +547,30 @@ func TestHoldSurvivesDisconnect(t *testing.T) {
 		t.Errorf("hook calls = %v, want %v", h.calls, want)
 	}
 }
+
+// TestStartedHook ensures that the started hook gets the vehicles whose
+// mission started.
+func TestStartedHook(t *testing.T) {
+	server, c := serveWith(t, &fakeDaemon{fail: map[string]bool{"b": true}}, DefaultTimeout)
+	var h hookRecorder
+	c.OnStarted(h.hook)
+	post(t, server, "/api/start", `{"vehicles": ["a", "b"]}`)
+	if want := [][]string{{"a"}}; !slices.EqualFunc(h.calls, want, slices.Equal) {
+		t.Errorf("hook calls = %v, want %v", h.calls, want)
+	}
+}
+
+// TestStoppedHook ensures that the stopped hook gets the vehicles whose
+// mission was stopped, by Stop Mission or by Hold, including those with no
+// mission to stop.
+func TestStoppedHook(t *testing.T) {
+	d := &fakeDaemon{fail: map[string]bool{"b": true}, noMission: map[string]bool{"c": true}}
+	server, c := serveWith(t, d, DefaultTimeout)
+	var h hookRecorder
+	c.OnStopped(h.hook)
+	post(t, server, "/api/command", `{"stop_mission": true, "vehicles": ["a", "b", "c"]}`)
+	post(t, server, "/api/command", `{"hold": true, "vehicles": ["a", "b"]}`)
+	if want := [][]string{{"a", "c"}, {"a"}}; !slices.EqualFunc(h.calls, want, slices.Equal) {
+		t.Errorf("hook calls = %v, want %v", h.calls, want)
+	}
+}

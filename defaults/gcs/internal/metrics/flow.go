@@ -3,6 +3,7 @@ package metrics
 import (
 	"github.com/cmusatyalab/steeleagle/config"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
+	"strings"
 )
 
 // Node kinds.
@@ -18,14 +19,22 @@ const (
 	StatePrometheusUnreachable = "prometheus_unreachable"
 )
 
-// BottleneckBusyFraction is how busy the busiest engine on a path must be,
-// as the fraction of the window it spent processing, to be marked the
-// bottleneck when it skips no inputs.
-const BottleneckBusyFraction = 0.8
+// The busiest engine on a path is marked the bottleneck when it is busy at
+// least BottleneckBusyFraction of the window, or skips at least
+// BottleneckSkippedShare of its inputs. A few skips don't count: an idle
+// engine with several inputs still skips one now and then, when a burst
+// replaces an input before the engine takes it.
+const (
+	BottleneckBusyFraction = 0.8
+	BottleneckSkippedShare = 0.05
+)
 
 // EngineMetrics are an engine's numbers over a window. Each is null when
-// Prometheus has no sample for it in the window.
+// Prometheus has no sample for it in the window. Mean is the exact mean time
+// per input; P50 and P95 are estimated from the histogram's buckets, so only
+// tell which bucket the time falls in when the buckets are wide.
 type EngineMetrics struct {
+	Mean            *float64 `json:"mean_seconds"`
 	P50             *float64 `json:"p50_seconds"`
 	P95             *float64 `json:"p95_seconds"`
 	Wait            *float64 `json:"wait_seconds"`
@@ -34,10 +43,12 @@ type EngineMetrics struct {
 	Busy            *float64 `json:"busy_fraction"`
 }
 
-// Latency is a time's median and 95th percentile, each null without data.
+// Latency is a time's exact mean, and its median and 95th percentile as
+// estimated from its histogram's buckets, each null without data.
 type Latency struct {
-	P50 *float64 `json:"p50_seconds"`
-	P95 *float64 `json:"p95_seconds"`
+	Mean *float64 `json:"mean_seconds"`
+	P50  *float64 `json:"p50_seconds"`
+	P95  *float64 `json:"p95_seconds"`
 }
 
 // Node is a producer or engine of a flow. An engine's ID is its qualified
@@ -51,10 +62,21 @@ type Node struct {
 	Bottleneck bool           `json:"bottleneck"`
 }
 
-// Edge leads from a producer or engine to an engine.
+// Edge leads from a producer or engine to an engine. It crosses the network
+// when one end runs on the vehicle and the other on the remote server.
 type Edge struct {
-	From string `json:"from"`
-	To   string `json:"to"`
+	From           string `json:"from"`
+	To             string `json:"to"`
+	CrossesNetwork bool   `json:"crosses_network"`
+}
+
+// Network is the round trip time between the vehicle's daemon and its remote
+// server over a window, as its QUIC connection estimates it, each null
+// without samples. The minimum approaches the round trip propagation delay;
+// the mean adds the queueing on the way.
+type Network struct {
+	RTTMin  *float64 `json:"rtt_min_seconds"`
+	RTTMean *float64 `json:"rtt_mean_seconds"`
 }
 
 // View is a vehicle's running flow, with the numbers of a window.
@@ -71,13 +93,20 @@ type View struct {
 	// the end-to-end time then leaves those frames out and is biased low, or
 	// missing if every frame was.
 	ClockSkewShare *float64 `json:"clock_skew_share"`
+	// Network is null when no edge crosses the network, or there are no
+	// round trip samples in the window.
+	Network *Network `json:"network"`
 }
 
 // BuildView makes the view of flowTOML, the flow vehicle runs, without
-// numbers. Each engine's host is the hostname of its daemon, from hostnames
-// by IP; producers run on the vehicle's daemon. An unknown hostname falls
-// back to the IP. An empty flowTOML makes a view without nodes.
-func BuildView(flowTOML []byte, vehicle string, hostnames map[string]string) (View, error) {
+// numbers. A flow names its nodes relative to the vehicle (see
+// fleet/flownames.go); each node's ID is the name the vehicle qualifies it to,
+// which Uriel's metrics label it by: the vehicle's streams and its local
+// engines (and their producers) are on the vehicle's daemon, its remote
+// engines on the orchestrator's, orchestratorIP. Each node's host is the
+// hostname of its daemon, from hostnames by IP, falling back to the IP. An
+// empty flowTOML makes a view without nodes.
+func BuildView(flowTOML []byte, vehicle, orchestratorIP string, hostnames map[string]string) (View, error) {
 	v := View{Vehicle: vehicle, Nodes: []Node{}, Edges: []Edge{}}
 	if len(flowTOML) == 0 {
 		return v, nil
@@ -93,22 +122,44 @@ func BuildView(flowTOML []byte, vehicle string, hostnames map[string]string) (Vi
 		return ip
 	}
 	vehicleIP, _ := fleet.SplitName(vehicle)
+	id := func(name string) string { return fleet.QualifyFlowName(name, vehicle, vehicleIP, orchestratorIP) }
+	// The node's label, its name without its location prefix, and the IP of
+	// the daemon it runs on
+	place := func(name string) (label, ip string) {
+		for _, prefix := range []string{fleet.VehiclePrefix, fleet.LocalPrefix} {
+			if rest, ok := strings.CutPrefix(name, prefix); ok {
+				return rest, vehicleIP
+			}
+		}
+		if rest, ok := strings.CutPrefix(name, fleet.RemotePrefix); ok {
+			return rest, orchestratorIP
+		}
+		return name, vehicleIP
+	}
+	// Where each node runs, by ID: producers on the vehicle, engines where the
+	// flow places them
+	location := make(map[string]string, len(flow.Producers)+len(flow.Engines))
 	for _, p := range flow.Producers {
-		v.Nodes = append(v.Nodes, Node{ID: p.Name, Kind: KindProducer, Label: p.Name, Host: host(vehicleIP)})
+		label, ip := place(p.Name)
+		v.Nodes = append(v.Nodes, Node{ID: id(p.Name), Kind: KindProducer, Label: label, Host: host(ip)})
+		location[id(p.Name)] = config.LocationLocal
 	}
 	for _, e := range flow.Engines {
-		ip, bare := fleet.SplitName(e.Name)
-		v.Nodes = append(v.Nodes, Node{ID: e.Name, Kind: KindEngine, Label: bare, Host: host(ip)})
+		label, ip := place(e.Name)
+		v.Nodes = append(v.Nodes, Node{ID: id(e.Name), Kind: KindEngine, Label: label, Host: host(ip)})
+		location[id(e.Name)] = e.Location
 	}
 	for _, e := range flow.Edges {
-		v.Edges = append(v.Edges, Edge{From: e.From, To: e.To})
+		from, to := id(e.From), id(e.To)
+		v.Edges = append(v.Edges, Edge{From: from, To: to, CrossesNetwork: location[from] != location[to]})
 	}
 	return v, nil
 }
 
 // MarkBottlenecks marks, on every path from a producer to the end of the
 // flow, the engine that is busiest, if it is busy at least
-// BottleneckBusyFraction of the time or skips inputs. Busy time, not latency,
+// BottleneckBusyFraction of the time or skips at least BottleneckSkippedShare
+// of its inputs. Busy time, not latency,
 // decides: a slow engine that is rarely fed holds nothing up.
 func MarkBottlenecks(v *View) {
 	index := make(map[string]int, len(v.Nodes))
@@ -162,6 +213,6 @@ func holdsUp(n Node) bool {
 	if busyOf(n) == noBusy {
 		return false
 	}
-	skips := n.Metrics.Skipped != nil && *n.Metrics.Skipped > 0
+	skips := n.Metrics.Skipped != nil && *n.Metrics.Skipped >= BottleneckSkippedShare
 	return *n.Metrics.Busy >= BottleneckBusyFraction || skips
 }

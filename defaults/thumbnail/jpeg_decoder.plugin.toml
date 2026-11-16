@@ -30,4 +30,6 @@ default = false
 [engine]
 type = "filter"
 inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]
+# Each input is converted, so this is what the engine sends on
+forwards = "steeleagle_protocol/v1/messages/frame/RawFrame"
 # No result: each frame is replaced with the RGB RawFrame it decodes to

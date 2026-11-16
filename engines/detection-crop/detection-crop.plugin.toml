@@ -1,0 +1,71 @@
+[plugin]
+name = "Detection Crop"
+type = "engine"
+description = "Crops each camera frame to the highest-scoring detection of a class that a local detection engine found in it, forwards the crop with the detection's class and confidence, and delivers every crop to the remote verifier, best first, on its reintegration producer"
+
+[[args]]
+name = "detector"
+type = "string"
+description = "Service name of the detection engine on this daemon whose results the frames are cropped by; required"
+default = ""
+
+[[args]]
+name = "class"
+type = "string"
+description = "Class of the detection to crop to, as the detector names it (e.g. \"person\"), ignoring case; required"
+default = ""
+
+[[args]]
+name = "verifier"
+type = "string"
+description = "Service name of the engine on the remote daemon that the crops go to; a crop stays queued until its RESULT event for it shows it has read the crop. Required"
+default = ""
+
+[[args]]
+name = "timeout"
+type = "number"
+description = "The longest to wait for the detector's result on a frame before dropping it, in milliseconds"
+default = 2000
+
+[[args]]
+name = "max_width"
+type = "number"
+description = "Widest crop sent, in pixels; a wider one is dropped"
+default = 1920
+
+[[args]]
+name = "max_height"
+type = "number"
+description = "Tallest crop sent, in pixels; a taller one is dropped"
+default = 1080
+
+[[args]]
+name = "max_queue"
+type = "number"
+description = "Most crops waiting for the verifier; past it, the one of the least confident detection is dropped"
+default = 64
+
+[[args]]
+name = "log_sent"
+type = "string"
+description = "CSV file to log each crop cut and queued to send to, as frame_id, timestamp_ns (the frame's capture timestamp, which the crop keeps), the crop's left, top, right and bottom in pixels of its frame_width x frame_height frame, score and class; a relative path is in the daemon's files directory (STEELEAGLE_FILES). Replaced when the plugin starts. Empty for none"
+default = ""
+
+[engine]
+type = "classification"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# Each frame is replaced with its crop, an RGB RawFrame with the id, timestamp
+# and pose of the frame, or dropped if the detector skipped it, timed out, or
+# found nothing of the class in it. Encode it (e.g. with the thumbnail
+# plugin's WebP encoder) before it crosses to the verifier.
+forwards = "steeleagle_protocol/v1/messages/frame/RawFrame"
+# The crop sent: class the detection's class, as the detector names it, score
+# its confidence
+result = "steeleagle_protocol/v1/messages/result/ClassificationResult"
+
+[[engine.producers]]
+# Delivers the queued crops to the verifier, best first, one at a time, each
+# until the verifier's RESULT for it, whether or not frames come in. Give it
+# one token; leave the engine a dead end (no edge out of it).
+name = "reintegration"
+output = "steeleagle_protocol/v1/messages/frame/RawFrame"

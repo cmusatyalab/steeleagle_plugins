@@ -1,6 +1,7 @@
 """Uriel engine: scores FrameWithEmbedding (from the C++ embed engine) against
 the PatchCore memory bank via FAISS, forwards the frame as a RawFrame if
-anomalous, drops it otherwise. Forwards no result. Scoring logic ported
+anomalous, drops it otherwise. Forwards no result. With a verifier, the
+anomalous frames are also reintegrated (reintegration.py). Scoring logic ported
 verbatim from patchcore_csv_faiss.py.
 
 The memory bank is reconstructed directly from the FAISS index rather than
@@ -35,11 +36,14 @@ source control), so a swap announcement naming one of those bundled banks
 never needs an actual transfer -- fermi already has it independently.
 """
 
+import contextlib
+import csv
 import json
 import logging
 import os
 import shutil
 import time
+from pathlib import Path
 
 import faiss
 import numpy as np
@@ -48,6 +52,7 @@ import uriel
 from anomalib.models import Patchcore
 
 from frame_with_embedding_pb2 import FrameWithEmbedding
+from reintegration import Crop, Reintegration, SendQueue
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from google.protobuf.timestamp_pb2 import Timestamp
 
@@ -60,6 +65,12 @@ RGB_CHANNELS = 3
 EXPECTED_RGB_SIZE = FRAME_W * FRAME_H * RGB_CHANNELS
 
 RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
+# The producer that delivers queued frames, as score.plugin.toml advertises
+# it; the engine publishes on {engine name}.{this}
+REINTEGRATION = "reintegration"
+# How long the engine waits for an input or event before it reads its
+# producer's events and sends a queued frame
+POLL_INTERVAL_S = 0.02
 
 DEFAULT_BACKBONE = "resnet18"
 DEFAULT_LAYERS = ["layer2", "layer3"]
@@ -213,25 +224,48 @@ def run_engine(name, args, remote_qualifier=None):
     qualifier for patchcore-retrain's engine (joined with
     args['retrain_name'] the same way h264_encoder joins remote_qualifier
     with decoder_name) -- this engine subscribes to it and hot-swaps its
-    bank whenever retrain announces one."""
+    bank whenever retrain announces one.
+
+    With args['verifier'] set, each anomalous frame forwarded is also queued,
+    and the reintegration producer delivers them to that remote engine, one at
+    a time, most anomalous first, each until it reads it (reintegration.py).
+    The forwarded frame is not tracked: leave the engine a dead end."""
     bootstrap_bundled_models()
 
     faiss_index, model, threshold, trained_threshold = load_bank(
         args["faiss_index"], args["threshold_meta"], args["threshold"],
     )
+    verifier = qualify(remote_qualifier, args["verifier"]) if args["verifier"] else None
+    retrain_engine = qualify(remote_qualifier, args["retrain_name"]) if remote_qualifier else None
+    sent_log = SentLog(args["log_sent"]) if args["log_sent"] else None
+    scored_log = ScoredLog(args["log_scored"]) if args["log_scored"] else None
 
-    with torch.no_grad(), uriel.Engine(name, max_output_size=args["max_output_size"]) as engine:
-        if remote_qualifier:
-            retrain_engine = f"{remote_qualifier}.{args['retrain_name']}"
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(torch.no_grad())
+        engine = stack.enter_context(uriel.Engine(name, max_output_size=args["max_output_size"]))
+        queue = reintegration = publish = events = None
+        if verifier:
+            producer = f"{name}.{REINTEGRATION}"
+            frames = stack.enter_context(uriel.Producer(
+                producer, input_type=RAW_FRAME_TYPE, max_input_size=args["max_output_size"]))
+            events = stack.enter_context(uriel.Subscription.producer(producer))
+            queue = SendQueue(max_size=args["max_queue"])
+            reintegration = Reintegration(queue)
+
+            def publish(payload):
+                return uriel.InputId(producer, frames.session, frames.send(payload))
+
+            logger.info("reintegrating anomalous frames on %s until %s has them", producer, verifier)
+        if retrain_engine:
             engine.subscribe(retrain_engine)
             logger.info("engine %s ready; watching %s for bank-swap notifications", name, retrain_engine)
         else:
             logger.info("engine %s ready; there is no remote daemon, so no retrain engine to watch", name)
 
         while True:
-            engine.wait(0.1)
+            engine.wait(POLL_INTERVAL_S)
             while (event := engine.poll_event()) is not None:
-                if event.kind != uriel.EventKind.RESULT:
+                if event.kind != uriel.EventKind.RESULT or event.engine != retrain_engine:
                     continue
                 try:
                     swap_info = json.loads(bytes(event.result))
@@ -244,51 +278,138 @@ def run_engine(name, args, remote_qualifier=None):
                     logger.info("swapped to new bank: %s", swap_info)
                 except Exception as e:
                     logger.error("bank swap failed, keeping current bank: %s", e)
+            if events is not None:
+                while (event := events.poll()) is not None:
+                    try:
+                        queue.on_event(event, verifier)
+                    except Exception:
+                        logger.exception("failed to handle a %s event", event.kind)
 
             input = engine.poll()
-            if input is None:
-                continue
+            if input is not None:
+                process(engine, input, model, faiss_index, threshold, args, queue, sent_log, scored_log)
+            if reintegration is not None:
+                try:
+                    reintegration.step(time.monotonic(), publish)
+                except Exception:
+                    logger.exception("reintegration failed to send a frame")
 
-            t0 = time.perf_counter()
-            combined = FrameWithEmbedding()
-            combined.ParseFromString(bytes(input.data))
 
-            try:
-                anomaly_score = score(model, faiss_index, combined.embedding)
-            except ValueError as e:
-                logger.error("bad embedding, dropping: %s", e)
-                engine.drop()
-                continue
+def process(engine, input, model, faiss_index, threshold, args, queue, sent_log, scored_log=None):
+    """Scores the held `input`, and drops it if it is normal, or replaces it
+    with its frame, as a RawFrame, if it is anomalous, queuing that too if
+    there is a `queue`."""
+    t0 = time.perf_counter()
+    combined = FrameWithEmbedding()
+    combined.ParseFromString(bytes(input.data))
 
-            is_anomalous = anomaly_score > threshold
-            elapsed_ms = (time.perf_counter() - t0) * 1000
+    try:
+        anomaly_score = score(model, faiss_index, combined.embedding)
+    except ValueError as e:
+        logger.error("bad embedding, dropping: %s", e)
+        engine.drop()
+        return
 
-            if not is_anomalous:
-                engine.drop()
-                logger.info("normal    score=%.4f (%.1fms) -> dropped", anomaly_score, elapsed_ms)
-                continue
+    is_anomalous = anomaly_score > threshold
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    if scored_log is not None:
+        scored_log.write(input.id, anomaly_score, threshold, is_anomalous, elapsed_ms)
 
-            frame_bytes = combined.encoded_frame
-            if len(frame_bytes) != EXPECTED_RGB_SIZE:
-                logger.error(
-                    "ANOMALOUS score=%.4f but frame is %d bytes, not a %dx%d RGB frame; dropping",
-                    anomaly_score, len(frame_bytes), FRAME_W, FRAME_H,
-                )
-                engine.drop()
-                continue
-            ts = Timestamp()
-            ts.GetCurrentTime() 
-            payload = frame_pb2.RawFrame(
-                timestamp=ts, data=frame_bytes, h_res=FRAME_W, v_res=FRAME_H, channels=RGB_CHANNELS,
-            ).SerializeToString()
-            if len(payload) > args["max_output_size"]:
-                logger.error(
-                    "ANOMALOUS score=%.4f but RawFrame of %d bytes exceeds max_output_size %d; dropping",
-                    anomaly_score, len(payload), args["max_output_size"],
-                )
-                engine.drop()
-                continue
+    if not is_anomalous:
+        engine.drop()
+        logger.info("normal    score=%.4f (%.1fms) -> dropped", anomaly_score, elapsed_ms)
+        return
 
-            engine.loan()[: len(payload)] = payload
-            engine.replace(len(payload), output_type=RAW_FRAME_TYPE)
-            logger.info("ANOMALOUS score=%.4f (%.1fms) -> forwarded", anomaly_score, elapsed_ms)
+    frame_bytes = combined.encoded_frame
+    if len(frame_bytes) != EXPECTED_RGB_SIZE:
+        logger.error(
+            "ANOMALOUS score=%.4f but frame is %d bytes, not a %dx%d RGB frame; dropping",
+            anomaly_score, len(frame_bytes), FRAME_W, FRAME_H,
+        )
+        engine.drop()
+        return
+    # The embed engine passes on only the pixels, so the frame is stamped
+    # here, and its id is the camera input's sequence number, which the
+    # replaced inputs keep; the sent log ties the two together
+    ts = Timestamp()
+    ts.GetCurrentTime()
+    payload = frame_pb2.RawFrame(
+        timestamp=ts, data=frame_bytes, h_res=FRAME_W, v_res=FRAME_H, channels=RGB_CHANNELS,
+        id=input.id.seq,
+    ).SerializeToString()
+    if len(payload) > args["max_output_size"]:
+        logger.error(
+            "ANOMALOUS score=%.4f but RawFrame of %d bytes exceeds max_output_size %d; dropping",
+            anomaly_score, len(payload), args["max_output_size"],
+        )
+        engine.drop()
+        return
+
+    if sent_log is not None:
+        sent_log.write(input.id, ts.ToNanoseconds(), anomaly_score, threshold)
+    engine.loan()[: len(payload)] = payload
+    engine.replace(len(payload), output_type=RAW_FRAME_TYPE)
+    if queue is not None:
+        queued = Crop(score=anomaly_score / threshold if threshold else anomaly_score,
+                      payload=payload, frame_id=input.id.seq)
+        queue.push(queued)
+    logger.info("ANOMALOUS score=%.4f (%.1fms) -> forwarded", anomaly_score, elapsed_ms)
+
+
+def qualify(qualifier, name):
+    """`name` qualified with a daemon's IP, as eagled names its services, or
+    as is if there is no qualifier."""
+    return f"{qualifier}.{name}" if qualifier else name
+
+
+def open_log(path, header):
+    """A line-buffered CSV writer on `path` (relative: in the daemon's files
+    directory), replacing it, with `header` written; and its file."""
+    path = Path(path)
+    files = os.environ.get("STEELEAGLE_FILES")
+    if not path.is_absolute() and files:
+        path = Path(files) / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "w", newline="", buffering=1)
+    writer = csv.writer(f)
+    writer.writerow(header)
+    return writer, f
+
+
+class ScoredLog:
+    """One CSV row per frame scored, anomalous or not: the camera input's
+    producer, session and seq (which the fake drone's frame log also has), its
+    anomaly score, the threshold, whether it was anomalous, and the
+    milliseconds scoring took. The frames missing from it were never scored."""
+
+    def __init__(self, path):
+        self._writer, self._file = open_log(
+            path, ("producer", "session", "seq", "score", "threshold", "anomalous", "ms"))
+
+    def write(self, input_id, anomaly_score, threshold, anomalous, ms):
+        self._writer.writerow((input_id.producer, input_id.session, input_id.seq, f"{anomaly_score:.4f}",
+                               f"{threshold:.4f}", int(anomalous), f"{ms:.1f}"))
+
+
+class SentLog:
+    """One CSV row per anomalous frame forwarded: the camera input's
+    producer, session and seq (which the fake drone's frame log also has),
+    the capture timestamp this engine gave it (which the encoders and
+    decoders on the way carry through), its anomaly score and the threshold.
+    A relative path is in the daemon's files directory. Line-buffered, so the
+    rows are on disk even if the plugin is killed."""
+
+    def __init__(self, path):
+        path = Path(path)
+        files = os.environ.get("STEELEAGLE_FILES")
+        if not path.is_absolute() and files:
+            path = Path(files) / path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        self._file = open(path, "w", newline="", buffering=1)
+        self._writer = csv.writer(self._file)
+        self._writer.writerow(("producer", "session", "seq", "timestamp_ns", "score", "threshold"))
+
+    def write(self, input_id, timestamp_ns, anomaly_score, threshold):
+        self._writer.writerow((input_id.producer, input_id.session, input_id.seq, timestamp_ns,
+                               f"{anomaly_score:.4f}", f"{threshold:.4f}"))

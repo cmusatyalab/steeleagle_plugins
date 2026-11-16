@@ -1,13 +1,12 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
-    addEngine, addProducer, availableStreams, emptyFlow, exportName, fileBaseName, isEnginePlaced,
+    addEngine, addEngineProducer, addProducer, availableStreams, emptyFlow, exportName, fileBaseName, flowName, isEnginePlaced,
+    engineProducerProblem, isEngineProducerPlaced,
     nodeLabel, parseFlowJson, removeEdge, removeNode, serializeFlow, setVehicle, updateEdge, updateNode,
     acceptsAll, addEdge, canConnect, forwardedTypes, streamChoices, toFlowToml, toTemplate, validateFlow,
-    fromTemplate, importFlowToml,
+    fromTemplate, importFlowToml, nodeById, templateIfValid,
 } from './flowModel.js';
 import { GCS, HARPY, HEISENBERG, LAB, SWAP, TYPES, catalogFixture, flowB } from './flowFixtures.js';
-import { findDaemon, hostLabel } from './flowCatalog.js';
-import { daemonOf } from './vehicleNames.js';
 
 const AT = { x: 1, y: 2 };
 const KESTREL = `${SWAP.ip}.kestrel`;
@@ -539,30 +538,30 @@ describe('validateFlow', () => {
 });
 
 const FLOW_B_TOML = `[[producers]]
-name = "harpy.telemetry"
+name = "vehicle.telemetry"
 tokens = 1
 [[producers]]
-name = "harpy.frames"
+name = "vehicle.frames"
 tokens = 1
 
 [[engines]]
-name = "100.64.0.2.yolo"
+name = "local.yolo"
 location = "local"
 [[engines]]
-name = "100.64.0.1.telemetry"
+name = "remote.telemetry"
 location = "remote"
 
 [[edges]]
-from = "harpy.telemetry"
-to = "100.64.0.1.telemetry"
+from = "vehicle.telemetry"
+to = "remote.telemetry"
 timeout = "2s"
 [[edges]]
-from = "harpy.frames"
-to = "100.64.0.2.yolo"
+from = "vehicle.frames"
+to = "local.yolo"
 timeout = "1s"
 [[edges]]
-from = "100.64.0.2.yolo"
-to = "100.64.0.1.telemetry"
+from = "local.yolo"
+to = "remote.telemetry"
 timeout = "2s"
 `;
 
@@ -589,6 +588,22 @@ describe('toTemplate', () => {
     });
 });
 
+describe('templateIfValid', () => {
+    const catalog = catalogFixture();
+
+    it('is the template of a valid flow', () => {
+        expect(templateIfValid(flowB(), catalog)).toEqual(toTemplate(flowB(), catalog));
+    });
+
+    it.each([
+        ['an empty flow', emptyFlow(), catalog],
+        ['no catalog', flowB(), null],
+        ['a flow with errors', { ...flowB(), nodes: [...flowB().nodes, { id: 'e9', kind: 'engine', engine: 'heisenberg.yolo', position: AT }] }, catalog],
+    ])('is null for %s', (_, flow, cat) => {
+        expect(templateIfValid(flow, cat)).toBeNull();
+    });
+});
+
 describe('toFlowToml', () => {
     const catalog = catalogFixture();
 
@@ -596,21 +611,28 @@ describe('toFlowToml', () => {
         expect(toFlowToml(flowB(), catalog)).toBe(FLOW_B_TOML);
     });
 
-    it('names nodes placed from the palette by hostname, with locations relative to the vehicle', () => {
+    it('names nodes relative to the vehicle, without hosts or addresses', () => {
         let flow = addProducer(setVehicle(emptyFlow(), HARPY), catalog, 'frames', AT);
         flow = addEngine(flow, catalog, yolo(SWAP), AT);
         flow = addEngine(flow, catalog, `${GCS.ip}.telemetry`, AT);
         const toml = toFlowToml(addEdge(flow, catalog, 'p1', 'e1', 'output'), catalog);
-        expect(toml).toContain('[[producers]]\nname = "harpy.frames"\n');
-        expect(toml).toContain('[[engines]]\nname = "swap.yolo"\nlocation = "local"\n');
-        expect(toml).toContain('[[engines]]\nname = "gcs.telemetry"\nlocation = "remote"\n');
+        expect(toml).toContain('[[producers]]\nname = "vehicle.frames"\n');
+        expect(toml).toContain('[[engines]]\nname = "local.yolo"\nlocation = "local"\n');
+        expect(toml).toContain('[[engines]]\nname = "remote.telemetry"\nlocation = "remote"\n');
+        expect(toml).not.toMatch(/harpy|swap|gcs|100\.64/);
+    });
+
+    it('names the orchestrator\'s engines local for a vehicle on its daemon', () => {
+        const flow = { ...flowB(), vehicle: `${GCS.ip}.owl` };
+        expect(flowName(flow, catalog, nodeById(flow, 'e2'))).toBe('local.telemetry');
+        expect(() => flowName(flow, catalog, nodeById(flow, 'e1'))).toThrow('is neither on the vehicle\'s daemon nor on the orchestrator');
     });
 
     // Left out, Uriel computes its own count rather than taking the default of 1
     it('always emits tokens, even the default', () => {
         const toml = toFlowToml(updateNode(flowB(), 'p2', { tokens: 3 }), catalog);
-        expect(toml).toContain('[[producers]]\nname = "harpy.telemetry"\ntokens = 1\n');
-        expect(toml).toContain('[[producers]]\nname = "harpy.frames"\ntokens = 3\n');
+        expect(toml).toContain('[[producers]]\nname = "vehicle.telemetry"\ntokens = 1\n');
+        expect(toml).toContain('[[producers]]\nname = "vehicle.frames"\ntokens = 3\n');
     });
 
     it('omits callbacks with a header comment', () => {
@@ -634,7 +656,7 @@ describe('toFlowToml', () => {
             vehicles: d.vehicles.map((v) => ({ ...v, streams: [...v.streams, { name: 'cam"1', output: 'image' }] })),
         }));
         const flow = addProducer(flowB(), quoted, 'cam"1', AT);
-        expect(toFlowToml(flow, quoted)).toContain('name = "harpy.cam\\"1"');
+        expect(toFlowToml(flow, quoted)).toContain('name = "vehicle.cam\\"1"');
     });
 });
 
@@ -684,16 +706,6 @@ describe('fromTemplate', () => {
         expect(flow.nodes[0]).not.toHaveProperty('host');
         expect(nodeLabel(flow, flow.nodes[0])).toBe('harpy.frames');
         expect(validateFlow(flow, catalog).errors).toEqual([]);
-    });
-
-    it('qualifies the bare names of an old TOML export with the vehicle\'s daemon', () => {
-        const flow = fromTemplate({
-            producers: [{ name: 'frames' }], engines: [{ name: 'yolo' }],
-            edges: [{ from: 'frames', to: 'yolo', timeout: '1s' }],
-        }, catalog, HARPY);
-        const home = hostLabel(catalog, findDaemon(catalog, daemonOf(HARPY)));
-        expect(flow.nodes.map((n) => n.stream ?? n.engine)).toEqual(['frames', `${home}.yolo`]);
-        expect(flow.edges).toHaveLength(1);
     });
 
     it('keeps a bare producer name as the stream and flags it without a vehicle', () => {
@@ -768,14 +780,44 @@ describe('importFlowToml', () => {
     it('marks unknown engines', async () => {
         const fetch = stub(200, {
             vehicle: '',
-            producers: [{ name: 'swap.frames' }],
-            engines: [{ name: 'swap.ghost' }],
-            edges: [{ from: 'swap.frames', to: 'swap.ghost', timeout: '1s' }],
+            producers: [{ name: 'vehicle.frames' }],
+            engines: [{ name: 'local.ghost' }],
+            edges: [{ from: 'vehicle.frames', to: 'local.ghost', timeout: '1s' }],
         });
         const flow = await importFlowToml('x', catalog, HARPY);
         expect(fetch.mock.calls[0][0]).toBe('http://gcs:8000/api/flows/from_toml');
         expect(flow.nodes.some((n) => n.engine === 'swap.ghost')).toBe(true);
         expect(validateFlow(flow, catalog).errors.some((e) => e.message.includes('ghost'))).toBe(true);
+    });
+
+    it('reads back what toFlowToml writes, for the same vehicle', async () => {
+        const flow = updateNode(flowB(), 'p2', { tokens: 3 });
+        // What the server's from_toml returns for toFlowToml's output
+        stub(200, {
+            vehicle: '',
+            producers: [{ name: 'vehicle.telemetry', tokens: 1 }, { name: 'vehicle.frames', tokens: 3 }],
+            engines: [{ name: 'local.yolo' }, { name: 'remote.telemetry' }],
+            edges: [
+                { from: 'vehicle.telemetry', to: 'remote.telemetry', timeout: '2s' },
+                { from: 'vehicle.frames', to: 'local.yolo', timeout: '1s' },
+                { from: 'local.yolo', to: 'remote.telemetry', timeout: '2s' },
+            ],
+        });
+        expect(toFlowToml(flow, catalog)).toContain('name = "vehicle.frames"\ntokens = 3');
+        const back = await importFlowToml('x', catalog, HARPY);
+        expect(back.nodes.map((n) => nodeLabel(back, n))).toEqual(['harpy.telemetry', 'harpy.frames', 'swap.yolo', 'gcs.telemetry']);
+        expect(validateFlow(back, catalog).errors).toEqual([]);
+        expect(toFlowToml(back, catalog)).toBe(toFlowToml(flow, catalog));
+    });
+
+    it.each([
+        ['an old export, named by host', 'swap.yolo'],
+        ['a bare name', 'yolo'],
+        ['an empty prefix', 'local.'],
+    ])('refuses %s', async (_, name) => {
+        stub(200, { vehicle: '', producers: null, engines: [{ name }], edges: null });
+        await expect(importFlowToml('x', catalog, HARPY)).rejects
+            .toThrow(`flow node ${name} isn't named vehicle.<stream>, local.<engine> or remote.<engine>`);
     });
 
     it('throws the server detail on a 422', async () => {
@@ -784,37 +826,158 @@ describe('importFlowToml', () => {
     });
 });
 
-describe('filters', () => {
-    // An H.264-encoder-like filter on the vehicle's daemon (takes RawFrames,
-    // forwards EncodedFrames it doesn't declare) feeding a sink that takes
-    // only EncodedFrames.
+describe('forwards', () => {
+    // An H.264-encoder-like filter on the vehicle's daemon: takes RawFrames,
+    // forwards them ('*'), and advertises the EncodedFrames it makes as its
+    // `frames` producer. A sink on the orchestrator takes only EncodedFrames;
+    // `pick` takes both and forwards only RawFrames.
     const catalog = catalogFixture();
-    catalog.daemons[1].engines.push({ name: `${SWAP.ip}.enc`, category: 'filter', accepts: [TYPES.raw], events: [{ label: 'result', type: null }], typed: true, problem: null });
-    catalog.daemons[0].engines.push({ name: `${GCS.ip}.sink`, category: 'generic', accepts: [TYPES.encoded], events: [{ label: 'result', type: null }], typed: true, problem: null });
-    const chain = () => {
+    const ev = [{ label: 'result', type: null }];
+    catalog.daemons[1].engines.push({
+        name: `${SWAP.ip}.enc`, category: 'filter', accepts: [TYPES.raw], forwards: '*', events: ev,
+        producers: [{ name: 'frames', type: TYPES.encoded }], typed: true, problem: null,
+    });
+    catalog.daemons[1].engines.push({
+        name: `${SWAP.ip}.pick`, category: 'filter', accepts: [TYPES.raw, TYPES.encoded], forwards: TYPES.raw, events: ev,
+        producers: [], typed: true, problem: null,
+    });
+    catalog.daemons[1].engines.push({
+        name: `${SWAP.ip}.h264`, category: 'filter', accepts: [TYPES.raw], forwards: TYPES.encoded, events: ev,
+        producers: [], typed: true, problem: null,
+    });
+    catalog.daemons[0].engines.push({
+        name: `${GCS.ip}.sink`, category: 'generic', accepts: [TYPES.encoded], forwards: '*', events: ev,
+        producers: [], typed: true, problem: null,
+    });
+    catalog.daemons[2].engines.push({
+        name: `${LAB.ip}.far`, category: 'generic', accepts: [TYPES.raw], forwards: '*', events: ev,
+        producers: [{ name: 'out', type: TYPES.encoded }], typed: true, problem: null,
+    });
+    catalog.daemons[0].engines.push({
+        name: `${GCS.ip}.relay`, category: 'generic', accepts: [TYPES.raw], forwards: '*', events: ev,
+        producers: [{ name: 'keyframes', type: TYPES.encoded }], typed: true, problem: null,
+    });
+    const withEncoder = () => {
         let flow = { ...emptyFlow(), vehicle: HARPY };
-        flow = addProducer(flow, catalog, 'frames', { x: 0, y: 0 });
-        flow = addEngine(flow, catalog, `${SWAP.ip}.enc`, { x: 0, y: 0 });
-        flow = addEngine(flow, catalog, `${GCS.ip}.sink`, { x: 0, y: 0 });
-        flow = addEdge(flow, catalog, 'p1', 'e1', 'output');
-        return addEdge(flow, catalog, 'e1', 'e2', 'output');
+        flow = addProducer(flow, catalog, 'frames', AT);
+        flow = addEngine(flow, catalog, `${SWAP.ip}.enc`, AT);
+        flow = addEngine(flow, catalog, `${GCS.ip}.sink`, AT);
+        return addEdge(flow, catalog, 'p1', 'e1', 'output');
     };
 
-    it('forward an unknown type, so what follows them is not type-checked', () => {
-        const flow = chain();
-        expect(forwardedTypes(flow, catalog, 'e1')).toEqual(['*']);
-        const { errors, warnings } = validateFlow(flow, catalog);
-        expect(errors).toEqual([]);
-        expect(warnings).toContainEqual({
-            edgeId: 'x2',
-            message: 'swap.enc → gcs.sink: swap.enc is a filter, so what it forwards is not type-checked',
-        });
+    it("'*' carries the type of the input, so a filter's input type is checked downstream", () => {
+        const flow = withEncoder();
+        expect(forwardedTypes(flow, catalog, 'e1')).toEqual([TYPES.raw]);
+        expect(canConnect(flow, catalog, 'e1', 'e2', 'output')).toBe('gcs.sink does not accept RawFrame');
     });
 
-    it('still type-check their own input', () => {
+    it('a specific forwards type replaces whatever arrives', () => {
         let flow = { ...emptyFlow(), vehicle: HARPY };
-        flow = addProducer(flow, catalog, 'telemetry', { x: 0, y: 0 });
-        flow = addEngine(flow, catalog, `${SWAP.ip}.enc`, { x: 0, y: 0 });
-        expect(canConnect(flow, catalog, 'p1', 'e1', 'output')).not.toBeNull();
+        flow = addProducer(flow, catalog, 'frames', AT);
+        flow = addProducer(flow, catalog, 'downward', AT);
+        flow = addEngine(flow, catalog, `${SWAP.ip}.pick`, AT);
+        flow = addEdge(flow, catalog, 'p2', 'e1', 'output');
+        // Only EncodedFrames arrive, so pick forwards nothing.
+        expect(forwardedTypes(flow, catalog, 'e1')).toEqual([]);
+        flow = addEdge(flow, catalog, 'p1', 'e1', 'output');
+        expect(forwardedTypes(flow, catalog, 'e1')).toEqual([TYPES.raw]);
+        flow = addEngine(flow, catalog, `${GCS.ip}.sink`, AT);
+        expect(canConnect(flow, catalog, 'e1', 'e2', 'output')).toBe('gcs.sink does not accept RawFrame');
+    });
+
+    it('a forwards type that is not an input converts whatever arrives into it', () => {
+        let flow = { ...emptyFlow(), vehicle: HARPY };
+        flow = addEngine(flow, catalog, `${SWAP.ip}.h264`, AT);
+        // Nothing arrives, so the encoder sends nothing on.
+        expect(forwardedTypes(flow, catalog, 'e1')).toEqual([]);
+        flow = addProducer(flow, catalog, 'frames', AT);
+        flow = addEdge(flow, catalog, 'p1', 'e1', 'output');
+        expect(forwardedTypes(flow, catalog, 'e1')).toEqual([TYPES.encoded]);
+        // The sink takes only EncodedFrames, so it can follow the encoder.
+        flow = addEngine(flow, catalog, `${GCS.ip}.sink`, AT);
+        expect(canConnect(flow, catalog, 'e1', 'e2', 'output')).toBeNull();
+    });
+
+    it('an untyped engine forwards an unknown type, so what follows it is not type-checked', () => {
+        const untyped = mapEngines(catalog, 'detector', (e) => ({ ...e, typed: false, accepts: ['*'], forwards: '*' }));
+        let flow = { ...emptyFlow(), vehicle: HARPY };
+        flow = addProducer(flow, untyped, 'telemetry', AT);
+        flow = addEngine(flow, untyped, `${SWAP.ip}.detector`, AT);
+        flow = addEngine(flow, untyped, `${GCS.ip}.sink`, AT);
+        flow = addEdge(flow, untyped, 'p1', 'e1', 'output');
+        expect(forwardedTypes(flow, untyped, 'e1')).toEqual(['*']);
+        expect(canConnect(flow, untyped, 'e1', 'e2', 'output')).toBeNull();
+    });
+
+    it("an engine's producer feeds engines with its own type", () => {
+        let flow = withEncoder();
+        flow = addEngineProducer(flow, catalog, `${SWAP.ip}.enc`, 'frames', AT);
+        const node = flow.nodes.at(-1);
+        expect(node).toEqual({ id: 'p2', kind: 'producer', engine: 'swap.enc', producer: 'frames', tokens: 1, position: AT });
+        expect(nodeLabel(flow, node)).toBe('swap.enc.frames');
+        expect(isEngineProducerPlaced(flow, catalog, `${SWAP.ip}.enc`, 'frames')).toBe(true);
+        expect(() => addEngineProducer(flow, catalog, `${SWAP.ip}.enc`, 'frames', AT)).toThrow('swap.enc.frames is already on the canvas');
+        // Every stream of the vehicle stays available: an engine producer isn't one.
+        expect(availableStreams(flow, catalog)).not.toContain('frames');
+        expect(streamChoices(flow, catalog).map((c) => c.name)).toContain('telemetry');
+        flow = addEdge(flow, catalog, 'p2', 'e2', 'output');
+        expect(validateFlow(flow, catalog).errors).toEqual([]);
+        expect(toTemplate(flow, catalog).producers).toEqual([
+            { name: 'harpy.frames', tokens: 1 },
+            { name: 'swap.enc.frames', tokens: 1 },
+        ]);
+        expect(toTemplate(flow, catalog).edges).toContainEqual({ from: 'swap.enc.frames', to: 'gcs.sink', timeout: '1s' });
+        // And not into an engine that doesn't accept EncodedFrames.
+        flow = addEngine(flow, catalog, `${SWAP.ip}.yolo`, AT);
+        expect(canConnect(flow, catalog, 'p2', 'e3', 'output')).toBe('swap.yolo does not accept EncodedFrame');
+    });
+
+    it("refuses and flags producers of engines off the vehicle's daemon, even the orchestrator's, or that don't exist", () => {
+        const flow = { ...emptyFlow(), vehicle: HARPY };
+        const only = "only producers of engines on the vehicle's daemon can be used";
+        expect(() => addEngineProducer(flow, catalog, `${GCS.ip}.relay`, 'keyframes', AT))
+            .toThrow(`gcs.relay is not on harpy's daemon; ${only}`);
+        expect(() => addEngineProducer(flow, catalog, `${LAB.ip}.far`, 'out', AT))
+            .toThrow(`lab.far is not on harpy's daemon; ${only}`);
+        expect(engineProducerProblem(flow, catalog, 'swap.enc')).toBeNull();
+        const stale = {
+            ...flow,
+            nodes: [
+                { id: 'p1', kind: 'producer', engine: 'gcs.relay', producer: 'keyframes', tokens: 1, position: AT },
+                { id: 'p2', kind: 'producer', engine: 'lab.far', producer: 'out', tokens: 1, position: AT },
+                { id: 'p3', kind: 'producer', engine: 'swap.enc', producer: 'nope', tokens: 1, position: AT },
+            ],
+        };
+        const messages = validateFlow(stale, catalog).errors.map((e) => e.message);
+        expect(messages).toContain(`gcs.relay.keyframes: gcs.relay is not on harpy's daemon; ${only}`);
+        expect(messages).toContain(`lab.far.out: lab.far is not on harpy's daemon; ${only}`);
+        expect(messages).toContain('swap.enc.nope: swap.enc has no producer nope');
+        // The orchestrator's engine is local to a vehicle on its own daemon
+        const onGcs = { ...flow, vehicle: `${GCS.ip}.owl` };
+        expect(engineProducerProblem(onGcs, catalog, 'gcs.relay')).toBeNull();
+    });
+
+    it('keeps engine producers when the vehicle changes, and round-trips them through JSON and templates', () => {
+        let flow = withEncoder();
+        flow = addEngineProducer(flow, catalog, `${SWAP.ip}.enc`, 'frames', AT);
+        flow = addEdge(flow, catalog, 'p2', 'e2', 'output');
+        const moved = setVehicle(flow, KESTREL);
+        expect(moved.nodes.map((n) => n.id)).toEqual(['e1', 'e2', 'p2']);
+        expect(moved.edges.map((e) => [e.source, e.target])).toEqual([['p2', 'e2']]);
+
+        expect(parseFlowJson(serializeFlow(flow))).toEqual(flow);
+        expect(() => parseFlowJson(serializeFlow({ ...flow, nodes: [{ ...flow.nodes.at(-1), producer: 3 }] })))
+            .toThrow('engine producer nodes need an engine template name and a producer name');
+
+        expect(flowName(flow, catalog, nodeById(flow, 'p2'))).toBe('local.enc.frames');
+        const remote = { id: 'p9', kind: 'producer', engine: 'gcs.relay', producer: 'keyframes', tokens: 1, position: AT };
+        expect(() => flowName(flow, catalog, remote)).toThrow('gcs.relay.keyframes is a producer of an engine not on the vehicle\'s daemon');
+
+        const back = fromTemplate(toTemplate(flow, catalog), catalog, HARPY);
+        expect(back.nodes.filter((n) => n.kind === 'producer').map((n) => ({ ...n, position: undefined }))).toEqual([
+            { id: 'p1', kind: 'producer', stream: 'frames', tokens: 1, position: undefined },
+            { id: 'p2', kind: 'producer', engine: 'swap.enc', producer: 'frames', tokens: 1, position: undefined },
+        ]);
+        expect(validateFlow(back, catalog).errors).toEqual([]);
     });
 });

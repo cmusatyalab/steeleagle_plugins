@@ -754,13 +754,13 @@ func TestDeployFlowLocalPerTarget(t *testing.T) {
 		t.Fatalf("builds %d sends %d", len(f.builds), len(s.called()))
 	}
 	b := f.builds[0]
-	if !strings.Contains(string(b.Flow), "100.64.0.2.yolo") || !strings.Contains(string(b.Flow), `location = "local"`) {
+	if !strings.Contains(string(b.Flow), `name = "local.yolo"`) || !strings.Contains(string(b.Flow), `location = "local"`) {
 		t.Errorf("flow %s", b.Flow)
 	}
-	if got := manifestEngines(t, b.Manifest); !reflect.DeepEqual(got, []string{"100.64.0.2.yolo"}) {
+	if got := manifestEngines(t, b.Manifest); !reflect.DeepEqual(got, []string{"local.yolo"}) {
 		t.Errorf("manifest engines %v", got)
 	}
-	eq(t, engineIdent(t, b.Ast), "DetectionEngine_100_64_0_2_yolo")
+	eq(t, engineIdent(t, b.Ast), "DetectionEngine_local_yolo")
 }
 
 func TestDeployFlowEngineOnOtherDaemonFailsTarget(t *testing.T) {
@@ -796,18 +796,27 @@ func TestDeployFlowOrchestratorEngineEverywhere(t *testing.T) {
 		}
 	}
 	// On the orchestrator's own daemon the engine is local, elsewhere
-	// remote, so the two located flows build separately.
+	// remote, so the two located flows build separately, each mission naming
+	// the engine as its flow and manifest do.
 	if len(f.builds) != 2 {
 		t.Fatalf("builds %d: %v", len(f.builds), events(t, rec))
 	}
 	locals := 0
 	for _, b := range f.builds {
+		where := "remote"
 		if strings.Contains(string(b.Flow), `location = "local"`) {
 			locals++
+			where = "local"
 		} else if !strings.Contains(string(b.Flow), `location = "remote"`) {
 			t.Errorf("flow %s", b.Flow)
 		}
-		eq(t, engineIdent(t, b.Ast), "DetectionEngine_100_64_0_1_yolo")
+		if !strings.Contains(string(b.Flow), `name = "`+where+`.yolo"`) {
+			t.Errorf("flow %s, want %s.yolo", b.Flow, where)
+		}
+		if got := manifestEngines(t, b.Manifest); !reflect.DeepEqual(got, []string{where + ".yolo"}) {
+			t.Errorf("manifest engines %v, want %s.yolo", got, where)
+		}
+		eq(t, engineIdent(t, b.Ast), "DetectionEngine_"+where+"_yolo")
 	}
 	if locals != 1 {
 		t.Errorf("%d local flows, want 1", locals)
@@ -847,7 +856,7 @@ func TestDeployFlowProducerRehomesToTarget(t *testing.T) {
 		}
 	}
 	for _, b := range f.builds {
-		if !strings.Contains(string(b.Flow), `name = "telemetry"`) {
+		if !strings.Contains(string(b.Flow), `name = "vehicle.telemetry"`) {
 			t.Errorf("flow %s", b.Flow)
 		}
 	}

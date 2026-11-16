@@ -75,6 +75,9 @@ type Controller struct {
 	log     zerolog.Logger
 	onHold  func(vehicles []string)
 	onStart func(vehicles []string)
+	// onStarted and onStopped are called with the vehicles whose mission
+	// was started, or stopped
+	onStarted, onStopped func(vehicles []string)
 }
 
 // New returns a controller that calls the daemon on conn, each call taking at
@@ -100,6 +103,14 @@ func (c *Controller) OnHold(hook func(vehicles []string)) { c.onHold = hook }
 // OnStart sets a hook called with the vehicles of each start request, before
 // their missions are started. It must return quickly. Set it before serving.
 func (c *Controller) OnStart(hook func(vehicles []string)) { c.onStart = hook }
+
+// OnStarted sets a hook called after each start with the vehicles whose
+// mission started.
+func (c *Controller) OnStarted(hook func(vehicles []string)) { c.onStarted = hook }
+
+// OnStopped sets a hook called after each Stop Mission or Hold with the
+// vehicles whose mission was stopped, or had none to stop.
+func (c *Controller) OnStopped(hook func(vehicles []string)) { c.onStopped = hook }
 
 // run makes calls on each of vehicles, at once for every vehicle and in order
 // for each one, whether or not the ones before succeed.
@@ -266,6 +277,7 @@ func (c *Controller) ServeCommand(w http.ResponseWriter, r *http.Request) {
 		// the mission; each call is bounded by HoldTimeout
 		results := c.run(context.WithoutCancel(r.Context()), req.Vehicles, hold, stopFast)
 		c.afterHold(results)
+		c.afterMission(results)
 		if r.Context().Err() == nil {
 			writeJSON(w, http.StatusOK, Response{Results: results})
 		}
@@ -343,10 +355,32 @@ func (c *Controller) decode(w http.ResponseWriter, r *http.Request, req any, veh
 // respond makes calls on vehicles, and writes their results.
 func (c *Controller) respond(w http.ResponseWriter, r *http.Request, vehicles []string, calls ...call) {
 	results := c.run(r.Context(), vehicles, calls...)
+	c.afterMission(results)
 	if err := r.Context().Err(); errors.Is(err, context.Canceled) {
 		return // the browser went away
 	}
 	writeJSON(w, http.StatusOK, Response{Results: results})
+}
+
+// afterMission calls the started and stopped hooks with the vehicles whose
+// StartMission or StopMission succeeded.
+func (c *Controller) afterMission(results []Result) {
+	var started, stopped []string
+	for _, r := range results {
+		switch {
+		case !r.Success:
+		case r.Command == "StartMission":
+			started = append(started, r.Vehicle)
+		case r.Command == "StopMission":
+			stopped = append(stopped, r.Vehicle)
+		}
+	}
+	if len(started) > 0 && c.onStarted != nil {
+		c.onStarted(started)
+	}
+	if len(stopped) > 0 && c.onStopped != nil {
+		c.onStopped(stopped)
+	}
 }
 
 // afterHold calls the hold hook with the vehicles whose Hold got an answer.

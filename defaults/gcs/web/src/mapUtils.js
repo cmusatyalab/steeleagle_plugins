@@ -198,7 +198,7 @@ const EARTH_RADIUS_M = 6371000;
 
 // The ground distance in meters between [long, lat, ...] points a and b, by
 // the equirectangular approximation (fine at a track's scale).
-function groundDistance(a, b) {
+export function groundDistance(a, b) {
     const rad = Math.PI / 180;
     const x = (b[0] - a[0]) * rad * Math.cos(((a[1] + b[1]) / 2) * rad);
     const y = (b[1] - a[1]) * rad;
@@ -268,19 +268,24 @@ export function vehicleTracksGeoJSON(vehicles, squadList) {
 }
 
 // Labels for the tracks of vehicleTracksGeoJSON: a Point every `spacing`
-// meters along each track, back from the vehicle (whose marker labels it
-// where it is), with the vehicle's display name, its status, and the
-// altitude there.
+// meters of the path flown, with the vehicle's display name, its status, and
+// the altitude there. They are placed at fixed distances from where the
+// vehicle's track began (track_start meters before its first point), over the
+// recorded points only, so each stays put as the vehicle flies on, rather than
+// sliding with every update (which made them flash). A label within
+// spacing / 2 of the newest recorded point is left out, as the vehicle's
+// marker names it there.
 export function vehicleTrackLabelsGeoJSON(vehicles, squadList, spacing) {
     const features = [];
     for (const v of vehicles) {
-        const coordinates = trackPath(v);
-        if (!coordinates) continue;
+        const coordinates = v.track;
+        if (!coordinates || coordinates.length < 2) continue;
         const cum = cumulative(coordinates);
         const total = cum[cum.length - 1];
+        const start = v.track_start ?? 0;
         const status = trackStatus(v, squadList);
-        for (let back = spacing; back <= total; back += spacing) {
-            const [long, lat, alt] = pointAlong(coordinates, cum, total - back);
+        for (let at = (Math.floor(start / spacing) + 1) * spacing - start; at <= total - spacing / 2; at += spacing) {
+            const [long, lat, alt] = pointAlong(coordinates, cum, at);
             features.push({
                 type: 'Feature',
                 geometry: { type: 'Point', coordinates: [long, lat] },

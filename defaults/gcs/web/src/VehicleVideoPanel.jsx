@@ -93,6 +93,16 @@ function VehicleVideoPanel({ vehicle, engine, setEngine, height, noVideoLabel })
           </div>
         </div>
       )}
+      {live && size && (
+        // The resolution the video decodes at, which is what the encoder sent:
+        // the panel scales it to fit, so it can't be told by eye
+        <div aria-label="Video resolution" title="Video resolution"
+          style={{ position: 'absolute', top: '0.5rem', right: '0.5rem', zIndex: 1, padding: '0.15rem 0.4rem',
+            borderRadius: '4px', color: '#fff', background: 'rgba(0,0,0,0.6)', fontSize: '0.8rem',
+            fontFamily: 'monospace', pointerEvents: 'none' }}>
+          {size.w}×{size.h}
+        </div>
+      )}
       <div style={{ position: 'absolute', top: '0.5rem', left: '0.5rem', zIndex: 1 }}>
         <Dropdown value={engine} options={options} showClear placeholder="Engine results"
           onChange={(e) => {

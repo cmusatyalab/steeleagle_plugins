@@ -30,6 +30,8 @@ default = false
 [engine]
 type = "filter"
 inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]
+# Each input is converted, so this is what the engine sends on
+forwards = "steeleagle_protocol/v1/messages/frame/RawFrame"
 # Each frame is replaced with the RawFrame it decodes to; the result tells the
 # encoder whether it decoded, or a keyframe is needed
 result = "h264/v1/DecodeResult"

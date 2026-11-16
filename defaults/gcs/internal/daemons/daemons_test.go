@@ -58,6 +58,28 @@ func TestBuild(t *testing.T) {
 	}
 }
 
+// A service stopped by request is listed as stopped, apart from one that
+// exited.
+func TestBuildMarksStoppedServices(t *testing.T) {
+	stopped := svc("100.64.0.1.yolo", daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE, false)
+	stopped.SetStopped(true)
+	exited := svc("100.64.0.1.detector", daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE, false)
+	got := Build(daemonpb.ListServicesResponse_builder{Services: []*daemonpb.Service{stopped, exited}}.Build(), self)
+	if len(got) != 1 || len(got[0].Services) != 2 {
+		t.Fatalf("Build = %+v", got)
+	}
+	byName := map[string]Service{}
+	for _, s := range got[0].Services {
+		byName[s.Bare] = s
+	}
+	if s := byName["yolo"]; s.Running || !s.Stopped {
+		t.Errorf("yolo = %+v, want stopped", s)
+	}
+	if s := byName["detector"]; s.Running || s.Stopped {
+		t.Errorf("detector = %+v, want not running and not stopped", s)
+	}
+}
+
 func TestBuildOwnDaemonWithNoServices(t *testing.T) {
 	got := Build(&daemonpb.ListServicesResponse{}, self)
 	if len(got) != 1 || !got[0].Local || got[0].Services == nil {
@@ -70,6 +92,7 @@ type fakeClient struct {
 	listErr    error
 	restartErr error
 	restarted  []string
+	stopped    []string
 
 	// err is what the config, package and Restart calls return
 	err        error
@@ -96,6 +119,15 @@ func (f *fakeClient) ListServices(context.Context, *daemonpb.ListServicesRequest
 func (f *fakeClient) RestartService(_ context.Context, in *daemonpb.RestartServiceRequest, _ ...grpc.CallOption) (*daemonpb.RestartServiceResponse, error) {
 	f.restarted = append(f.restarted, in.GetServiceNames())
 	return &daemonpb.RestartServiceResponse{}, f.restartErr
+}
+
+func (f *fakeClient) StopService(ctx context.Context, in *daemonpb.StopServiceRequest, _ ...grpc.CallOption) (*daemonpb.StopServiceResponse, error) {
+	f.note(ctx)
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.stopped = append(f.stopped, in.GetServiceName())
+	return &daemonpb.StopServiceResponse{}, nil
 }
 
 func (f *fakeClient) GetConfiguration(ctx context.Context, _ *daemonpb.GetConfigurationRequest, _ ...grpc.CallOption) (*daemonpb.GetConfigurationResponse, error) {
@@ -224,6 +256,50 @@ type ctxClient struct {
 func (c *ctxClient) RestartService(ctx context.Context, _ *daemonpb.RestartServiceRequest, _ ...grpc.CallOption) (*daemonpb.RestartServiceResponse, error) {
 	c.err = ctx.Err()
 	return &daemonpb.RestartServiceResponse{}, nil
+}
+
+func TestStopService(t *testing.T) {
+	f := &fakeClient{}
+	stop := NewHandler(f, self, zerolog.Nop()).Routes()["POST /api/daemons/stop_service"]
+	rec := httptest.NewRecorder()
+	stop.ServeHTTP(rec, httptest.NewRequest("POST", "/api/daemons/stop_service", strings.NewReader(`{"name":"100.64.0.2.yolo"}`)))
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"ok":true}` ||
+		!reflect.DeepEqual(f.stopped, []string{"100.64.0.2.yolo"}) {
+		t.Fatalf("%d %s, stopped %v", rec.Code, rec.Body, f.stopped)
+	}
+
+	for _, body := range []string{`{}`, `not json`} {
+		rec = httptest.NewRecorder()
+		stop.ServeHTTP(rec, httptest.NewRequest("POST", "/api/daemons/stop_service", strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d %s", body, rec.Code, rec.Body)
+		}
+	}
+
+	// The GCS doesn't stop itself, since nothing could start it again
+	rec = httptest.NewRecorder()
+	stop.ServeHTTP(rec, httptest.NewRequest("POST", "/api/daemons/stop_service", strings.NewReader(`{"name":"`+self.Engine+`"}`)))
+	if rec.Code != http.StatusConflict || len(f.stopped) != 1 {
+		t.Errorf("stopping the GCS: %d %s, stopped %v", rec.Code, rec.Body, f.stopped)
+	}
+
+	f.err = status.Error(codes.NotFound, `no service "x"`)
+	rec = httptest.NewRecorder()
+	stop.ServeHTTP(rec, httptest.NewRequest("POST", "/api/daemons/stop_service", strings.NewReader(`{"name":"x"}`)))
+	if rec.Code != http.StatusNotFound || strings.TrimSpace(rec.Body.String()) != `{"detail":"no service \"x\""}` {
+		t.Errorf("%d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestStopServiceOutlivesTheRequest(t *testing.T) {
+	f := &fakeClient{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest("POST", "/api/daemons/stop_service", strings.NewReader(`{"name":"100.64.0.2.yolo"}`)).WithContext(ctx)
+	NewHandler(f, self, zerolog.Nop()).Routes()["POST /api/daemons/stop_service"].ServeHTTP(httptest.NewRecorder(), req)
+	if len(f.ctxErrs) != 1 || f.ctxErrs[0] != nil {
+		t.Errorf("stop saw the request's cancellation: %v", f.ctxErrs)
+	}
 }
 
 func TestRestartDaemonRoutesByIP(t *testing.T) {

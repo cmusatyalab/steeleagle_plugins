@@ -26,7 +26,7 @@ func TestQueriesAreValidPromQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, window := range Windows {
-		v, _ := BuildView([]byte(gcsFlow), fakeDrone, testHostnames)
+		v, _ := BuildView([]byte(gcsFlow), fakeDrone, lambda2IP, testHostnames)
 		if err := Fill(context.Background(), promv1.NewAPI(client), &v, fakeDrone, window); err != nil {
 			t.Errorf("window %s: %v", window, err)
 		}

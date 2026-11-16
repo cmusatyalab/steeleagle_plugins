@@ -104,7 +104,7 @@ describe('resolveNode', () => {
     it('resolves an engine to its accepts, event labels, event types and category', () => {
         expect(resolveNode(flow, catalog, flow.nodes[2])).toEqual({
             resolved: true, reason: null, output: null, stream: null,
-            accepts: [TYPES.raw], events: ['result', 'dropped'],
+            accepts: [TYPES.raw], forwards: '*', events: ['result', 'dropped'],
             eventTypes: { result: TYPES.detection, dropped: TYPES.generic },
             category: 'detection', typed: true, problem: null, location: 'local',
         });
@@ -128,8 +128,8 @@ describe('resolveNode', () => {
 
     it('gives unresolved nodes the same keys', () => {
         expect(resolveNode({ ...flow, vehicle: null }, catalog, flow.nodes[0])).toEqual({
-            resolved: false, reason: 'no vehicle selected', output: null, stream: null, accepts: [], events: [],
-            eventTypes: {}, category: null, typed: true, problem: null,
+            resolved: false, reason: 'no vehicle selected', output: null, stream: null, accepts: [], forwards: '*',
+            events: [], eventTypes: {}, category: null, typed: true, problem: null,
         });
     });
 

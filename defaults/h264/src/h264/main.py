@@ -23,11 +23,11 @@ DEFAULTS = {
     ENCODER_PLUGIN: {
         "decoder_name": "h264_decoder",
         "encoder": "x264enc tune=zerolatency speed-preset=ultrafast pass=quant quantizer=18 key-int-max=300",
+        "converter": "videoconvert n-threads=4",
         "fps": 30,
         "max_output_size": MAX_FRAME_SIZE,
         "timeout_ms": 1000,
         "keyframe_timeout": 150,
-        "convert_threads": 4,
         "log_frames": False,
     },
     DECODER_PLUGIN: {

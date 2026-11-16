@@ -1,6 +1,6 @@
 // The Orchestrate page's view of the daemons: every daemon the GCS's own
-// daemon knows of, with its services (GET /api/daemons); restarting a
-// service or a whole daemon; a daemon's config and packages. Every function
+// daemon knows of, with its services (GET /api/daemons); stopping, starting
+// or restarting a service, or restarting a whole daemon; a daemon's config and packages. Every function
 // resolves, never rejects.
 import { daemonRequest, describeFailure, query } from './daemonApi.js';
 
@@ -23,6 +23,12 @@ export async function fetchDaemons() {
 // Resolves to why the restart failed, or null if it was done.
 export async function restartService(name) {
     return failure(await daemonRequest('POST', '/api/daemons/restart_service', { name }));
+}
+
+// Resolves to why the stop failed, or null if the service stopped. It stays
+// stopped, even across its daemon's restarts, until restartService starts it.
+export async function stopService(name) {
+    return failure(await daemonRequest('POST', '/api/daemons/stop_service', { name }));
 }
 
 // Resolves to {config, error}: the daemon's config as GET /api/daemons/config

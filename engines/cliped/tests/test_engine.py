@@ -1,14 +1,17 @@
+import dataclasses
 import json
 
+import cv2
 import numpy as np
 import pytest
 import uriel
-from conftest import VERIFIER, BrightnessEncoder, make_event, make_frame, make_input
+from conftest import VERIFIER, BrightnessEncoder, input_id, make_event, make_frame, make_input
 
 from cliped import main
-from cliped.clip import QUANTIZED_MODEL, NpuImageEncoder, Selector, tile_boxes
-from cliped.engine import Cliped, FrameError, max_output_size
-from cliped.send_queue import SendQueue
+from cliped.clip import QUANTIZED_MODEL, NpuImageEncoder, Selector, image_vector, tile_boxes
+from cliped.engine import Cliped, FrameError, Reintegration, max_output_size
+from cliped.files import TileLog
+from cliped.send_queue import SendQueue, Tile
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from steeleagle_protocol.v1.messages.result import result_pb2
 
@@ -21,7 +24,7 @@ def cliped():
     return Cliped(
         encoder,
         Selector(encoder.t, encoder.b, margin=0.25, max_send=1),
-        SendQueue(max_size=8, resend_after_s=5.0),
+        SendQueue(max_size=8),
         prompt="a white square",
         verifier=VERIFIER,
         tile_size=200,
@@ -50,34 +53,103 @@ def test_the_selector_sends_only_a_standout_tile():
     assert len(picked) == 0
 
 
-def test_a_picked_tile_replaces_the_input_until_the_verifier_has_it(cliped):
+def test_an_input_is_replaced_with_its_own_tile_and_classified(cliped):
     tile, result = cliped.on_input(make_input(1, make_frame(bright=(150, 0, 350, 200), id=40)), now=0)
     assert tile is not None and tile.frame_id == 40 and tile.box == (150, 0, 350, 200)
     out = frame_pb2.RawFrame.FromString(tile.payload)
     assert (out.h_res, out.v_res, out.channels, out.id, out.camera_id) == (200, 200, 3, 40, 3)
     assert set(out.data) == {255}
 
-    detections = result_pb2.DetectionResult.FromString(result).detections
-    assert [d.class_name for d in detections] == ["a white square"]
-    assert detections[0].bbox.x_min == pytest.approx(150 / 400) and detections[0].bbox.y_max == pytest.approx(200 / 300)
+    classification = result_pb2.ClassificationResult.FromString(result)
+    assert getattr(classification, "class") == "a white square"
+    assert classification.score == pytest.approx(tile.score)
+    # It is queued for reintegration; the forwarded tile itself is not tracked
+    assert len(cliped.queue) == 1 and tile.carriers == [] and not tile.in_flight
 
-    # Not yet confirmed, so in flight: an empty frame sends nothing
-    tile, result = cliped.on_input(make_input(2, make_frame(id=41)), now=1)
-    assert tile is None and not result_pb2.DetectionResult.FromString(result).detections
-    # Lost on the way: the next frame carries it again
-    cliped.on_event(make_event(K.TIMED_OUT, 1))
-    tile, _ = cliped.on_input(make_input(3, make_frame(id=42)), now=2)
-    assert tile is not None and tile.frame_id == 40
-    # The verifier has it: gone
-    cliped.on_event(make_event(K.RESULT, 3))
-    assert cliped.on_input(make_input(4, make_frame(id=43)), now=3)[0] is None
+    # An empty frame is dropped with no result, even with a tile in the queue
+    assert cliped.on_input(make_input(2, make_frame(id=41)), now=1) == (None, b"")
+    # Events about the camera's inputs say nothing about the queue
+    cliped.on_event(make_event(K.RESULT, 1))
+    assert len(cliped.queue) == 1 and cliped.queue.confirmed == 0
+
+
+def test_an_image_prompt_classifies_as_the_file_name():
+    encoder = BrightnessEncoder()
+    cliped = Cliped(encoder, Selector(encoder.t, encoder.b, margin=0.25, max_send=1),
+                    SendQueue(max_size=8), prompt="tarp.jpg", verifier=VERIFIER,
+                    tile_size=200, stride=150)
+    _, result = cliped.on_input(make_input(1, make_frame(bright=(150, 0, 350, 200))), now=0)
+    assert getattr(result_pb2.ClassificationResult.FromString(result), "class") == "tarp.jpg"
+
+
+class Publisher:
+    """Stands in for the reintegration producer: records each payload."""
+
+    def __init__(self):
+        self.payloads = []
+
+    def __call__(self, payload):
+        self.payloads.append(payload)
+        return uriel.InputId(PRODUCER_NAME, 9, len(self.payloads))
+
+
+PRODUCER_NAME = "cliped.reintegration"
+
+
+def reintegration_event(kind, seq, engine=VERIFIER, outcome=uriel.Outcome.DROP):
+    event = make_event(kind, seq, engine=engine)
+    return dataclasses.replace(event, id=uriel.InputId(PRODUCER_NAME, 9, seq), outcome=outcome)
+
+
+def queued(cliped, *scores):
+    tiles = [Tile(score=s, payload=f"tile {s}".encode(), frame_id=int(s * 100), box=(0, 0, 1, 1)) for s in scores]
+    for t in tiles:
+        cliped.queue.push(t)
+    return tiles
+
+
+def test_reintegration_sends_the_queue_best_first_one_tile_at_a_time(cliped):
+    queued(cliped, 0.2, 0.9, 0.5)
+    reintegration, publish = Reintegration(cliped.queue), Publisher()
+    assert reintegration.step(0, publish).score == 0.9
+    # Still in the flow, however long: nothing else goes
+    for kind in (K.ACCEPTED, K.SENT):
+        cliped.on_event(reintegration_event(kind, 1))
+    assert reintegration.step(100, publish) is None and len(publish.payloads) == 1
+    # The verifier read it: the next goes
+    cliped.on_event(reintegration_event(K.RESULT, 1))
     assert cliped.queue.confirmed == 1
+    assert reintegration.step(100, publish).score == 0.5
+    # It timed out at the verifier: its turn ended unread, so it goes again
+    cliped.on_event(reintegration_event(K.TIMED_OUT, 2))
+    again = reintegration.step(101, publish)
+    assert again.score == 0.5 and len(again.carriers) == 2
+    cliped.on_event(reintegration_event(K.RESULT, 3))
+    assert reintegration.step(102, publish).score == 0.2
 
 
-def test_events_of_other_engines_are_ignored(cliped):
-    cliped.on_input(make_input(1, make_frame(bright=(0, 0, 200, 200))), now=0)
-    cliped.on_event(make_event(K.RESULT, 1, engine="10.0.0.1.other"))
-    assert len(cliped.queue) == 1
+def test_a_better_tile_waits_for_the_one_in_flight(cliped):
+    low, = queued(cliped, 0.2)
+    reintegration, publish = Reintegration(cliped.queue), Publisher()
+    assert reintegration.step(0, publish) is low
+    high, = queued(cliped, 0.9)
+    assert reintegration.step(0, publish) is None
+    cliped.on_event(reintegration_event(K.RESULT, 1))
+    assert reintegration.step(0, publish) is high
+
+
+def test_a_tile_dropped_on_the_way_is_sent_again(cliped):
+    tile, = queued(cliped, 0.9)
+    reintegration, publish = Reintegration(cliped.queue), Publisher()
+    reintegration.step(0, publish)
+    cliped.on_event(reintegration_event(K.RESULT, 1, engine="10.0.0.2.decoder", outcome=uriel.Outcome.DROP))
+    assert reintegration.step(1, publish) is tile and tile.carriers[-1].seq == 2
+
+
+def test_reintegration_sends_the_tile_the_engine_forwarded(cliped):
+    cliped.on_input(make_input(1, make_frame(bright=(150, 0, 350, 200), id=40)), now=0)
+    reintegration, publish = Reintegration(cliped.queue), Publisher()
+    assert reintegration.step(0, publish).frame_id == 40
 
 
 def test_a_frame_that_is_not_rgb_is_refused(cliped):
@@ -98,9 +170,17 @@ def test_args_default_and_validate():
     )
     assert args["backgrounds"] == ["grass", "dirt", "rocks", "trees", "a road", "a roof"]
     assert args["npu"] is True
+    assert (args["log_scores"], args["log_tiles"], args["image"]) == (False, False, "")
+    # An image wins over a prompt
+    args = main.parse_args(json.dumps({"prompt": "a red tarp", "image": " tarp.jpg ", "verifier": "v"}))
+    assert (args["image"], args["prompt"]) == ("tarp.jpg", "")
+    assert main.parse_args(json.dumps({"image": "tarp.jpg", "verifier": "v"}))["image"] == "tarp.jpg"
     for bad in [
         {"verifier": "v"},
+        {"prompt": " ", "image": "", "verifier": "v"},
         {"prompt": "p"},
+        {"prompt": "p", "verifier": "v", "image": 3},
+        {"prompt": "p", "verifier": "v", "log_tiles": "yes"},
         {"prompt": "p", "verifier": "v", "tile_size": 0},
         {"prompt": "p", "verifier": "v", "stride": 1.5},
         {"prompt": "p", "verifier": "v", "backgrounds": []},
@@ -119,3 +199,78 @@ def test_the_quantized_model_runs_on_the_cpu():
     v = encoder.encode_tiles(tiles)
     assert v.shape == (2, 512)
     assert np.allclose(np.linalg.norm(v, axis=1), 1, atol=1e-5)
+
+
+def test_log_tiles_writes_each_input_and_each_tile_sent(tmp_path):
+    encoder = BrightnessEncoder()
+    cliped = Cliped(
+        encoder,
+        Selector(encoder.t, encoder.b, margin=0.25, max_send=1),
+        SendQueue(max_size=8),
+        prompt="a white square",
+        verifier=VERIFIER,
+        tile_size=200,
+        stride=150,
+        tile_log=TileLog(tmp_path / "cliped"),
+    )
+    tile, _ = cliped.on_input(make_input(1, make_frame(bright=(150, 0, 350, 200), id=40)), now=0)
+    boxes = tile_boxes(400, 300, 200, 150)
+    assert tile.index == boxes.index((150, 0, 350, 200))
+    # An input that sends nothing is still written
+    cliped.on_input(make_input(2, make_frame(id=41)), now=1)
+    assert sorted(p.name for p in (tmp_path / "cliped" / "in").iterdir()) == ["40.jpeg", "41.jpeg"]
+    assert [p.name for p in (tmp_path / "cliped" / "out").iterdir()] == [f"40_{tile.index}.jpeg"]
+    out = cv2.imread(str(tmp_path / "cliped" / "out" / f"40_{tile.index}.jpeg"))
+    assert out.shape == (200, 200, 3) and out.mean() > 250
+    assert cv2.imread(str(tmp_path / "cliped" / "in" / "40.jpeg")).shape == (300, 400, 3)
+
+
+def test_an_image_prompt_is_embedded_by_the_tile_encoder():
+    encoder = BrightnessEncoder()
+    white = np.full((50, 80, 3), 255, dtype=np.uint8)
+    assert image_vector(encoder, white) == pytest.approx([1.0, 0.0])
+
+
+def test_each_tile_queued_is_logged_with_its_box(cliped, tmp_path, monkeypatch):
+    import csv
+
+    from cliped.sent_log import SentLog
+
+    monkeypatch.setenv("STEELEAGLE_FILES", str(tmp_path))
+    cliped.sent_log = SentLog("t/sent.csv")
+    frame = make_frame(bright=(150, 0, 350, 200), id=40)
+    cliped.on_input(make_input(1, frame), now=0)
+    cliped.on_input(make_input(2, make_frame(id=41)), now=1)
+    cliped.sent_log.close()
+    rows = list(csv.DictReader(open(tmp_path / "t" / "sent.csv")))
+    assert len(rows) == 1
+    row = rows[0]
+    assert int(row["frame_id"]) == 40
+    parsed = frame_pb2.RawFrame.FromString(frame)
+    assert int(row["timestamp_ns"]) == parsed.timestamp.ToNanoseconds()
+    assert [int(row[k]) for k in ("left", "top", "right", "bottom")] == [150, 0, 350, 200]
+    assert (int(row["frame_width"]), int(row["frame_height"])) == (400, 300)
+    assert row["class"] == "a white square"
+
+
+def test_log_sent_defaults_to_off():
+    args = main.parse_args(json.dumps({"prompt": "person", "verifier": "v"}))
+    assert args["log_sent"] == ""
+
+
+def test_each_frame_scored_is_logged_whether_or_not_a_tile_is_picked(cliped, tmp_path, monkeypatch):
+    import csv
+
+    from cliped.sent_log import ScoredLog
+
+    monkeypatch.setenv("STEELEAGLE_FILES", str(tmp_path))
+    cliped.scored_log = ScoredLog("t/scored.csv")
+    frame = make_frame(bright=(150, 0, 350, 200), id=40)
+    cliped.on_input(make_input(1, frame), now=0)
+    cliped.on_input(make_input(2, make_frame(id=41)), now=1)
+    cliped.scored_log.close()
+    rows = list(csv.DictReader(open(tmp_path / "t" / "scored.csv")))
+    assert [int(r["frame_id"]) for r in rows] == [40, 41]
+    assert int(rows[0]["timestamp_ns"]) == frame_pb2.RawFrame.FromString(frame).timestamp.ToNanoseconds()
+    assert [int(r["picked"]) for r in rows] == [1, 0]
+    assert all(int(r["tiles"]) > 0 for r in rows)

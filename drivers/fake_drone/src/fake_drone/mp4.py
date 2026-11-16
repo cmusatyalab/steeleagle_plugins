@@ -31,6 +31,9 @@ class Track:
     timescale: int = 1
     # (sample count, sample duration) runs, from stts
     durations: list = field(default_factory=list)
+    # (sample count, composition offset) runs, from ctts: how much later than
+    # its decode time a sample is shown (B-frames); empty if none
+    composition: list = field(default_factory=list)
     sizes: list = field(default_factory=list)
     chunk_offsets: list = field(default_factory=list)
     # (first chunk, samples per chunk) runs, from stsc; chunks count from 1
@@ -84,6 +87,46 @@ def sample_times(movie, track):
             times.append(delay + (t - start) / track.timescale)
             t += duration
     return times
+
+
+def first_buffer_time(track):
+    """The earliest presentation timestamp of `track`'s samples in seconds,
+    as GStreamer's qtdemux stamps buffers: decode time plus composition
+    offset, with the edit list left to the segment (so a file with B-frames
+    starts later than 0, e.g. 2 frames in)."""
+    offsets = [offset for count, offset in track.composition for _ in range(count)]
+    first, t, i = None, 0, 0
+    for count, duration in track.durations:
+        for _ in range(count):
+            shown = t + (offsets[i] if i < len(offsets) else 0)
+            first = shown if first is None or shown < first else first
+            t += duration
+            i += 1
+    return (first or 0) / track.timescale
+
+
+def video_frame_rate(path):
+    """(frames per second, number of frames, the first frame's timestamp in
+    seconds as GStreamer gives it) of the file's video track, from its most common sample duration,
+    or None if it can't be read."""
+    try:
+        movie = read_movie(path)
+    # Any failure, e.g. a truncated box, leaves the frames unnumbered by time
+    except Exception:
+        return None
+    video = next((t for t in movie.tracks if t.handler == 'vide'), None)
+    if video is None or not video.sample_duration:
+        return None
+    frames = sum(count for count, _ in video.durations)
+    return video.timescale / video.sample_duration, frames, first_buffer_time(video)
+
+
+def frame_index(fps, frames, first, pts):
+    """The number of the frame with timestamp `pts` seconds, in a video of
+    `frames` frames at a constant `fps` whose first has timestamp `first`, counting
+    from 0: the i-th frame a decoder outputs, which is how frames are
+    numbered elsewhere (e.g. labels made by decoding the video in order)."""
+    return min(max(round((pts - first) * fps), 0), frames - 1)
 
 
 def read_samples(path, track):
@@ -174,6 +217,11 @@ def _read_track_box(kind, data, track):
     elif kind == b'stts':
         count, = struct.unpack_from('>I', data, 4)
         track.durations = [struct.unpack_from('>II', data, 8 + 8 * i) for i in range(count)]
+    elif kind == b'ctts':
+        version = data[0]
+        count, = struct.unpack_from('>I', data, 4)
+        entry = '>Ii' if version == 1 else '>II'
+        track.composition = [struct.unpack_from(entry, data, 8 + 8 * i) for i in range(count)]
     elif kind == b'stsz':
         sample_size, count = struct.unpack_from('>II', data, 4)
         if sample_size:

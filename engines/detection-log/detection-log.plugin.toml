@@ -1,0 +1,27 @@
+[plugin]
+name = "Detection Log"
+type = "engine"
+description = "Saves each frame as a JPEG named by its sequence number, both raw and with the boxes a local detection engine found in it drawn on, in a directory of the daemon's files directory named after this engine's qualified endpoint"
+
+[[args]]
+name = "detector"
+type = "string"
+description = "Service name of the detection engine on this daemon whose results are drawn"
+default = ""
+
+[[args]]
+name = "timeout"
+type = "number"
+description = "The longest to wait for the detector's result on a frame before giving up on saving it, in milliseconds"
+default = 2000
+
+[[args]]
+name = "refresh"
+type = "boolean"
+description = "Remove everything already in the directory frames are saved to when the plugin starts"
+default = false
+
+[engine]
+type = "detection"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# Every frame is dropped, with no result

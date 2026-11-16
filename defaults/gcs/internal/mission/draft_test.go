@@ -41,10 +41,11 @@ func TestCheckDraftNeedsMapContext(t *testing.T) {
 
 func TestDraftEngineRoundTripsThroughApplyAndCompile(t *testing.T) {
 	const engine = "100.64.0.1.yolo"
-	const sdkIdent = "DetectionEngine_100_64_0_1_yolo"
+	const sdkIdent = "DetectionEngine_local_yolo"
 	for name, value := range map[string]string{
 		"quoted template name": `"100.64.0.1.yolo"`,
-		"legacy identifier":    sdkIdent,
+		"legacy identifier":    "DetectionEngine_100_64_0_1_yolo",
+		"relative identifier":  sdkIdent,
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := engineFake(t)
@@ -84,5 +85,15 @@ func TestDraftEngineRoundTripsThroughApplyAndCompile(t *testing.T) {
 				eq(t, engineIdent(t, build.Ast), sdkIdent)
 			}
 		})
+	}
+}
+
+func TestDraftWithUnboundEngineNeedsContext(t *testing.T) {
+	c := engineFake(t)
+	s := newFlowService(t, c, flowCatalog("100.64.0.1"))
+	const dsl = "Actions:\n    actions.Track trk(Engine=DetectionEngine_local_ghost)\nMission:\n    Start trk\n"
+	result := s.CheckDraft(t.Context(), dsl, PlanningContext{Flow: localYolo()}, nil)
+	if result.Status != "needs_context" || result.Graph == nil || len(c.builds) != 0 {
+		t.Fatalf("CheckDraft = %+v, builds = %d", result, len(c.builds))
 	}
 }

@@ -1,12 +1,43 @@
 [plugin]
 name = "Fake Drone"
 type = "driver"
-description = "Replays a looping .mp4 file as a drone's live camera, for testing the pipeline without hardware"
+description = "Replays an .mp4 file, looping by default, as a drone's live camera, for testing the pipeline without hardware"
 
 [[args]]
-name = "video_path"
+name = "video"
 type = "string"
-description = "H.264 .mp4 file to replay, looping forever, at its own framerate"
+description = "H.264 .mp4 file to replay at its own framerate: a file name in the daemon's files directory (STEELEAGLE_FILES, where `eagle transfer-file` saves files), or else a path. Give this or images"
+default = ""
+
+[[args]]
+name = "images"
+type = "string"
+description = "Directory of still images (.jpg, .jpeg, .png, .webp, .bmp) to replay instead of a video, in natural file name order, one every 1/fps seconds, so the i-th image is frame id i: a directory name in the daemon's files directory, or else a path. Other files in it, e.g. labels, are ignored. Give this or video"
+default = ""
+
+[[args]]
+name = "fps"
+type = "number"
+description = "With images, how many images are sent per second"
+default = 30
+
+[[args]]
+name = "max_width"
+type = "number"
+description = "With images, the widest frame sent, in pixels: wider images are scaled down keeping their aspect ratio; 0 sends them at their own size"
+default = 1920
+
+[[args]]
+name = "no_loop"
+type = "boolean"
+description = "Play the video once, then stop the plugin, instead of looping it forever"
+default = false
+
+[[args]]
+name = "pad_after"
+type = "boolean"
+description = "With no_loop, keep sending blank (black) frames at 30 fps after the video ends, until the camera is no longer asked for, instead of stopping the plugin"
+default = false
 
 [[args]]
 name = "decoder"
@@ -20,13 +51,19 @@ type = "boolean"
 description = "Attach the position and gimbal pose recorded in the video to each frame; only Parrot ANAFI recordings (v3 video metadata) have them"
 default = false
 
+[[args]]
+name = "frame_log"
+type = "string"
+description = "CSV file to log each frame published to, as frame_id, timestamp_ns (its capture timestamp, which encoders carry through while renumbering ids), seq (the Uriel input's sequence number, which engines that replace it keep; empty if no input buffer was free, so it was not sent) and source (its index in the video or image order, or \"pad\" for a blank frame); a relative path is in the daemon's files directory. Rewritten at each playback. Empty for none"
+default = ""
+
 [driver]
 type = "copter"
 
 [[driver.cameras]]
 name = "rgb"
-type = "steeleagle_protocol/v1/messages/frame/RawFrame"
-description = "Simulated RGB camera, replaying a looping .mp4 file"
+output = "steeleagle_protocol/v1/messages/frame/RawFrame"
+description = "Simulated RGB camera, replaying an .mp4 file"
 hres = 1280
 vres = 720
 fps = 30

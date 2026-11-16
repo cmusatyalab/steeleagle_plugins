@@ -220,13 +220,19 @@ func TestSDKCompilerRealBuild(t *testing.T) {
 				{From: "100.64.0.2.yolo", To: "100.64.0.1.gcs", Timeout: "1s"},
 			},
 		}
-		cat := flows.Catalog{Daemons: []flows.Daemon{{
-			IP: "100.64.0.2",
-			Engines: []flows.Engine{{
-				Name: "100.64.0.2.yolo", Bare: "yolo",
-				Result: "steeleagle_protocol/v1/messages/result/DetectionResult",
-			}},
-		}}}
+		cat := flows.Catalog{Daemons: []flows.Daemon{
+			{
+				IP:      "100.64.0.1",
+				Engines: []flows.Engine{{Name: "100.64.0.1.gcs", Bare: "gcs"}},
+			},
+			{
+				IP: "100.64.0.2",
+				Engines: []flows.Engine{{
+					Name: "100.64.0.2.yolo", Bare: "yolo",
+					Result: "steeleagle_protocol/v1/messages/result/DetectionResult",
+				}},
+			},
+		}}
 		target := fleet.Vehicle{Name: "100.64.0.2.alpha", DaemonIP: "100.64.0.2"}
 		res, err := tpl.Resolve(cat, "100.64.0.1", target, []string{"front"}, "flowtest", nil)
 		if err != nil {

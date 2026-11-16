@@ -1,0 +1,34 @@
+[plugin]
+name = "SwiftMap Reachback"
+type = "engine"
+description = "SwiftMap on the vehicle, after preprocess: forwards keyframes and sends back stored frames covering the weak targets of the swiftmap engine's plans"
+
+[[args]]
+name = "remote"
+type = "string"
+description = "Service name of the swiftmap engine on the remote daemon"
+default = "swiftmap"
+
+[[args]]
+name = "send_distance"
+type = "number"
+description = "Meters of travel between keyframes forwarded; frames without a GPS fix are dropped. 0 turns this off"
+default = 5.0
+
+[[args]]
+name = "min_disparity"
+type = "number"
+description = "Optical-flow disparity from the last keyframe, in px at the frame's resolution, that makes the next keyframe. 0 turns this off"
+default = 40.0
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest frame sent back, in bytes"
+default = 6237184
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]
+# No result: keyframes forwarded, others dropped; frames sent back
+# (swiftmap/ReachbackFrame, then swiftmap/ReachbackDone) take incoming frames' places

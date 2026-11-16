@@ -89,25 +89,25 @@ func TestResolveLocations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantP := []config.Producer{{Name: "front", Tokens: intp(2)}}
+	wantP := []config.Producer{{Name: "vehicle.front", Tokens: intp(2)}}
 	if !reflect.DeepEqual(f.Producers, wantP) {
 		t.Errorf("producers = %+v, want %+v", f.Producers, wantP)
 	}
 	wantE := []config.Engine{
-		{Name: "100.64.0.2.yolo", Location: "local"},
-		{Name: "100.64.0.1.h264_encoder", Location: "remote"},
+		{Name: "local.yolo", Location: "local"},
+		{Name: "remote.h264_encoder", Location: "remote"},
 	}
 	if !reflect.DeepEqual(f.Engines, wantE) {
 		t.Errorf("engines = %+v, want %+v", f.Engines, wantE)
 	}
 	wantEdges := []config.Edge{
-		{From: "front", To: "100.64.0.2.yolo", Timeout: "2s"},
-		{From: "100.64.0.2.yolo", To: "100.64.0.1.h264_encoder", Timeout: "1s"},
+		{From: "vehicle.front", To: "local.yolo", Timeout: "2s"},
+		{From: "local.yolo", To: "remote.h264_encoder", Timeout: "1s"},
 	}
 	if !reflect.DeepEqual(f.Edges, wantEdges) {
 		t.Errorf("edges = %+v, want %+v", f.Edges, wantEdges)
 	}
-	wantMap := map[string]string{"swap03.yolo": "100.64.0.2.yolo", "cloudlet033.h264_encoder": "100.64.0.1.h264_encoder"}
+	wantMap := map[string]string{"swap03.yolo": "local.yolo", "cloudlet033.h264_encoder": "remote.h264_encoder"}
 	if !reflect.DeepEqual(res.Engines, wantMap) {
 		t.Errorf("Engines = %v, want %v", res.Engines, wantMap)
 	}
@@ -121,6 +121,8 @@ func TestResolveOrchestratorTarget(t *testing.T) {
 		Engines:   []TemplateEngine{{Name: "cloudlet033.h264_encoder"}},
 		Edges:     []TemplateEdge{{From: "cloudlet033.telemetry", To: "cloudlet033.h264_encoder", Timeout: "1s"}},
 	}
+	// The orchestrator's engine is local to a vehicle on the orchestrator's
+	// daemon, and remote to any other.
 	locOf := func(t *testing.T, tpl Template, target fleet.Vehicle) string {
 		t.Helper()
 		res, err := tpl.Resolve(testCatalog(), "100.64.0.1", target, []string{}, "m", nil)
@@ -146,11 +148,14 @@ func TestResolveOrchestratorTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(f.Producers) != 1 || f.Producers[0].Name != "telemetry" {
-		t.Errorf("producers = %+v, want bare telemetry", f.Producers)
+	if len(f.Producers) != 1 || f.Producers[0].Name != "vehicle.telemetry" {
+		t.Errorf("producers = %+v, want vehicle.telemetry", f.Producers)
 	}
-	if f.Engines[0].Name != "100.64.0.1.h264_encoder" {
-		t.Errorf("engine = %s", f.Engines[0].Name)
+	if f.Engines[0].Name != "remote.h264_encoder" {
+		t.Errorf("engine = %s, want remote.h264_encoder", f.Engines[0].Name)
+	}
+	if res.Engines["cloudlet033.h264_encoder"] != "remote.h264_encoder" {
+		t.Errorf("Engines = %v, want the encoder remote", res.Engines)
 	}
 	if got := locOf(t, tpl, charlie()); got != "remote" {
 		t.Errorf("charlie: encoder is %s, want remote", got)
@@ -216,25 +221,11 @@ func TestManifestFromCatalog(t *testing.T) {
 		t.Errorf("info = %+v", m.Info)
 	}
 	want := []config.MissionEngineField{
-		{Name: "100.64.0.2.yolo", Result: "steeleagle_protocol/v1/messages/result/DetectionResult"},
-		{Name: "100.64.0.1.h264_encoder", Result: "messages/result/GenericResult"},
+		{Name: "local.yolo", Result: "steeleagle_protocol/v1/messages/result/DetectionResult"},
+		{Name: "remote.h264_encoder"},
 	}
 	if !reflect.DeepEqual(m.Engines, want) {
 		t.Errorf("engines = %+v, want %+v", m.Engines, want)
-	}
-}
-
-func TestManifestGenericStandIn(t *testing.T) {
-	for _, k := range []string{"Detection", "Classification", "Guidance", "Position", "Generic"} {
-		r := "steeleagle_protocol/v1/messages/result/" + k + "Result"
-		if got := ManifestResult(r); got != r {
-			t.Errorf("ManifestResult(%q) = %q", r, got)
-		}
-	}
-	for _, r := range []string{"steeleagle_protocol/v1/messages/frame/EncodedFrame", ""} {
-		if got := ManifestResult(r); got != "messages/result/GenericResult" {
-			t.Errorf("ManifestResult(%q) = %q", r, got)
-		}
 	}
 }
 
@@ -294,9 +285,16 @@ func TestEngineNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"swap03.yolo": "100.64.0.2.yolo", "cloudlet033.h264_encoder": "100.64.0.1.h264_encoder"}
+	// Relative to charlie, which the flow was designed for
+	want := map[string]string{"swap03.yolo": "local.yolo", "cloudlet033.h264_encoder": "remote.h264_encoder"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
+	}
+	// Without a known vehicle, every engine is remote
+	unbound := testTemplate()
+	unbound.Vehicle = ""
+	if got, _ := unbound.EngineNames(testCatalog()); got["swap03.yolo"] != "remote.yolo" {
+		t.Errorf("unbound: got %v, want swap03.yolo remote", got)
 	}
 	tpl := testTemplate()
 	tpl.Engines[0].Name = "yolo"

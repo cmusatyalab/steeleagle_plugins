@@ -113,12 +113,13 @@ class GstCapture:
     """Decodes the video of the .mp4 file at `path` with `decoder`, in
     gst-launch syntax, into RGB arrays, converting the decoder's output on the
     CPU; see to_rgb for the formats it may be in. Frames come at the file's
-    framerate, and the file loops forever. It reads like an OpenCV
+    framerate, and the file loops forever, or, unless `loop`, stops at its
+end, after which `ended` is set and reads fail. It reads like an OpenCV
     VideoCapture: isOpened, read and release. Only the latest frame is kept,
     so a slow reader skips frames rather than falling behind, as with a live
     camera."""
 
-    def __init__(self, path, decoder):
+    def __init__(self, path, decoder, loop=True):
         description = (
             f'filesrc name=src ! qtdemux name=demux demux.video_0 '
             f'! h264parse ! {stream_caps(path)} ! {decoder} '
@@ -126,6 +127,12 @@ class GstCapture:
         )
         self._opened = False
         self._logged_format = None
+        # (fps, frames, first timestamp) of the video, to number the frames
+        # read by their timestamp
+        self._frame_rate = mp4.video_frame_rate(path)
+        # Unless looping, the video stops at its end, and ended is set
+        self._loop = loop
+        self.ended = False
         try:
             self._pipeline = Gst.parse_launch(description)
         except Exception as e:
@@ -147,6 +154,15 @@ class GstCapture:
     def isOpened(self):
         return self._opened
 
+    def frame_index(self, pts):
+        """The number of the video's frame with timestamp `pts` (as read
+        returns it), counting from 0 in presentation order, or None if it
+        can't be known. A slow reader skips frames (see the class), so frames
+        are numbered by their time, not by counting reads."""
+        if pts is None or self._frame_rate is None:
+            return None
+        return mp4.frame_index(*self._frame_rate, pts)
+
     def read(self):
         """(True, an RGB frame, its presentation time in seconds into the
         file, or None if it has none) once one is decoded, or (False, None,
@@ -154,6 +170,15 @@ class GstCapture:
         if not self._opened:
             return False, None, None
         error = self._bus_error()
+        # The appsink can reach end of stream without the pipeline posting
+        # EOS on the bus, so its own state is checked too
+        if error is None and self._sink.is_eos():
+            error = 'end of stream'
+        if error == 'end of stream' and not self._loop:
+            logger.info('the video ended')
+            self.ended = True
+            self._opened = False
+            return False, None, None
         if error == 'end of stream':
             if not self._pipeline.seek_simple(
                     Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, 0):

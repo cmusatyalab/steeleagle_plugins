@@ -36,6 +36,7 @@ import (
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/metrics"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/pins"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/presence"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/rtc"
 	promapi "github.com/prometheus/client_golang/api"
@@ -179,6 +180,10 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 		log.Warn().Msg("no daemon socket; vehicles can't be controlled")
 	}
 	controller := control.New(grpcConn(conn), control.DefaultTimeout, log)
+	// Detections are placed on the map from the poses of the frames and
+	// telemetry the GCS receives; without a daemon there are none.
+	pinStore := pins.NewStore()
+	poses := pins.NewPoseHistory()
 	vehicles := noDaemonHandler()
 	var fleetFlows *fleet.Flows
 	// Everything that lists the daemon's services shares one listing
@@ -188,6 +193,10 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 		fleetFlows = fleet.NewFlows(conn, fleet.FlowSpec{Engine: engine}, log)
 		controller.OnHold(fleetFlows.PushAfterHold)
 		controller.OnStart(fleetFlows.MissionStarted)
+		// A vehicle is AUTO from when its mission starts until it is stopped
+		// or held
+		controller.OnStarted(func(vs []string) { fleetFlows.SetAuto(vs, true) })
+		controller.OnStopped(func(vs []string) { fleetFlows.SetAuto(vs, false) })
 		vehicles = http.HandlerFunc(fleet.NewVehicles(daemonClient, fleetFlows, log).ServeVehicles)
 	}
 
@@ -248,7 +257,7 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	if conn != nil {
 		flowOf = func(ctx context.Context, vehicle string) ([]byte, error) { return fleet.GetFlow(ctx, conn, vehicle) }
 	}
-	metricsRoutes["GET /api/metrics/flow"] = metrics.NewFlowHandler(flowOf, daemonConfigs, promv1.NewAPI(prom), log)
+	metricsRoutes["GET /api/metrics/flow"] = metrics.NewFlowHandler(flowOf, daemonConfigs, promv1.NewAPI(prom), gcsIP, log)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -256,12 +265,22 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	if inference != nil {
 		defer inference.Close()
 	}
+	if conn != nil {
+		// Detections of the engines on this machine are placed on the map
+		collector := pins.NewCollector(pinStore, poses, log)
+		go collector.Run(ctx, pins.Source(list), func(ctx context.Context, name string, handle func(feed.Result)) {
+			feed.SubscribeResults(ctx, name, log, handle)
+		})
+	}
 
 	ln, err := net.Listen("tcp", a.HTTPAddr)
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: newHandler(hub, controller, vehicles, missions, daemonsRoutes, metricsRoutes, uiConfig{Mapbox: a.Mapbox}, web, log, register), ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{
+		Handler:           newHandler(hub, controller, vehicles, missions, daemonsRoutes, metricsRoutes, pinStore, uiConfig{Mapbox: a.Mapbox}, web, log, register),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	errs := make(chan error, 2)
 	go func() {
 		log.Info().Str("addr", ln.Addr().String()).Msg("serving web UI")
@@ -273,15 +292,23 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 		// The flows learn which vehicles' data is arriving, to push the GCS
 		// flow again to those whose data isn't, and keep the last telemetry
 		// for the vehicle list
-		publish := hub.Publish
+		publish := func(msg feed.Message) {
+			if msg.Telemetry != nil {
+				poses.Telemetry(msg.Vehicle, msg.Telemetry, time.Now())
+			} else if msg.Frame != nil {
+				poses.Frame(msg.Producer, msg.Session, msg.Seq, msg.Frame)
+			}
+			hub.Publish(msg)
+		}
 		if fleetFlows != nil {
+			next := publish
 			publish = func(msg feed.Message) {
 				if msg.Telemetry != nil {
 					fleetFlows.ReceivedTelemetry(msg.Vehicle, msg.Telemetry)
 				} else {
 					fleetFlows.ReceivedFrame(msg.Vehicle)
 				}
-				hub.Publish(msg)
+				next(msg)
 			}
 		}
 		{
@@ -470,9 +497,10 @@ type uiConfig struct {
 
 // newHandler serves the API, and the web UI from the directory web. vehicles
 // serves the vehicle list, missions the mission routes, orchestration the
-// daemon routes, metricsRoutes the Metrics page's routes and /metrics, and ui
-// the web UI's settings.
-func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Handler, missions missionRoutes, orchestration daemonRoutes, metricsRoutes map[string]http.Handler, ui uiConfig, web string, log zerolog.Logger, extensions ...func(*http.ServeMux)) http.Handler {
+// daemon routes, metricsRoutes the Metrics page's routes and /metrics,
+// pinStore the detection pins, and ui the web UI's settings. Extensions
+// register optional routes such as the AI endpoints.
+func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Handler, missions missionRoutes, orchestration daemonRoutes, metricsRoutes map[string]http.Handler, pinStore *pins.Store, ui uiConfig, web string, log zerolog.Logger, extensions ...func(*http.ServeMux)) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -485,6 +513,7 @@ func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Hand
 	mux.HandleFunc("POST /api/joystick", controller.ServeJoystick)
 	mux.HandleFunc("POST /api/gimbal", controller.ServeGimbal)
 	mux.Handle("GET /api/remote/vehicles", vehicles)
+	pins.Routes(mux, pinStore)
 	mux.HandleFunc("GET /api/schema", missions.svc.ServeSchema)
 	mux.HandleFunc("POST /api/compile", missions.svc.ServeCompile)
 	mux.HandleFunc("POST /api/render_dsl", missions.svc.ServeRenderDSL)

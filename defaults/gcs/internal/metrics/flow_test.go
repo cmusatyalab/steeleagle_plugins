@@ -15,35 +15,42 @@ const (
 // both to the GCS.
 const gcsFlow = `
 [[producers]]
-name = "rgb"
+name = "vehicle.rgb"
 tokens = 3
 
 [[producers]]
-name = "telemetry"
+name = "vehicle.telemetry"
 
 [[engines]]
-name = "100.101.84.40.encoder"
+name = "local.encoder"
 location = "local"
 
 [[engines]]
-name = "128.2.208.19.gcs"
+name = "remote.gcs"
 location = "remote"
 
 [[edges]]
-from = "rgb"
-to = "100.101.84.40.encoder"
+from = "vehicle.rgb"
+to = "local.encoder"
 timeout = "1s"
 
 [[edges]]
-from = "100.101.84.40.encoder"
-to = "128.2.208.19.gcs"
+from = "local.encoder"
+to = "remote.gcs"
 timeout = "1s"
 
 [[edges]]
-from = "telemetry"
-to = "128.2.208.19.gcs"
+from = "vehicle.telemetry"
+to = "remote.gcs"
 timeout = "1s"
 `
+
+// rgb and telemetry are the IDs of the vehicle's producers: their names as
+// the vehicle qualifies them.
+const (
+	rgb       = fakeDrone + ".rgb"
+	telemetry = fakeDrone + ".telemetry"
+)
 
 var testHostnames = map[string]string{fermiIP: "fermi", lambda2IP: "lambda2"}
 
@@ -75,28 +82,51 @@ func bottlenecks(v View) []string {
 }
 
 func TestBuildViewMakesNodesAndEdgesWithHosts(t *testing.T) {
-	v, err := BuildView([]byte(gcsFlow), fakeDrone, testHostnames)
+	v, err := BuildView([]byte(gcsFlow), fakeDrone, lambda2IP, testHostnames)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	want := []Node{
-		{ID: "rgb", Kind: KindProducer, Label: "rgb", Host: "fermi"},
-		{ID: "telemetry", Kind: KindProducer, Label: "telemetry", Host: "fermi"},
+		{ID: rgb, Kind: KindProducer, Label: "rgb", Host: "fermi"},
+		{ID: telemetry, Kind: KindProducer, Label: "telemetry", Host: "fermi"},
 		{ID: encoder, Kind: KindEngine, Label: "encoder", Host: "fermi"},
 		{ID: gcs, Kind: KindEngine, Label: "gcs", Host: "lambda2"},
 	}
 	if !reflect.DeepEqual(v.Nodes, want) {
 		t.Errorf("nodes = %+v, want %+v", v.Nodes, want)
 	}
-	wantEdges := []Edge{{From: "rgb", To: encoder}, {From: encoder, To: gcs}, {From: "telemetry", To: gcs}}
+	wantEdges := []Edge{
+		{From: rgb, To: encoder},
+		{From: encoder, To: gcs, CrossesNetwork: true},
+		{From: telemetry, To: gcs, CrossesNetwork: true},
+	}
 	if !reflect.DeepEqual(v.Edges, wantEdges) {
 		t.Errorf("edges = %+v, want %+v", v.Edges, wantEdges)
 	}
 }
 
+func TestBuildViewMarksTheEdgesThatCrossTheNetwork(t *testing.T) {
+	v, err := BuildView([]byte(gcsFlow), fakeDrone, lambda2IP, testHostnames)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]bool{
+		rgb + "->" + encoder:   false, // producer to a local engine
+		encoder + "->" + gcs:   true,  // local engine to a remote engine
+		telemetry + "->" + gcs: true,  // producer to a remote engine
+	}
+	for _, e := range v.Edges {
+		key := e.From + "->" + e.To
+		if got, ok := want[key]; !ok || e.CrossesNetwork != got {
+			t.Errorf("edge %s crosses the network = %v, want %v", key, e.CrossesNetwork, got)
+		}
+	}
+}
+
 func TestBuildViewFallsBackToTheIPForAnUnknownHost(t *testing.T) {
-	v, err := BuildView([]byte(gcsFlow), fakeDrone, map[string]string{})
+	v, err := BuildView([]byte(gcsFlow), fakeDrone, lambda2IP, map[string]string{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,14 +136,14 @@ func TestBuildViewFallsBackToTheIPForAnUnknownHost(t *testing.T) {
 }
 
 func TestBuildViewOfAnEmptyFlowHasNoNodes(t *testing.T) {
-	v, err := BuildView(nil, fakeDrone, testHostnames)
+	v, err := BuildView(nil, fakeDrone, lambda2IP, testHostnames)
 	if err != nil || len(v.Nodes) != 0 || len(v.Edges) != 0 {
 		t.Errorf("BuildView(empty) = %+v, %v; want no nodes", v, err)
 	}
 }
 
 func TestBottleneckIsTheBusiestEngineOnEachPath(t *testing.T) {
-	v, _ := BuildView([]byte(gcsFlow), fakeDrone, testHostnames)
+	v, _ := BuildView([]byte(gcsFlow), fakeDrone, lambda2IP, testHostnames)
 	setMetrics(&v, map[string]*EngineMetrics{encoder: busy(0.98), gcs: busy(0.002)})
 
 	MarkBottlenecks(&v)
@@ -124,7 +154,7 @@ func TestBottleneckIsTheBusiestEngineOnEachPath(t *testing.T) {
 }
 
 func TestIdleSlowEngineIsNotABottleneck(t *testing.T) {
-	v, _ := BuildView([]byte(gcsFlow), fakeDrone, testHostnames)
+	v, _ := BuildView([]byte(gcsFlow), fakeDrone, lambda2IP, testHostnames)
 	setMetrics(&v, map[string]*EngineMetrics{encoder: busy(0.1), gcs: busy(0.01)})
 
 	MarkBottlenecks(&v)
@@ -134,8 +164,23 @@ func TestIdleSlowEngineIsNotABottleneck(t *testing.T) {
 	}
 }
 
+// The GCS on lambda: almost always idle, but now and then a burst of
+// telemetry replaces an input before the engine takes it.
+func TestIdleEngineThatRarelySkipsIsNotABottleneck(t *testing.T) {
+	v, _ := BuildView([]byte(gcsFlow), fakeDrone, lambda2IP, testHostnames)
+	rarelySkips := busy(0.004)
+	rarelySkips.Skipped = ptr(0.004)
+	setMetrics(&v, map[string]*EngineMetrics{encoder: busy(0.33), gcs: rarelySkips})
+
+	MarkBottlenecks(&v)
+
+	if got := bottlenecks(v); got != nil {
+		t.Errorf("bottlenecks = %v, want none", got)
+	}
+}
+
 func TestEngineThatSkipsIsMarkedBelowTheBusyThreshold(t *testing.T) {
-	v, _ := BuildView([]byte(gcsFlow), fakeDrone, testHostnames)
+	v, _ := BuildView([]byte(gcsFlow), fakeDrone, lambda2IP, testHostnames)
 	skipping := busy(0.5)
 	skipping.Skipped = ptr(0.3)
 	setMetrics(&v, map[string]*EngineMetrics{encoder: skipping, gcs: busy(0.01)})
@@ -150,34 +195,34 @@ func TestEngineThatSkipsIsMarkedBelowTheBusyThreshold(t *testing.T) {
 func TestDiamondMarksABottleneckPerPath(t *testing.T) {
 	diamond := `
 [[producers]]
-name = "camera"
+name = "vehicle.camera"
 [[engines]]
-name = "10.0.0.1.a"
+name = "local.a"
 location = "local"
 [[engines]]
-name = "10.0.0.1.b"
+name = "local.b"
 location = "local"
 [[engines]]
-name = "10.0.0.1.c"
+name = "local.c"
 location = "local"
 [[edges]]
-from = "camera"
-to = "10.0.0.1.a"
+from = "vehicle.camera"
+to = "local.a"
 timeout = "1s"
 [[edges]]
-from = "camera"
-to = "10.0.0.1.b"
+from = "vehicle.camera"
+to = "local.b"
 timeout = "1s"
 [[edges]]
-from = "10.0.0.1.a"
-to = "10.0.0.1.c"
+from = "local.a"
+to = "local.c"
 timeout = "1s"
 [[edges]]
-from = "10.0.0.1.b"
-to = "10.0.0.1.c"
+from = "local.b"
+to = "local.c"
 timeout = "1s"
 `
-	v, err := BuildView([]byte(diamond), "10.0.0.1.drone", nil)
+	v, err := BuildView([]byte(diamond), "10.0.0.1.drone", "10.0.0.9", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +236,7 @@ timeout = "1s"
 }
 
 func TestEngineWithoutMetricsIsNeverABottleneck(t *testing.T) {
-	v, _ := BuildView([]byte(gcsFlow), fakeDrone, testHostnames)
+	v, _ := BuildView([]byte(gcsFlow), fakeDrone, lambda2IP, testHostnames)
 
 	MarkBottlenecks(&v)
 
@@ -203,5 +248,52 @@ func TestEngineWithoutMetricsIsNeverABottleneck(t *testing.T) {
 func setMetrics(v *View, byID map[string]*EngineMetrics) {
 	for i := range v.Nodes {
 		v.Nodes[i].Metrics = byID[v.Nodes[i].ID]
+	}
+}
+
+// A flow's names are qualified as the vehicle does: a local engine's producer
+// and a local engine run on the vehicle's daemon, a remote engine on the
+// orchestrator's.
+func TestBuildViewQualifiesLocalAndRemoteNames(t *testing.T) {
+	flow := `
+[[producers]]
+name = "local.preprocess.frames"
+
+[[engines]]
+name = "local.yolo"
+location = "local"
+
+[[engines]]
+name = "remote.gcs"
+location = "remote"
+
+[[edges]]
+from = "local.preprocess.frames"
+to = "local.yolo"
+timeout = "1s"
+
+[[edges]]
+from = "local.yolo"
+to = "remote.gcs"
+timeout = "1s"
+`
+	v, err := BuildView([]byte(flow), fakeDrone, lambda2IP, testHostnames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Node{
+		{ID: fermiIP + ".preprocess.frames", Kind: KindProducer, Label: "preprocess.frames", Host: "fermi"},
+		{ID: fermiIP + ".yolo", Kind: KindEngine, Label: "yolo", Host: "fermi"},
+		{ID: gcs, Kind: KindEngine, Label: "gcs", Host: "lambda2"},
+	}
+	if !reflect.DeepEqual(v.Nodes, want) {
+		t.Errorf("nodes = %+v, want %+v", v.Nodes, want)
+	}
+	wantEdges := []Edge{
+		{From: fermiIP + ".preprocess.frames", To: fermiIP + ".yolo"},
+		{From: fermiIP + ".yolo", To: gcs, CrossesNetwork: true},
+	}
+	if !reflect.DeepEqual(v.Edges, wantEdges) {
+		t.Errorf("edges = %+v, want %+v", v.Edges, wantEdges)
 	}
 }

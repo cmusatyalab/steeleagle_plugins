@@ -16,6 +16,12 @@ description = "H.264 encoder, in gst-launch syntax"
 default = "x264enc tune=zerolatency speed-preset=ultrafast pass=quant quantizer=18 key-int-max=300"
 
 [[args]]
+name = "converter"
+type = "string"
+description = "Converts the RGB frames to a format the encoder takes, in gst-launch syntax: e.g. \"videoconvert n-threads=4\" in software, or \"qtivtransform ! video/x-raw(memory:GBM),format=NV12\" in Qualcomm hardware for qtic2venc, or \"videoconvert n-threads=4 ! video/x-raw,format=NV12\" for omxh264enc. For x264enc, its output is constrained to I420, so that x264enc encodes 4:2:0, which browsers decode; for other encoders, it must output a 4:2:0 format itself."
+default = "videoconvert n-threads=4"
+
+[[args]]
 name = "fps"
 type = "number"
 description = "Frame rate the encoder is told the frames come at"
@@ -46,12 +52,6 @@ description = "Milliseconds between frames after which the next frame is forced 
 default = 150
 
 [[args]]
-name = "convert_threads"
-type = "number"
-description = "Threads that convert each RGB frame to the 4:2:0 format the encoder takes; 0 uses one per CPU core. On a Particle Tachyon at 720p, 4 threads cut the conversion from 14 ms to 7 ms a frame"
-default = 4
-
-[[args]]
 name = "log_frames"
 type = "boolean"
 description = "Log every frame encoded"
@@ -60,4 +60,6 @@ default = false
 [engine]
 type = "filter"
 inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# Each input is converted, so this is what the engine sends on
+forwards = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
 # No result: each frame is replaced with an EncodedFrame (CODEC_H264)

@@ -5,11 +5,14 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	common "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/common"
 	telemetrypb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/telemetry"
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
+	"github.com/cmusatyalab/steeleagle/config"
 	"github.com/rs/zerolog"
 )
 
@@ -31,6 +34,29 @@ type Velocity struct {
 	YVel       float64 `json:"y_vel"`
 	ZVel       float64 `json:"z_vel"`
 	AngularVel float64 `json:"angular_vel"`
+}
+
+// CameraView is where the vehicle's gimbal camera points.
+type CameraView struct {
+	// Yaw is in degrees clockwise from north, in [0, 360).
+	Yaw float64 `json:"yaw"`
+	// Pitch is in degrees, negative below the horizon.
+	Pitch float64 `json:"pitch"`
+	// HFov and VFov are the camera's horizontal and vertical field of view in
+	// degrees, from the driver's capabilities; omitted if it gives none.
+	HFov float64 `json:"hfov,omitempty"`
+	VFov float64 `json:"vfov,omitempty"`
+}
+
+// Alerts are a vehicle's warnings, each the name of its level without the
+// enum's prefix (e.g. "CRITICAL" for BATTERY_WARNING_CRITICAL), or empty if
+// there is none.
+type Alerts struct {
+	Battery      string `json:"battery,omitempty"`
+	GPS          string `json:"gps,omitempty"`
+	Magnetometer string `json:"magnetometer,omitempty"`
+	Connection   string `json:"connection,omitempty"`
+	Compass      string `json:"compass,omitempty"`
 }
 
 // VehicleJSON is a vehicle as the UI reads it.
@@ -55,6 +81,27 @@ type VehicleJSON struct {
 	// Track is where the vehicle has been, as [long, lat, alt], oldest
 	// first; omitted if the GCS received no position of it.
 	Track [][3]float64 `json:"track,omitempty"`
+	// TrackStart is how far over the ground, in meters, the vehicle had flown
+	// before the first point of Track, so that places along the track can be
+	// fixed as it moves on.
+	TrackStart float64 `json:"track_start,omitempty"`
+	// Camera is where the gimbal camera points; omitted if the telemetry
+	// has no gimbal pose.
+	Camera *CameraView `json:"camera,omitempty"`
+	// Auto is whether a mission this GCS started is running on the vehicle:
+	// from when it started until it is stopped or held.
+	Auto bool `json:"auto"`
+	// Mode is the driver's flight mode without its prefix (e.g.
+	// "RETURN_TO_HOME"), and Motion its motion status ("HOLDING",
+	// "IN_TRANSIT" or "STOPPED"); empty if unknown.
+	Mode   string `json:"mode"`
+	Motion string `json:"motion"`
+	// Alerts are the vehicle's warnings.
+	Alerts Alerts `json:"alerts"`
+	// Setpoint is the position the vehicle was sent to, with its altitude
+	// relative like Current's; omitted unless the driver's setpoint is a
+	// global position.
+	Setpoint *Location `json:"setpoint,omitempty"`
 }
 
 // ToVehicleJSON maps a vehicle and its latest telemetry to the UI's shape.
@@ -83,14 +130,93 @@ func ToVehicleJSON(v Vehicle, t *telemetrypb.Telemetry, flowStatus string, now t
 		Lat: g.GetLatitude(), Long: g.GetLongitude(),
 		Alt: math.Max(0, float64(pos.GetRelativePosition().GetZ())),
 	}
-	out.Bearing = math.Mod(math.Mod(float64(g.GetHeading()), 360)+360, 360)
+	out.Bearing = wrap360(float64(g.GetHeading()))
 	if vel := pos.GetVelocityBody(); vel != nil {
 		out.Velocity = &Velocity{
 			XVel: float64(vel.GetXVel()), YVel: float64(vel.GetYVel()),
 			ZVel: float64(vel.GetZVel()), AngularVel: float64(vel.GetAngularVel()),
 		}
 	}
+	out.Camera = CameraViewOf(t.GetGimbalInfo(), out.Bearing)
+	if c := gimbalCamera(v.Driver); out.Camera != nil && c != nil {
+		out.Camera.HFov, out.Camera.VFov = float64(c.HFov), float64(c.VFov)
+	}
+	out.Setpoint = globalSetpoint(pos)
+	out.Mode = enumName(t.GetMode().String(), "MODE_")
+	out.Motion = enumName(t.GetMotionStatus().String(), "MOTION_STATUS_")
+	a := t.GetAlertInfo()
+	out.Alerts = Alerts{
+		Battery:      enumName(a.GetBatteryWarning().String(), "BATTERY_WARNING_"),
+		GPS:          enumName(a.GetGpsWarning().String(), "GPS_WARNING_"),
+		Magnetometer: enumName(a.GetMagnetometerWarning().String(), "MAGNETOMETER_WARNING_"),
+		Connection:   enumName(a.GetConnectionWarning().String(), "CONNECTION_WARNING_"),
+		Compass:      enumName(a.GetCompassWarning().String(), "COMPASS_WARNING_"),
+	}
 	return out
+}
+
+// enumName is an enum value's name without its prefix, or "" for the
+// unspecified value.
+func enumName(name, prefix string) string {
+	name = strings.TrimPrefix(name, prefix)
+	if name == "UNSPECIFIED" {
+		return ""
+	}
+	return name
+}
+
+func wrap360(deg float64) float64 {
+	return math.Mod(math.Mod(deg, 360)+360, 360)
+}
+
+// CameraViewOf is where gimbal g points, or nil if it reports no pose. Its pose
+// in NEU is used if given; otherwise its pose relative to the body, turned by
+// the vehicle's bearing (taking the body as level).
+func CameraViewOf(g *telemetrypb.GimbalInfo, bearing float64) *CameraView {
+	if p := g.GetPoseNeu(); p != nil {
+		return &CameraView{Yaw: wrap360(float64(p.GetYaw())), Pitch: float64(p.GetPitch())}
+	}
+	if p := g.GetPoseBody(); p != nil {
+		return &CameraView{Yaw: wrap360(bearing + float64(p.GetYaw())), Pitch: float64(p.GetPitch())}
+	}
+	return nil
+}
+
+// gimbalCamera is the camera the gimbal pose is of: the driver's camera on
+// the gimbal, else its primary camera, else its first; nil if it has none.
+func gimbalCamera(d *config.DriverCap) *config.DriverCamera {
+	if d == nil || len(d.Cameras) == 0 {
+		return nil
+	}
+	for i := range d.Cameras {
+		if d.Cameras[i].Gimbal {
+			return &d.Cameras[i]
+		}
+	}
+	for i := range d.Cameras {
+		if d.Cameras[i].Primary {
+			return &d.Cameras[i]
+		}
+	}
+	return &d.Cameras[0]
+}
+
+// globalSetpoint is the setpoint of pos if it is a global position, else nil;
+// also nil without a GPS fix, which its altitude is made relative by.
+// Its altitude, which is above sea level like the global position's, is
+// made relative to takeoff like the vehicle's own, and at least 0.
+func globalSetpoint(pos *telemetrypb.PositionInfo) *Location {
+	a := pos.GetSetpoint()
+	if a == nil || pos.GetGlobalPosition() == nil {
+		return nil
+	}
+	var sp common.GlobalPosition
+	if err := a.UnmarshalTo(&sp); err != nil {
+		return nil
+	}
+	alt := float64(sp.GetAltitude()) - float64(pos.GetGlobalPosition().GetAltitude()) +
+		float64(pos.GetRelativePosition().GetZ())
+	return &Location{Lat: sp.GetLatitude(), Long: sp.GetLongitude(), Alt: math.Max(0, alt)}
 }
 
 // Vehicles serves the vehicle list.
@@ -154,7 +280,8 @@ func (h *Vehicles) ServeVehicles(w http.ResponseWriter, r *http.Request) {
 		out[i] = ToVehicleJSON(v, tels[i], status, now)
 		out[i].Reachable = true
 		if h.flows != nil {
-			out[i].Track = h.flows.Track(v.Name)
+			out[i].Track, out[i].TrackStart = h.flows.Track(v.Name)
+			out[i].Auto = h.flows.Auto(v.Name)
 		}
 	}
 	for _, s := range h.remember(snap) {

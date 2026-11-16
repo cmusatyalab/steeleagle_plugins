@@ -63,7 +63,21 @@ mission flow sends the GCS no telemetry shows as disconnected until the hold.
 ## Flow catalog and TOML import
 
 `GET /api/flows/catalog` lists, per daemon, the vehicles with their streams and
-the engines with their input and result types (503 without a daemon).
+the engines with their input, forwarded and result types and the producers they
+advertise (503 without a daemon).
+
+An engine's `forwards` sets what its output edges carry: `"*"` (the default)
+passes on whatever input types reach it, a specific input type passes on
+only that type, and any other type means the engine converts each input into
+it, as an encoder (`forwards` EncodedFrame) or a decoder (`forwards` RawFrame)
+does. Other new data an engine makes leaves through one of its
+`[[engine.producers]]`. The Flow Builder lists each
+engine's producers under it, and type-checks their edges by their declared
+output type. A flow names an engine's producer `{host}.{engine}.{producer}`.
+Only the producers of engines on the vehicle's own daemon can be used: Uriel's
+producers run with the vehicle's client, so the Flow Builder doesn't offer the
+producers of the orchestrator's engines, and Deploy and the vehicle refuse them.
+
 `POST /api/flows/from_toml` with `{"toml": "..."}` parses the TOML of a flow
 config into a flow template without a vehicle; it needs no daemon. It answers 422
 with a `detail` for TOML that isn't a flow config (unknown keys, such as an old
@@ -182,18 +196,27 @@ before compilation. Detector behavior requires a real detector.
 A flow designed on the Flow Builder tab ships with Deploy: the Plan page sends it
 with the mission, and Deploy resolves it for each vehicle and builds it into the
 mission as the mission's flow and manifest (vehicles that build the same share a
-binary). A flow engine is either local or remote:
+binary). The flow and manifest name every node relative to the vehicle, which
+qualifies the names itself, so the bundle holds no addresses:
 
-- a local engine runs on the vehicle's own daemon. It is written with its bare
-  name (`yolo`), and Deploy qualifies it with the vehicle's daemon IP
-  (`100.64.0.2.yolo`), so a vehicle whose daemon doesn't run it fails with
-  `flow needs local engine yolo, which daemon 100.64.0.2 doesn't run`;
-- a remote engine runs on the orchestrator (the GCS's daemon). It is written
-  with its full service name (`100.64.0.1.h264_encoder`) and is the same for
-  every vehicle.
+| Node | Bundled name | The vehicle qualifies it to |
+|---|---|---|
+| A stream of the vehicle | `vehicle.front`, `vehicle.telemetry` | `{vehicle}.front` |
+| A local engine, on the vehicle's daemon | `local.yolo` | `{daemon IP}.yolo` |
+| A remote engine, on the orchestrator (the GCS's daemon) | `remote.h264_encoder` | `{orchestrator IP}.h264_encoder` |
+| A local engine's producer | `local.enc.frames` | `{daemon IP}.enc.frames` |
+
+Whether an engine is local or remote depends on the target: an engine on the
+orchestrator is `remote.yolo` for most vehicles, but `local.yolo` for a vehicle
+on the orchestrator's own daemon. A vehicle whose daemon doesn't run the
+flow's engines fails with `flow engine ... is neither on this vehicle's daemon
+nor on the orchestrator`. The GCS's own flow (camera, encoder, GCS) uses the
+same names. The vehicle stores an engine's results under its flow name, so a
+mission asks for `local.yolo`'s results.
 
 A mission action can name a flow engine, such as the `Engine` of `Track`, by the
-template's name for it. The manifest declares each engine's result type. The SDK
+template's name for it; Deploy builds it into each target's mission by the
+engine's name in that target's flow (`DetectionEngine_local_yolo`). The manifest declares each engine's result type. The SDK
 only generates typed engine fields for detection, classification, guidance,
 position and generic results, so an engine with any other result type is
 declared with the Generic stand-in (`messages/result/GenericResult`).
@@ -226,6 +249,11 @@ For the selected daemon:
   then only be fixed with `eagle configure` on the host. Removing or renaming
   the GCS's own service needs an extra confirmation.
 - **Restart Daemon** restarts the daemon and every service on it.
+- **Services** lists the daemon's services, each of which can be restarted or
+  stopped. A stopped service shows as "Stopped by request" and stays stopped,
+  even when its daemon restarts, until **Start** starts it again; one that
+  exited shows as "Stopped". The GCS can't stop its own service, since nothing
+  could start it again from the page.
 - **Packages** lists the installed packages and their plugins, and installs (by
   URI, `repo[//subdir][@version]`) or removes them. Changes take effect when the
   daemon next restarts.
@@ -244,9 +272,18 @@ graph, with each engine's numbers over the last 1, 5 or 15 minutes or hour:
 time per input (p50, p95 on hover), wait before the engine, inputs per second,
 and the share of inputs skipped. On each path from a producer, the busiest
 engine is marked as the bottleneck when it is busy at least 80% of the time or
-skips inputs. Above the graph is the end-to-end time from capture to the GCS;
+skips at least 5% of its inputs. Above the graph is the end-to-end time from capture to the GCS;
 engine times don't add up to it, since capture, transfer and queueing aren't
 engine time.
+
+Edges that cross the network, between an engine on the vehicle and one on the
+remote server, are dashed and labeled with the mean round trip time. When the
+flow has any, the page also shows the round
+trip time between the vehicle's daemon and its remote server
+(`uriel_remote_rtt_seconds`, QUIC's smoothed estimate), as its minimum and mean
+over the window. The minimum is close to the round trip propagation delay; it
+doesn't include the time to send a frame, which grows with its size over the
+bandwidth.
 
 The numbers come from a Prometheus server, the `prometheus` plugin of
 `engines/prometheus`, run as an `extra` service on the GCS's daemon:

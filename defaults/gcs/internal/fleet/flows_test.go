@@ -313,15 +313,15 @@ func TestObserveLeavesMissionFlow(t *testing.T) {
 	d, f, snap := flowsFixture(t)
 	advance := fakeClock(f)
 	mission := []byte(`[[producers]]
-name = "telemetry"
+name = "vehicle.telemetry"
 
 [[engines]]
-name = "100.64.1.5.yolo"
+name = "local.yolo"
 location = "local"
 
 [[edges]]
-from = "telemetry"
-to = "100.64.1.5.yolo"
+from = "vehicle.telemetry"
+to = "local.yolo"
 timeout = "2s"
 `)
 	d.flows[v1] = mission
@@ -336,7 +336,7 @@ timeout = "2s"
 	if string(d.flows[v1]) != string(mission) {
 		t.Errorf("flow = %s, want the mission's", d.flows[v1])
 	}
-	if s, want := f.Status(v1), "not pushed: vehicle runs another flow, with engine 100.64.1.5.yolo"; s != want {
+	if s, want := f.Status(v1), "not pushed: vehicle runs another flow, with engine local.yolo"; s != want {
 		t.Errorf("Status = %q, want %q", s, want)
 	}
 }
@@ -458,15 +458,15 @@ func TestObserveRidesOutUnavailableDaemon(t *testing.T) {
 // testFlow is a Flow Builder flow that streams only telemetry to the GCS,
 // which a check would take for a GCS flow and replace.
 const testFlow = `[[producers]]
-name = "telemetry"
+name = "vehicle.telemetry"
 
 [[engines]]
-name = "100.64.1.5.gcs"
+name = "remote.gcs"
 location = "remote"
 
 [[edges]]
-from = "telemetry"
-to = "100.64.1.5.gcs"
+from = "vehicle.telemetry"
+to = "remote.gcs"
 timeout = "2s"
 `
 

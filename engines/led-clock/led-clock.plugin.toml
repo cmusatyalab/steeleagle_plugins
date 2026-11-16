@@ -1,0 +1,33 @@
+[plugin]
+name = "LED Clock"
+type = "engine"
+description = "Reads the LED clock (Gray-coded ticks of a Raspberry Pi's realtime clock) off each frame, and logs the latency from when the clock showed the frame's tick to when the frame got here, and to when the driver published it; saves annotated snapshots to check the reading by eye"
+
+[[args]]
+name = "tick_ms"
+type = "number"
+description = "Milliseconds per tick of the LED clock; must match ledclock.py's --tick-ms"
+default = 5
+
+[[args]]
+name = "fps"
+type = "number"
+description = "Frame rate of the camera, from which the expected steps between frames' ticks are found"
+default = 30
+
+[[args]]
+name = "report_interval_seconds"
+type = "number"
+description = "Seconds between log lines of latency percentiles, frames decoded and steps checked"
+default = 5
+
+[[args]]
+name = "snapshot_interval_seconds"
+type = "number"
+description = "Seconds between annotated snapshots, saved in a directory of the daemon's files directory named after this engine's qualified endpoint"
+default = 5
+
+[engine]
+type = "detection"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# Every frame is dropped, with no result

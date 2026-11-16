@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -68,7 +69,7 @@ type BuildTarget struct {
 	// without a flow.
 	Flow     []byte
 	Manifest []byte
-	// Engines maps the engine names the mission uses to their full names
+	// Engines maps the engine names the mission uses to their resolved names
 	// (see GraphToAst): nil uses them as written, and an empty map allows
 	// none.
 	Engines map[string]string
@@ -303,7 +304,56 @@ func (s *Service) resolveForValidate(cat flows.Catalog, t flows.Template, g Grap
 	return t.Resolve(cat, s.gcsIP, target, cameras, validateMissionName, GraphRoles(g))
 }
 
-// ServeRenderDSL serves POST /api/render_dsl.
+// flowEngineNames resolves engine names relative to the flow's vehicle, as
+// Deploy does. Catalog failures and invalid flows have distinct statuses.
+func (s *Service) flowEngineNames(ctx context.Context, flow *flows.Template) (map[string]string, int, error) {
+	if flow.Empty() {
+		return nil, 0, nil
+	}
+	if s.catalog == nil {
+		return nil, http.StatusServiceUnavailable, errors.New(noDaemon)
+	}
+	cat, err := s.catalog(ctx)
+	if err != nil {
+		return nil, http.StatusServiceUnavailable, fmt.Errorf("Cannot list the flow catalog: %w", err)
+	}
+	names, err := flow.EngineNames(cat)
+	if err != nil {
+		return nil, http.StatusUnprocessableEntity, err
+	}
+	return names, 0, nil
+}
+
+// flowEngineAliases restores template names from relative identifiers or older
+// identifiers based on template names. Relative identifiers take precedence
+// so rendered DSL round-trips even if a daemon is named "local" or "remote".
+// Ambiguous aliases within either set remain unresolved.
+func flowEngineAliases(flow *flows.Template, names map[string]string) map[string]string {
+	if flow.Empty() {
+		return nil
+	}
+	aliases := make(map[string]string, len(flow.Engines)+len(names))
+	add := func(set map[string]string, alias, name string) {
+		if existing, ok := set[alias]; ok && existing != name {
+			set[alias] = ""
+		} else {
+			set[alias] = name
+		}
+	}
+	for _, engine := range flow.Engines {
+		add(aliases, constName(engine.Name), engine.Name)
+	}
+	relative := make(map[string]string, len(names))
+	for template, name := range names {
+		add(relative, constName(name), template)
+	}
+	maps.Copy(aliases, relative)
+	return aliases
+}
+
+// ServeRenderDSL serves POST /api/render_dsl. With a flow, engines are named
+// as in the mission of the flow's vehicle. Otherwise their names are quoted
+// so that editing or importing the DSL preserves them verbatim.
 func (s *Service) ServeRenderDSL(w http.ResponseWriter, r *http.Request) {
 	st := s.ready503(w, r)
 	if st == nil {
@@ -313,7 +363,12 @@ func (s *Service) ServeRenderDSL(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &g) {
 		return
 	}
-	ast, err := graphToPortableAst(g.Graph, st.Index, s.header)
+	engines, status, err := s.flowEngineNames(r.Context(), g.Flow)
+	if err != nil {
+		writeError(w, status, err.Error())
+		return
+	}
+	ast, err := graphToAstWithMode(g.Graph, st.Index, s.header, engines, g.Flow.Empty())
 	if err == nil {
 		var dsl string
 		if dsl, err = AstToDSL(ast); err == nil {
@@ -324,14 +379,16 @@ func (s *Service) ServeRenderDSL(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusUnprocessableEntity, err.Error())
 }
 
-// ServeParseDSL serves POST /api/parse_dsl.
+// ServeParseDSL serves POST /api/parse_dsl. With a flow, engine idents are
+// mapped back to the flow's template names, inverting ServeRenderDSL.
 func (s *Service) ServeParseDSL(w http.ResponseWriter, r *http.Request) {
 	st := s.ready503(w, r)
 	if st == nil {
 		return
 	}
 	var req struct {
-		DSL string `json:"dsl"`
+		DSL  string          `json:"dsl"`
+		Flow *flows.Template `json:"flow"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -342,7 +399,18 @@ func (s *Service) ServeParseDSL(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	graph := AstToGraph(ast, st.Index)
+	engines, status, err := s.flowEngineNames(r.Context(), req.Flow)
+	if status == http.StatusServiceUnavailable {
+		writeError(w, status, err.Error())
+		return
+	}
+	var idents map[string]string // ident suffix -> template name
+	if err != nil {
+		upgrade = append(upgrade, "Engines are kept as named: the flow doesn't resolve: "+err.Error())
+	} else {
+		idents = flowEngineAliases(req.Flow, engines)
+	}
+	graph := AstToGraph(ast, st.Index, idents)
 	warnings := []any{}
 	for _, m := range upgrade {
 		warnings = append(warnings, m)
@@ -372,7 +440,8 @@ func (s *Service) ServeParseDSL(w http.ResponseWriter, r *http.Request) {
 }
 
 // ServeBuild serves POST /api/build: the binary for one architecture, with
-// the driver config of the request's vehicle if it names one.
+// the driver config of the request's vehicle if it names one and the flow
+// resolved as for Validate if it has one.
 func (s *Service) ServeBuild(w http.ResponseWriter, r *http.Request) {
 	if s.ready503(w, r) == nil {
 		return
@@ -385,13 +454,17 @@ func (s *Service) ServeBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "arch must be amd64 or arm64")
 		return
 	}
-	target := BuildTarget{Key: req.Arch, Arch: req.Arch}
-	if req.Vehicle != "" {
-		var ok bool
-		if target.Plugin, ok = s.vehiclePlugin(w, r, req.Vehicle); !ok {
-			return
+	plan := PlanningContext{Vehicle: req.Vehicle, Flow: req.Flow}
+	target, status, err := s.validationTarget(r.Context(), plan, req.Graph)
+	if err != nil {
+		if status == http.StatusOK {
+			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("Build failed for %s: %s", req.Arch, err))
+		} else {
+			writeError(w, status, err.Error())
 		}
+		return
 	}
+	target.Key, target.Arch = req.Arch, req.Arch
 	bins, errs, err := s.CompileGraph(r.Context(), req.Graph, []BuildTarget{target})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

@@ -30,7 +30,7 @@ import { canvasThemeVars } from './canvasTheme.js';
 import { getApiUrl } from './urls.js';
 import { runValidation } from './validation.js';
 import { missionRequestBody, renderDsl } from './missionGraph.js';
-import { OLD_VERSION_MESSAGE, emptyFlow, parseFlowJson, serializeFlow, toTemplate, validateFlow } from './flowModel.js';
+import { OLD_VERSION_MESSAGE, emptyFlow, parseFlowJson, serializeFlow, templateIfValid, toTemplate, validateFlow } from './flowModel.js';
 import { engineChoices } from './flowEngines.js';
 import { loadMissionDraft, saveMissionDraft, highestNodeNumber } from './missionDraft.js';
 
@@ -386,13 +386,16 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     }, [nodes, startNodeId, schema]);
 
     const [renderedDsl, setRenderedDsl] = useState('');
+    // Sent with the DSL routes so the DSL names engines as the built mission
+    // does (local.yolo, remote.yolo); null leaves the canvas's names.
+    const dslFlow = useMemo(() => templateIfValid(flow, catalog), [flow, catalog]);
     // Debounced like validation above. The backend renders the DSL from
     // the same AST it compiles, so the tab never drifts from what's built.
     useEffect(() => {
         if (nodes.length === 0) return undefined;
         const controller = new AbortController();
         const timer = setTimeout(() => {
-            renderDsl(missionRequestBody(nodes, edges, eventInstances, startNodeId), controller.signal)
+            renderDsl({ ...missionRequestBody(nodes, edges, eventInstances, startNodeId), flow: dslFlow }, controller.signal)
                 .then(setRenderedDsl)
                 .catch(e => {
                     if (e.name !== 'AbortError') setRenderedDsl(`# DSL preview unavailable: ${e.message}`);
@@ -402,7 +405,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
             clearTimeout(timer);
             controller.abort();
         };
-    }, [nodes, edges, eventInstances, startNodeId]);
+    }, [nodes, edges, eventInstances, startNodeId, dslFlow]);
 
     function snapshotCurrent() {
         return {
@@ -500,7 +503,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     // Engine fields offer the flow's engines of the field's engine type.
     const engines = useCallback((engineType) => engineChoices(flow, catalog, engineType), [flow, catalog]);
 
-    // The flow to ship with Validate and Deploy: {flow: template} when the
+    // The flow to ship with Validate, Download and Deploy: {flow: template} when the
     // flow has nodes and is valid, {} when it has none, and null (after a
     // toast) when it's broken -- a broken flow is never sent.
     function flowRequestPart(quiet = false) {
@@ -578,9 +581,11 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
 
     async function handleDownloadBinary(arch) {
         if (!missionCompiled) return;
+        const flowPart = flowRequestPart();
+        if (!flowPart) return;
         setBuilding(arch);
         try {
-            const body = { ...buildMissionRequestBody(), ...vehiclePart, arch, geojson: features };
+            const body = { ...buildMissionRequestBody(), ...flowPart, ...vehiclePart, arch, geojson: features };
             const resp = await fetch(getApiUrl('/api/build'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -734,7 +739,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
         const resp = await fetch(getApiUrl('/api/parse_dsl'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ dsl: text }),
+            body: JSON.stringify({ dsl: text, flow: dslFlow }),
         });
         if (!resp.ok) {
             let detail = `Server error ${resp.status}`;
@@ -805,7 +810,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     async function handleExportDsl() {
         let dsl;
         try {
-            dsl = await renderDsl(buildMissionRequestBody());
+            dsl = await renderDsl({ ...buildMissionRequestBody(), flow: dslFlow });
         } catch (e) {
             toast.current.show({ severity: 'error', summary: 'Export failed', detail: e.message });
             return;

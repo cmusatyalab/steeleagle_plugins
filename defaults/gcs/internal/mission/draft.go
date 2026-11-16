@@ -90,7 +90,10 @@ func (s *Service) CheckDraft(ctx context.Context, candidate string, plan Plannin
 	if err != nil {
 		return failedDraft("parse_failed", err.Error())
 	}
-	parsed := astToGraph(ast, st.Index, draftEngineAliases(plan.Flow))
+	// Relative aliases require a resolved flow. If the catalog or an engine is
+	// unavailable, the context checks report it after the graph is imported.
+	engines, _, _ := s.flowEngineNames(ctx, plan.Flow)
+	parsed := astToGraph(ast, st.Index, flowEngineAliases(plan.Flow, engines), false)
 	if warnings, ok := parsed["warnings"].([]any); ok && len(warnings) != 0 {
 		result := failedDraft("invalid_graph")
 		for _, warning := range warnings {
@@ -142,24 +145,6 @@ func (s *Service) CheckDraft(ctx context.Context, candidate string, plan Plannin
 		return graphIssues("compile_failed", issues)
 	}
 	return Draft{DSL: normalized, Graph: &g, Status: "compiled", Errors: []string{}}
-}
-
-// An older draft may use an SDK-style identifier. Restore the original
-// template name only when the selected flow has one unambiguous match.
-func draftEngineAliases(flow *flows.Template) map[string]string {
-	if flow == nil {
-		return nil
-	}
-	aliases := make(map[string]string, len(flow.Engines))
-	for _, engine := range flow.Engines {
-		alias := constName(engine.Name)
-		if existing, ok := aliases[alias]; ok && existing != engine.Name {
-			aliases[alias] = ""
-		} else {
-			aliases[alias] = engine.Name
-		}
-	}
-	return aliases
 }
 
 func failedDraft(status string, messages ...string) Draft {

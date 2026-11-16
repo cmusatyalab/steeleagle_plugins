@@ -27,6 +27,8 @@ MAX_FRAME_SIZE = 1920 * 1080 * RGB_CHANNELS + FRAME_HEADROOM
 # are never shifted, so outputs keep their inputs' stamps.
 PTS_BASE = 1000 * 60 * 60 * Gst.SECOND
 IFRAME_TRIGGER_SIGNAL = "trigger-iframe"
+# Pipeline._pool before the appsrc's peer has been asked for a pool.
+_UNQUERIED = object()
 
 
 def _rgb_stride(width):
@@ -88,6 +90,7 @@ class Pipeline:
         self.src.set_property("is-live", True)
         self.sink.set_property("sync", False)
         self.started = False
+        self._pool = _UNQUERIED
 
         ret = self.pipeline.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
@@ -96,7 +99,58 @@ class Pipeline:
     def push(self, data, pts_ns):
         """Pushes the bytes `data`, stamped `pts_ns` (int nanoseconds),
         which must differ from the stamps of other buffers."""
-        buf = Gst.Buffer.new_wrapped(data)
+        self._push_buffer(Gst.Buffer.new_wrapped(data), pts_ns)
+
+    def push_frame(self, data, width, height, pts_ns):
+        """Pushes the tightly packed RGB pixels `data` of a `width`x`height`
+        frame, stamped as in push.
+
+        Hardware elements after the appsrc, such as qtivtransform, read only
+        their own (GBM/DMA-buf) memory: given wrapped memory, qtivtransform
+        silently outputs all-zero frames, which encode as solid green. So when
+        the element after the appsrc offers a pool of such buffers, the
+        pixels are copied into one of them."""
+        if self._pool is _UNQUERIED:
+            self._pool = self._hardware_pool()
+        if self._pool is None:
+            self.push(pad_rows(data, width, height), pts_ns)
+            return
+
+        ret, buf = self._pool.acquire_buffer(None)
+        if ret != Gst.FlowReturn.OK:
+            raise RuntimeError(f"failed to get a buffer from {self._pool.get_name()} ({ret})")
+        row = width * RGB_CHANNELS
+        meta = GstVideo.buffer_get_video_meta(buf)
+        offset, stride = (meta.offset[0], meta.stride[0]) if meta else (0, _rgb_stride(width))
+        if offset == 0 and stride == row:
+            buf.fill(0, data)
+        else:
+            for y in range(height):
+                buf.fill(offset + y * stride, data[y * row : (y + 1) * row])
+        self._push_buffer(buf, pts_ns)
+
+    def _hardware_pool(self):
+        """The pool the element after the appsrc offers for its input, if its
+        buffers are not system memory, activated; otherwise None."""
+        caps = self.src.get_property("caps")
+        query = Gst.Query.new_allocation(caps, True)
+        if not self.src.get_static_pad("src").peer_query(query) or query.get_n_allocation_pools() == 0:
+            return None
+        pool, size, min_buffers, max_buffers = query.parse_nth_allocation_pool(0)
+        if pool is None:
+            return None
+        config = pool.get_config()
+        Gst.BufferPool.config_set_params(config, caps, size, min_buffers, max_buffers)
+        Gst.BufferPool.config_add_option(config, GstVideo.BUFFER_POOL_OPTION_VIDEO_META)
+        if not pool.set_config(config) or not pool.set_active(True):
+            return None
+        ret, buf = pool.acquire_buffer(None)
+        if ret != Gst.FlowReturn.OK or buf.peek_memory(0).is_type(Gst.ALLOCATOR_SYSMEM):
+            pool.set_active(False)
+            return None
+        return pool
+
+    def _push_buffer(self, buf, pts_ns):
         buf.pts = PTS_BASE + pts_ns
         self.started = True
         ret = self.src.push_buffer(buf)
@@ -138,3 +192,5 @@ class Pipeline:
 
     def stop(self):
         self.pipeline.set_state(Gst.State.NULL)
+        if self._pool not in (None, _UNQUERIED):
+            self._pool.set_active(False)

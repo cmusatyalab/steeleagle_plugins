@@ -1,12 +1,18 @@
 [plugin]
 name = "CLIP Edge Filter"
 type = "engine"
-description = "Scores the tiles of each camera frame against a text prompt with MobileCLIP, and sends the remote verifier the best tiles, best first, keeping each until the verifier has it"
+description = "Scores the tiles of each camera frame against a text or image prompt with MobileCLIP, forwards each frame's best tile, and delivers every tile worth sending to the remote verifier, best first, on its reintegration producer"
 
 [[args]]
 name = "prompt"
 type = "string"
-description = "What to search for, as a noun phrase, e.g. \"a red tarp\" or \"person lying down\"; required"
+description = "What to search for, as a noun phrase, e.g. \"a red tarp\" or \"person lying down\"; this or image is required"
+default = ""
+
+[[args]]
+name = "image"
+type = "string"
+description = "An image of what to search for, instead of prompt: a file in the daemon's files directory (STEELEAGLE_FILES), e.g. \"target.jpg\". With both set, image is used"
 default = ""
 
 [[args]]
@@ -70,12 +76,6 @@ description = "Most tiles waiting for the verifier; past it, the lowest-scored t
 default = 64
 
 [[args]]
-name = "resend_after_ms"
-type = "number"
-description = "Milliseconds a sent tile waits for the verifier's RESULT, with no other word, before it is sent again; keep it above the verifier's edge timeout plus its processing time"
-default = 5000
-
-[[args]]
 name = "npu"
 type = "boolean"
 description = "Run the INT8 image encoder on the HTP through QNN (libs/); false runs it on the CPU. Only with quantized"
@@ -88,16 +88,80 @@ description = "CPU threads for the text encoder, and for the image encoder off t
 default = 4
 
 [[args]]
-name = "log_tiles"
+name = "log_scores"
 type = "boolean"
 description = "Log every frame's scores, not only the frames that pick a tile"
 default = false
 
+[[args]]
+name = "log_tiles"
+type = "boolean"
+description = "Write each input frame to STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg and each tile sent to STEELEAGLE_FILES/<engine>/out/<frame id>_<tile number>.jpeg, as JPEG at quality 75"
+default = false
+
+[[args]]
+name = "learn"
+type = "boolean"
+description = "Learn from the verifier's yes or no about each tile sent: tiles at least good_similarity to one it said yes to (confirmed by `good_confirmations` yes's) are sent, and tiles at least learn_similarity to one it said no to (confirmed by `confirmations` no's) are not, and the queued tiles are rescored, dropping the ones that no longer pass"
+default = true
+
+[[args]]
+name = "learn_similarity"
+type = "number"
+description = "Cosine similarity of tile embeddings, in (0, 1], at which two tiles count as the same thing, for the background gate and for adding a background tile; lower suppresses more, and risks suppressing targets: below ~0.8 a small target lying on ground counts as that ground"
+default = 0.85
+
+[[args]]
+name = "confirmations"
+type = "number"
+description = "No's, to tiles within learn_similarity of each other, before tiles like them stop being sent; 2 keeps one wrong no from the verifier from suppressing a target"
+default = 2
+
+[[args]]
+name = "good_similarity"
+type = "number"
+description = "Cosine similarity of tile embeddings, in (0, 1], at which a tile counts as the same thing as one the verifier said yes to, for forcing it to be sent and for adding a good tile; above learn_similarity because tiles of one scene are ~0.8 similar, so a good tile that close would force the plain ground around the target"
+default = 0.9
+
+[[args]]
+name = "good_confirmations"
+type = "number"
+description = "Yes's, to tiles within good_similarity of each other, before tiles like them are sent whatever their score; 2 keeps one wrong yes from the verifier from crowding the target out of every frame. A no to a tile that close to an unconfirmed one counts against it, and once the no's reach its yes's it is forgotten"
+default = 2
+
+[[args]]
+name = "max_learned"
+type = "number"
+description = "Most yes and most no answers kept learned, each; past it, the oldest is forgotten"
+default = 32
+
+[[args]]
+name = "log_sent"
+type = "string"
+description = "CSV file to log each tile picked and queued to send to, as frame_id, timestamp_ns (the frame's capture timestamp, which the tile keeps), tile (its number in the frame), the tile's left, top, right and bottom in pixels of its frame_width x frame_height frame, score and class (the prompt); a relative path is in the daemon's files directory (STEELEAGLE_FILES). Replaced when the plugin starts. Empty for none"
+default = ""
+
+[[args]]
+name = "log_scored"
+type = "string"
+description = "CSV file to log each frame scored to, whether or not a tile is picked from it, as frame_id, timestamp_ns (its capture timestamp), tiles (how many it was cut into), best_score, threshold (the adaptive one), picked (tiles queued) and ms (time to score it); the frames missing from it were never scored. A relative path is in the daemon's files directory (STEELEAGLE_FILES). Replaced when the plugin starts. Empty for none"
+default = ""
+
 [engine]
-type = "filter"
+type = "classification"
 inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
-# Each frame is replaced with the best queued tile, an RGB RawFrame at native
-# resolution with the id and pose of the frame it was cut from, or dropped if
-# no tile waits to be sent. Encode it (e.g. with the thumbnail plugin's WebP
-# encoder) before it crosses to the verifier.
-result = "steeleagle_protocol/v1/messages/result/DetectionResult"
+# Each frame is replaced with the best tile cut from it, an RGB RawFrame at
+# native resolution with the id and pose of the frame, or dropped if it has
+# none. It is not tracked: route only the reintegration producer to the
+# verifier, and leave the engine a dead end (no edge out of it).
+forwards = "steeleagle_protocol/v1/messages/frame/RawFrame"
+# The tile sent: class the prompt (the text, or the image's file name), score s
+result = "steeleagle_protocol/v1/messages/result/ClassificationResult"
+
+[[engine.producers]]
+# Delivers the queued tiles to the verifier, best first, one at a time, each
+# until the verifier's RESULT for it, whether or not frames come in. Give it
+# one token, and encode its tiles (e.g. with the thumbnail plugin's WebP
+# encoder) before they cross to the verifier.
+name = "reintegration"
+output = "steeleagle_protocol/v1/messages/frame/RawFrame"
