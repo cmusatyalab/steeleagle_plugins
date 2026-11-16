@@ -21,6 +21,18 @@ type = "boolean"
 description = "Remove everything already in the directory frames are saved to when the plugin starts"
 default = false
 
+[[args]]
+name = "images"
+type = "boolean"
+description = "Save each frame as JPEGs, raw and with its boxes drawn; false to save only the csv log"
+default = true
+
+[[args]]
+name = "csv"
+type = "string"
+description = "CSV file to log the detector's boxes on every frame to, a row per box (an empty one for a frame with none): frame_id, timestamp_ns (capture), result_ns (when the result arrived, by this host's clock), seq, class, score, x_min, y_min, x_max, y_max (normalized), frame_width, frame_height. A relative path is in the daemon's files directory. Replaced when the plugin starts. Empty for none"
+default = ""
+
 [engine]
 type = "detection"
 inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]

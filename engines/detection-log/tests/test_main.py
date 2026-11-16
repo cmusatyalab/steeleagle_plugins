@@ -25,7 +25,7 @@ def test_the_manifest_defaults_are_the_defaults():
 
 def test_unset_args_are_defaulted():
     args = parse_args(json.dumps({"detector": "detection"}))
-    assert args == {"detector": "detection", "timeout": 2000, "refresh": False}
+    assert args == {"detector": "detection", "timeout": 2000, "refresh": False, "images": True, "csv": ""}
 
 
 @pytest.mark.parametrize(
@@ -37,6 +37,10 @@ def test_unset_args_are_defaulted():
         {"detector": "d", "timeout": 1.5},
         {"detector": "d", "timeout": True},
         {"detector": "d", "refresh": "yes"},
+        {"detector": "d", "images": "no"},
+        {"detector": "d", "csv": 1},
+        {"detector": "d", "images": False},
+        {"detector": "d", "images": False, "csv": "  "},
     ],
 )
 def test_bad_args_are_refused(args):

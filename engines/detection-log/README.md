@@ -18,6 +18,24 @@ Where:
 | `detector` | | Detection engine on this daemon, qualified with `STEELEAGLE_LOCAL_QUALIFIER` |
 | `timeout` | `2000` | The longest to wait for the detector's result on a frame, in milliseconds |
 | `refresh` | `false` | Remove everything already in `<files>/<engine>/` when the plugin starts, so only this run's frames are there |
+| `images` | `true` | Save the JPEGs. `false` saves only the `csv` log, which must then be set |
+| `csv` | | CSV file to log the detector's boxes to (relative to `<files>`); empty for none. See below |
+
+## Box log
+
+With `csv` set, every frame saved is also logged to that CSV file, which is replaced when the plugin starts. Each detection is a row; a frame with no detections is one row with the detection's columns empty.
+
+| Column | |
+| --- | --- |
+| `frame_id` | The `RawFrame`'s `id`: e.g. fake_drone's frame number, which its `frame_log` maps to the video's frames. Across H.264, set the encoder's `pass_through_id` to keep it |
+| `timestamp_ns` | The `RawFrame`'s timestamp: when the driver captured it |
+| `result_ns` | When the detector's result reached this engine, by this host's wall clock |
+| `seq` | The sequence number of the frame's input |
+| `class`, `score` | The detection |
+| `x_min`, `y_min`, `x_max`, `y_max` | Its box, normalized to the frame |
+| `frame_width`, `frame_height` | The frame's size in pixels |
+
+`result_ns - timestamp_ns` is each frame's latency from capture to the detector's result. For a detector on another host than the driver, it includes the offset between the two hosts' clocks. With `images = false`, the log costs the frame path almost nothing, so it can measure a pipeline's throughput as well.
 
 ## Flow
 

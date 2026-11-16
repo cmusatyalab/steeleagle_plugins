@@ -20,7 +20,7 @@ MAX_OUTPUT_SIZE = 1
 def run(name, log, *, stop, on_ready=None):
     """Serves the engine `name`, feeding the DetectionLog `log` the frames it
     gets and the events of `log.detector`, until the threading.Event `stop` is
-    set. The log's saver is closed when the engine stops."""
+    set. The log's saver and box log are closed when the engine stops."""
     try:
         with uriel.Engine(name, max_output_size=MAX_OUTPUT_SIZE) as engine:
             engine.subscribe(log.detector)
@@ -53,4 +53,4 @@ def run(name, log, *, stop, on_ready=None):
                     log.on_frame(id, frame)
                 next_deadline = log.expire()
     finally:
-        log.saver.close()
+        log.close()

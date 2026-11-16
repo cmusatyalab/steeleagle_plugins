@@ -13,9 +13,13 @@ either:
 
 The result may come before or after the frame. A frame still waiting when its
 timeout ends, counted from when it reaches the engine, is not saved.
+
+A frame is saved to the saver (its JPEGs), the box log (a CSV row per box,
+with when the result arrived), or both.
 """
 
 import logging
+import time
 from collections import Counter, OrderedDict
 
 import uriel
@@ -83,17 +87,24 @@ class DetectionLog:
         self,
         *,
         detector,
-        saver,
+        saver=None,
+        boxes=None,
         timeout_ns,
         clock,
+        wall_clock=time.time_ns,
         summary_interval_ns=SUMMARY_INTERVAL_NS,
     ):
+        if saver is None and boxes is None:
+            raise ValueError("nothing to save frames to: give a saver or a box log")
         self.detector = detector
         self.saver = saver
+        self.boxes = boxes
+        self.wall_clock = wall_clock
         self.timeout_ns = timeout_ns
         self.clock = clock
         self.summary_interval_ns = summary_interval_ns
-        # Per input id: the detector's DetectionResult, or why it has none
+        # Per input id: (the detector's DetectionResult, or why it has none;
+        # when it arrived, by the wall clock)
         self._outcomes = OrderedDict()
         # Per input id: (RawFrame, when to give up on it)
         self._waiting = OrderedDict()
@@ -135,10 +146,11 @@ class DetectionLog:
                 outcome = UNDECODABLE
         else:
             outcome = _FAILED[kind]
+        arrived_ns = self.wall_clock()
         if event.id in self._waiting:
-            self._finish(event.id, outcome)
+            self._finish(event.id, outcome, arrived_ns)
             return
-        self._outcomes[event.id] = outcome
+        self._outcomes[event.id] = (outcome, arrived_ns)
         while len(self._outcomes) > MAX_OUTCOMES:
             self._outcomes.popitem(last=False)
 
@@ -151,10 +163,10 @@ class DetectionLog:
             self._outcomes.pop(id, None)
             self._count(UNREADABLE)
             return
-        outcome = self._outcomes.pop(id, None)
-        if outcome is not None:
+        known = self._outcomes.pop(id, None)
+        if known is not None:
             self._waiting[id] = (frame, None)
-            self._finish(id, outcome)
+            self._finish(id, *known)
             return
         if self._disconnected:
             self._count(DISCONNECTED)
@@ -174,14 +186,24 @@ class DetectionLog:
         self._summarize(now)
         return min((deadline for _, deadline in self._waiting.values()), default=None)
 
-    def _finish(self, id, outcome):
+    def _finish(self, id, outcome, arrived_ns):
         frame, _ = self._waiting.pop(id)
         if isinstance(outcome, str):
             self._count(outcome)
-        elif self.saver.submit(id.seq, frame, outcome):
+            return
+        if self.boxes is not None:
+            self.boxes.write(id.seq, frame, outcome, arrived_ns)
+        if self.saver is None or self.saver.submit(id.seq, frame, outcome):
             self._count("saved")
         else:
             self._count(SAVE_BEHIND)
+
+    def close(self):
+        """Closes the saver and the box log."""
+        if self.saver is not None:
+            self.saver.close()
+        if self.boxes is not None:
+            self.boxes.close()
 
     def _give_up(self, id, why):
         self._waiting.pop(id)

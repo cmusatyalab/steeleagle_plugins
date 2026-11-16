@@ -18,6 +18,7 @@ import threading
 import time
 from pathlib import Path
 
+from detection_log.boxes import BoxLog
 from detection_log.engine import run
 from detection_log.frames import FrameSaver
 from detection_log.log import DetectionLog
@@ -29,7 +30,7 @@ FILES_ENV = "STEELEAGLE_FILES"
 SANDBOX_FILES_DIR = Path("/steeleagle/files")
 # Defaults of the args, matching the plugin.toml. The daemon passes only the
 # args set in its config, so any arg left unset is defaulted here.
-DEFAULTS = {"detector": "", "timeout": 2000, "refresh": False}
+DEFAULTS = {"detector": "", "timeout": 2000, "refresh": False, "images": True, "csv": ""}
 
 
 class ConfigError(Exception):
@@ -54,8 +55,14 @@ def parse_args(content):
     args["timeout"] = int(timeout)
     if args["timeout"] <= 0:
         raise ConfigError("timeout must be positive")
-    if not isinstance(args["refresh"], bool):
-        raise ConfigError(f"refresh must be true or false, not {args['refresh']!r}")
+    for flag in ("refresh", "images"):
+        if not isinstance(args[flag], bool):
+            raise ConfigError(f"{flag} must be true or false, not {args[flag]!r}")
+    if not isinstance(args["csv"], str):
+        raise ConfigError(f"csv must be a file name, not {args['csv']!r}")
+    args["csv"] = args["csv"].strip()
+    if not args["images"] and not args["csv"]:
+        raise ConfigError("with images off, set csv: there is nothing else to save")
     return args
 
 
@@ -107,7 +114,8 @@ def main():
         sys.exit("STEELEAGLE_ENGINE_ENDPOINT is not set")
     try:
         args = parse_args(os.environ.get("STEELEAGLE_PLUGIN_ARGS"))
-        directory = files_dir(os.environ) / engine_dir_name(name)
+        files = files_dir(os.environ)
+        directory = files / engine_dir_name(name)
     except (ConfigError, ValueError, TypeError) as err:
         sys.exit(f"Bad args for {PLUGIN_FILE}: {err}")
     if args["refresh"]:
@@ -120,7 +128,9 @@ def main():
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     log = DetectionLog(
         detector=detector,
-        saver=FrameSaver(directory),
+        saver=FrameSaver(directory) if args["images"] else None,
+        # A relative path is in the files directory; an absolute one stays
+        boxes=BoxLog(files / args["csv"]) if args["csv"] else None,
         timeout_ns=args["timeout"] * 1_000_000,
         clock=time.monotonic_ns,
     )
