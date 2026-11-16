@@ -252,7 +252,7 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	register, inference := registerAI(ctx, a.AI, missions.svc, hub, log)
+	register, inference := registerAI(ctx, engine, a.AI, missions.svc, hub, log)
 	if inference != nil {
 		defer inference.Close()
 	}

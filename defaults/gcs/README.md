@@ -101,20 +101,27 @@ Go NL2DSL service and the same V4 schema and compiler as the Mission Builder.
 Apply opens the candidate on the canvas for review. Use the existing Map,
 Flow Builder, Compile and Deploy controls to finish the mission.
 
-Set `OPENAI_API_KEY` in the GCS process environment for OpenAI Chat and
-video inference. For Anthropic Chat set `ANTHROPIC_API_KEY` and set
-`chat_provider = "anthropic"` in the plugin args. Keep the OpenAI key for
-the separate vision model if you use Inferred Mission. On a Linux host with
-the `eagle init` user service and GCS running in process mode (empty
-Isolation), put the variable in the service user's private
-`~/.config/steeleagle/eagled.env` (mode `0600`) and restart the service.
-Configure shows whether the variables are set for the current GCS. It does
-not check model access. The daemon returns its saved configuration to
-Configure, so keep key values out of plugin args and Raw TOML.
+In **Orchestrate → Configure**, open the GCS service and expand **AI**. Open
+the GCS directly through `localhost` or `127.0.0.1` on its host to save,
+replace, or clear provider keys. A local SSH port forward to the same GCS
+also works. Browsers connected over the network can view credential status.
+New provider requests use the saved key immediately. The GCS stores it in a
+service-specific file with mode `0600` under
+`~/.config/steeleagle/gcs/credentials` (or `$XDG_CONFIG_HOME/steeleagle/gcs/credentials`).
+The form shows credential status and never reads back key values.
 
-In **Orchestrate → Configure**, open the GCS service and edit the **ai**
-argument to select a provider, set the Chat and vision model IDs, and
-adjust inference settings. Chat and DSL generation share the Chat model.
+OpenAI Chat and video inference use the OpenAI key. Anthropic Chat uses the
+Anthropic key, and vision still uses OpenAI. `OPENAI_API_KEY` and
+`ANTHROPIC_API_KEY` in the GCS process environment remain fallbacks when
+there is no UI-saved key, including after **Clear saved key**. For services
+started with `eagle init`, the private `~/.config/steeleagle/eagled.env`
+file can provide these variables when the daemon starts. Keep key values out
+of plugin args and Raw TOML.
+
+Use **Apply** for provider, model, and inference settings. Chat and DSL
+generation share the Chat model. Use the main video settings to adjust
+sections, sampling, and history. **Advanced inference settings** contains
+image size, request timeouts, video upload limits, and the active-run limit.
 `chat_temperature` and `vision_temperature` are optional, in the range
 0–1. An omitted field uses the provider default. Leave temperature blank
 for reasoning models such as `gpt-6.1-sol` and for providers or models that
@@ -307,7 +314,8 @@ pixi run mock
 ```
 
 The mock reads `gcs.plugin.toml` from this checkout so Configure shows the
-same declared args as the installed plugin. To use custom non-secret
+same declared args as the installed plugin. Set `XDG_CONFIG_HOME` to a
+separate directory when testing saved credentials in the mock. To use custom non-secret
 settings in the running GCS, set the API key in the shell environment and
 pass a file containing the `ai` object directly:
 

@@ -264,6 +264,7 @@ export default function InferredMissionPage({ activeTab, onApplyArtifact, getPla
         const options = { signal: controller.signal };
         Promise.all([jsonRequest(`${API}/status`, options), jsonRequest(`${API}/sessions?include_archived=true`, options)])
             .then(([settings, saved]) => {
+                if (controller.signal.aborted) return;
                 setConfig(settings);
                 setRuns(saved);
                 setSessionId(saved.find(run => !run.archived_at)?.id || '');
@@ -274,6 +275,9 @@ export default function InferredMissionPage({ activeTab, onApplyArtifact, getPla
     useEffect(() => {
         if (!activeTab) return undefined;
         const controller = new AbortController();
+        jsonRequest(`${API}/status`, { signal: controller.signal })
+            .then(settings => { if (!controller.signal.aborted) setConfig(settings); })
+            .catch(failure => { if (!controller.signal.aborted) setError(failure.message); });
         let timer;
         async function poll() {
             try {

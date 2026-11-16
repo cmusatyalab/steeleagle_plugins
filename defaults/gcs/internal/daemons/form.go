@@ -98,6 +98,10 @@ func ParseForm(raw []byte) (Form, error) {
 		}
 		return Form{}, &TOMLError{Message: err.Error()}
 	}
+	return parseFormDocument(doc)
+}
+
+func parseFormDocument(doc map[string]any) (Form, error) {
 	if path := findTime(doc, ""); path != "" {
 		return Form{}, unrepresentable("%s is a TOML date or time", path)
 	}

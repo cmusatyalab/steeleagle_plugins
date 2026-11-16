@@ -9,11 +9,12 @@ import { getApiUrl } from '../../urls.js';
 
 // Live: active LLM provider has a non-empty API key (provider shown on hover).
 // Offline: backend unreachable, or the configured provider has no API key.
-function ChatHeader({ title, onClear, canClear }) {
+function ChatHeader({ active = true, title, onClear, canClear }) {
     const [llmStatus, setLlmStatus] = useState(null);
     const [offline, setOffline] = useState(false);
 
     useEffect(() => {
+        if (!active) return undefined;
         let cancelled = false;
         (async () => {
             try {
@@ -34,7 +35,7 @@ function ChatHeader({ title, onClear, canClear }) {
         return () => {
             cancelled = true;
         };
-    }, []);
+    }, [active]);
 
     const showLive = Boolean(llmStatus?.configured);
     const showNoKey = Boolean(llmStatus) && !llmStatus.configured;

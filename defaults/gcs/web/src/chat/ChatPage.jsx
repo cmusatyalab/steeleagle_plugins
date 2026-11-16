@@ -8,7 +8,7 @@ import { isPristine } from './hooks/sessionLogic.js';
 import './chat.css';
 
 // Plan-tab Chat shell
-function ChatPage({ onApplyArtifact, getPlanningContext }) {
+function ChatPage({ active, onApplyArtifact, getPlanningContext }) {
     const {
         sessions,
         activeId,
@@ -42,6 +42,7 @@ function ChatPage({ onApplyArtifact, getPlanningContext }) {
                 <SplitterPanel size={76} minSize={40} className="se-chat-splitter__main">
                     <div className="se-chat-window">
                         <ChatHeader
+                            active={active}
                             title={activeSession?.title}
                             onClear={clearActive}
                             canClear={canClear}

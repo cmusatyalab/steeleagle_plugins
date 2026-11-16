@@ -31,7 +31,9 @@ func TestChatStreamsValidatedArtifact(t *testing.T) {
 	defer model.Close()
 	provider := nl2dsl.Provider{Name: "anthropic", ModelID: "test", Key: "fake-key", BaseURL: model.URL}
 	mux := http.NewServeMux()
-	New(provider, nl2dsl.Generator{Model: provider, Compiler: conversationCompiler{}}, Credentials{Anthropic: true}).Register(mux)
+	New(provider, nl2dsl.Generator{Model: provider, Compiler: conversationCompiler{}}, func() Credentials {
+		return Credentials{Anthropic: true}
+	}).Register(mux)
 	request := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"messages":[{"role":"user","content":"Wait five seconds."}]}`))
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, request)

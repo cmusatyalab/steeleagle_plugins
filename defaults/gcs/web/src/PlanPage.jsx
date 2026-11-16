@@ -304,6 +304,7 @@ function FsmCanvas({ nodes, edges, setNodes, setEdges, eventInstances, setEventI
     );
 }
 
+const CHAT_TAB_INDEX = 4;
 const INFERRED_MISSION_TAB_INDEX = 5;
 
 function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState, visible = true }) {
@@ -1067,7 +1068,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
                     </div>
                 </TabPanel>
                 <TabPanel header="Chat" leftIcon="pi pi-comments mr-2" headerClassName="mr-2">
-                    <ChatPage onApplyArtifact={applyAIArtifact} getPlanningContext={getAIPlanningContext} />
+                    <ChatPage active={visible && activeIndex === CHAT_TAB_INDEX} onApplyArtifact={applyAIArtifact} getPlanningContext={getAIPlanningContext} />
                 </TabPanel>
                 <TabPanel header="Inferred Mission" leftIcon="pi pi-video mr-2" headerClassName="mr-2">
                     <InferredMissionPage activeTab={visible && activeIndex === INFERRED_MISSION_TAB_INDEX} onApplyArtifact={applyAIArtifact}

@@ -39,7 +39,7 @@ func Parse(raw []byte) (Options, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&opts); err != nil {
-		return Options{}, errors.New("invalid AI settings: use only documented fields and types; supply credentials via environment variables")
+		return Options{}, errors.New("invalid AI settings: use only documented fields and types; set credentials in the AI panel or GCS environment")
 	}
 	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		return Options{}, errors.New("AI settings must contain a single JSON object")

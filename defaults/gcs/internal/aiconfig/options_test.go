@@ -19,8 +19,8 @@ func TestParseRejectsSecretsAndInvalidOptions(t *testing.T) {
 	cases := []struct {
 		raw, reason string
 	}{
-		{`{"openai_api_key":"test-secret"}`, "credentials via environment"},
-		{`{"inferred_mission":{"api_key":"test-secret"}}`, "credentials via environment"},
+		{`{"openai_api_key":"test-secret"}`, "set credentials in the AI panel"},
+		{`{"inferred_mission":{"api_key":"test-secret"}}`, "set credentials in the AI panel"},
 		{`{"vision_temperature":0.4}`, "leave vision_temperature blank"},
 		{`{"chat_provider":"anthropic","chat_temperature":1.2}`, "between 0 and 1"},
 		{`{"inferred_mission":{"frame_fps":1000}}`, "Invalid inferred mission settings"},

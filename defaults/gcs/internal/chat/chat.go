@@ -14,7 +14,7 @@ import (
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/nl2dsl"
 )
 
-// Credentials reports whether the provider environment variables are set.
+// Credentials reports whether the GCS has a key for each provider.
 type Credentials struct {
 	OpenAI    bool `json:"openai_configured"`
 	Anthropic bool `json:"anthropic_configured"`
@@ -24,10 +24,10 @@ type Handler struct {
 	provider    nl2dsl.Provider
 	generate    nl2dsl.Generator
 	active      chan struct{}
-	credentials Credentials
+	credentials func() Credentials
 }
 
-func New(provider nl2dsl.Provider, generate nl2dsl.Generator, credentials Credentials) *Handler {
+func New(provider nl2dsl.Provider, generate nl2dsl.Generator, credentials func() Credentials) *Handler {
 	return &Handler{provider: provider, generate: generate, active: make(chan struct{}, 4), credentials: credentials}
 }
 
@@ -38,10 +38,11 @@ func (h *Handler) Register(mux *http.ServeMux) {
 
 func (h *Handler) status(w http.ResponseWriter, _ *http.Request) {
 	label := map[string]string{"openai": "ChatGPT", "anthropic": "Claude"}[h.provider.Name]
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"configured": h.provider.Configured(), "provider": h.provider.Name,
 		"model": h.provider.ModelID, "label": label,
-		"reasoning_effort": h.provider.Reasoning, "temperature": h.provider.Temperature, "credentials": h.credentials,
+		"reasoning_effort": h.provider.Reasoning, "temperature": h.provider.Temperature, "credentials": h.credentials(),
 	})
 }
 

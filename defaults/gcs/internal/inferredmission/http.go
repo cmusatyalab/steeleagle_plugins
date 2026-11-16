@@ -29,6 +29,7 @@ type Source struct {
 
 func (s *Service) Register(mux *http.ServeMux, sources func() []Source) {
 	mux.HandleFunc("GET "+api+"/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
 		defer cancel()
 		_, err := s.generator.Compiler.DraftReference(ctx, mission.PlanningContext{})

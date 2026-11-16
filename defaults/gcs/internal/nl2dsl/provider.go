@@ -46,15 +46,28 @@ type Provider struct {
 	Reasoning   string
 	Temperature *float64
 	Key         string
+	LookupKey   func() string
 	Client      *http.Client
 }
 
 func (p Provider) Configured() bool {
-	return p.Key != "" && p.ModelID != "" && (p.Name == "openai" || p.Name == "anthropic")
+	return p.configured(p.key())
+}
+
+func (p Provider) key() string {
+	if p.LookupKey != nil {
+		return p.LookupKey()
+	}
+	return p.Key
+}
+
+func (p Provider) configured(key string) bool {
+	return key != "" && p.ModelID != "" && (p.Name == "openai" || p.Name == "anthropic")
 }
 
 func (p Provider) Complete(ctx context.Context, req Request) (Reply, error) {
-	if !p.Configured() {
+	key := p.key()
+	if !p.configured(key) {
 		return Reply{}, errors.New("Configure an API key for the selected model provider.")
 	}
 	endpoint, err := p.endpoint()
@@ -75,10 +88,10 @@ func (p Provider) Complete(ctx context.Context, req Request) (Reply, error) {
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if p.Name == "anthropic" {
-		httpReq.Header.Set("x-api-key", p.Key)
+		httpReq.Header.Set("x-api-key", key)
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
 	} else {
-		httpReq.Header.Set("Authorization", "Bearer "+p.Key)
+		httpReq.Header.Set("Authorization", "Bearer "+key)
 	}
 	client := p.Client
 	if client == nil {

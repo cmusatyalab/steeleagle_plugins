@@ -1,16 +1,18 @@
-import { useEffect, useId, useState } from 'react';
+import { useId } from 'react';
 import { InputNumber } from 'primereact/inputnumber';
 import { InputText } from 'primereact/inputtext';
-import { Tag } from 'primereact/tag';
-import { getApiUrl } from './urls.js';
+import GCSCredentials from './GCSCredentials.jsx';
 
 const OPENAI_MODEL = 'gpt-6.1-sol';
 const ANTHROPIC_MODEL = 'claude-sonnet-4-20250514';
+const MEBIBYTE = 1024 * 1024;
+
+const isObject = (value) => value != null && typeof value === 'object' && !Array.isArray(value);
 
 function parseObject(text) {
     try {
         const value = JSON.parse(text);
-        return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+        return isObject(value) ? value : null;
     } catch {
         return null;
     }
@@ -21,46 +23,6 @@ function withField(object, key, value) {
     if (value == null || value === '') delete updated[key];
     else updated[key] = value;
     return updated;
-}
-
-function CredentialStatus({ currentGCS }) {
-    const [status, setStatus] = useState(null);
-
-    useEffect(() => {
-        if (!currentGCS) return undefined;
-        const abort = new AbortController();
-        fetch(getApiUrl('/api/chat/status'), { signal: abort.signal })
-            .then(response => {
-                if (!response.ok) throw new Error('Chat status unavailable');
-                return response.json();
-            })
-            .then(data => { if (!abort.signal.aborted) setStatus(data); })
-            .catch(() => { if (!abort.signal.aborted) setStatus({}); });
-        return () => abort.abort();
-    }, [currentGCS]);
-
-    const credentials = currentGCS ? status?.credentials : null;
-    return (
-        <div className="flex flex-column gap-1">
-            <span className="font-semibold text-sm">API credentials</span>
-            <small className="text-color-secondary">
-                Set <code>OPENAI_API_KEY</code> in the GCS process environment for OpenAI and vision.
-                For Anthropic Chat, set <code>ANTHROPIC_API_KEY</code>.
-            </small>
-            {credentials && <div className="flex flex-wrap gap-2" aria-label="Current GCS credentials">
-                <Tag value={credentials.openai_configured ? 'OpenAI key configured' : 'OpenAI key missing'}
-                    severity={credentials.openai_configured ? 'success' : 'warning'} />
-                <Tag value={credentials.anthropic_configured ? 'Anthropic key configured' : 'Anthropic key missing'}
-                    severity={credentials.anthropic_configured ? 'success' : 'secondary'} />
-            </div>}
-            {currentGCS && !credentials && <small className="text-color-secondary">
-                {status ? 'Credential status unavailable' : 'Checking credentials…'}
-            </small>}
-            {currentGCS && status?.model && <small className="text-color-secondary">
-                Running Chat model: {status.model}{status.temperature != null && status.temperature !== '' ? ` · temperature ${status.temperature}` : ''}
-            </small>}
-        </div>
-    );
 }
 
 // Keep the manifest's object arg as JSON in the parent editor. Edits update
@@ -90,12 +52,15 @@ export default function GCSAISettings({ text, onChange, disabled, currentGCS }) 
         </label>
     );
 
-    const number = (label, key, data, set, { min, max, placeholder, step = 1 }) => (
+    const number = (label, key, data, set, {
+        min, max, placeholder, step = 1, maxFractionDigits = step === 1 ? 0 : 2, scale = 1,
+    }) => (
         <div className="flex flex-column gap-1 flex-1">
             <label className="text-sm" htmlFor={`${id}-${key}`}>{label}</label>
-            <InputNumber inputId={`${id}-${key}`} value={data[key] ?? null} onValueChange={e => set(key, e.value)}
+            <InputNumber inputId={`${id}-${key}`} value={data[key] == null ? null : data[key] / scale}
+                onValueChange={({ value }) => set(key, value == null || scale === 1 ? value : Math.round(value * scale))}
                 min={min} max={max} placeholder={placeholder} step={step} useGrouping={false}
-                maxFractionDigits={step === 1 ? 0 : 2} disabled={disabled} />
+                maxFractionDigits={maxFractionDigits} disabled={disabled} />
         </div>
     );
 
@@ -111,6 +76,9 @@ export default function GCSAISettings({ text, onChange, disabled, currentGCS }) 
 
     return (
         <div className="flex flex-column gap-3 p-3 border-1 surface-border border-round">
+            {currentGCS ? <GCSCredentials disabled={disabled} /> : <small className="text-color-secondary">
+                Open the selected GCS directly over localhost or an SSH tunnel to manage its API keys.
+            </small>}
             <label className="flex flex-column gap-1">
                 <span className="text-sm">Chat provider</span>
                 <select className="p-inputtext p-component" value={provider} onChange={e => update('chat_provider', e.target.value)} disabled={disabled}>
@@ -134,12 +102,14 @@ export default function GCSAISettings({ text, onChange, disabled, currentGCS }) 
                 {provider === 'openai' && reasoning('Chat / DSL reasoning effort', 'chat_reasoning_effort')}
                 {reasoning('Vision reasoning effort', 'vision_reasoning_effort')}
                 <datalist id={`${id}-effort`}>
-                    {['low', 'medium', 'high'].map(effort => <option key={effort} value={effort} />)}
+                    {['low', 'medium', 'high', 'xhigh', 'max'].map(effort => <option key={effort} value={effort} />)}
                 </datalist>
             </div>
-            <details>
-                <summary className="cursor-pointer text-sm font-semibold">Inference settings</summary>
+            <small className="text-color-secondary">Use Apply to save model and inference settings.</small>
+            {isObject(inference) ? <details>
+                <summary className="cursor-pointer text-sm font-semibold">Video inference settings</summary>
                 <div className="flex flex-column gap-2 mt-2">
+                    <span className="text-sm font-semibold">Windows and frame sampling</span>
                     <label className="flex flex-column gap-1">
                         <span className="text-sm">Section window</span>
                         <select className="p-inputtext p-component" value={inference.section_mode ?? ''}
@@ -153,6 +123,8 @@ export default function GCSAISettings({ text, onChange, disabled, currentGCS }) 
                         {number('Section seconds', 'section_seconds', inference, updateInference, { min: 1, max: 60, placeholder: '15', step: 0.5 })}
                         {number('Frames per second', 'frame_fps', inference, updateInference, { min: 0.01, max: 60, placeholder: '1', step: 0.1 })}
                     </div>
+                    <small className="text-color-secondary">Set the window length and sample rate to use 1–60 frames per window.</small>
+                    <span className="text-sm font-semibold mt-2">History</span>
                     <div className="flex flex-wrap gap-2">
                         <label className="flex flex-column gap-1 flex-1">
                             <span className="text-sm">History mode</span>
@@ -165,25 +137,40 @@ export default function GCSAISettings({ text, onChange, disabled, currentGCS }) 
                             </select>
                         </label>
                         {number('History sections', 'history_sections', inference, updateInference, { min: 0, max: 30, placeholder: '10' })}
-                    </div>
-                    <div className="flex flex-wrap gap-2">
                         {number('History half-life (sections)', 'half_life_sections', inference, updateInference,
                             { min: 0.01, placeholder: '3', step: 0.5 })}
-                        {number('Vision timeout (seconds)', 'request_timeout', inference, updateInference, { min: 1, max: 600, placeholder: '60' })}
-                        {number('DSL timeout (seconds)', 'generation_timeout', inference, updateInference, { min: 1, max: 600, placeholder: '120' })}
                     </div>
-                    <label className="flex flex-column gap-1">
-                        <span className="text-sm">Analysis data directory</span>
-                        <InputText value={value.data_dir ?? ''} placeholder="Default GCS data directory"
-                            onChange={e => update('data_dir', e.target.value)} disabled={disabled} />
-                    </label>
-                    <small className="text-color-secondary">Edit other advanced settings in Raw TOML.</small>
+                    <details>
+                        <summary className="cursor-pointer text-sm font-semibold">Advanced inference settings</summary>
+                        <div className="flex flex-column gap-2 mt-2">
+                            <div className="flex flex-wrap gap-2">
+                                {number('Longest sampled frame side (px)', 'max_frame_side', inference, updateInference, { min: 32, max: 2048, placeholder: '768' })}
+                                {number('Maximum active runs', 'max_active_runs', inference, updateInference, { min: 1, max: 8, placeholder: '4' })}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                                {number('Vision timeout (seconds)', 'request_timeout', inference, updateInference, { min: 1, max: 600, placeholder: '60' })}
+                                {number('DSL timeout (seconds)', 'generation_timeout', inference, updateInference, { min: 1, max: 600, placeholder: '120' })}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                                {number('Maximum MP4 size (MiB)', 'max_video_bytes', inference, updateInference, {
+                                    min: 1 / MEBIBYTE, max: 16384, placeholder: '1024', scale: MEBIBYTE, maxFractionDigits: 20,
+                                })}
+                                {number('Maximum MP4 duration (seconds)', 'max_video_seconds', inference, updateInference, {
+                                    min: 1, max: 86400, placeholder: '3600', maxFractionDigits: 2,
+                                })}
+                            </div>
+                            <small className="text-color-secondary">The maximum MP4 duration must be at least one window long.</small>
+                            <label className="flex flex-column gap-1">
+                                <span className="text-sm">Analysis data directory</span>
+                                <InputText value={value.data_dir ?? ''} placeholder="Default GCS data directory"
+                                    onChange={e => update('data_dir', e.target.value)} disabled={disabled} />
+                            </label>
+                        </div>
+                    </details>
                 </div>
-            </details>
-            <CredentialStatus key={String(currentGCS)} currentGCS={currentGCS} />
-            <small className="text-color-secondary">
-                Mock runs load non-sensitive settings at startup. Restart with <code>pixi run mock -ai-config &lt;file&gt;</code>.
-            </small>
+            </details> : <small className="p-error" role="alert">
+                Video inference settings must be an object. Edit the value in Raw TOML.
+            </small>}
         </div>
     );
 }
