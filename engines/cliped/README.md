@@ -29,12 +29,14 @@ With an `image` prompt, `t` is the reference image's embedding by the same image
 With `learn` (on by default), every `RESULT` the verifier sends back for a tile teaches cliped: the result is a `GenericResult` holding `{"match": true|false}`, and cliped keeps the tile's embedding, in its good tiles on a yes and its background tiles on a no. The learned tiles gate `s` rather than join it, the same way for text and image prompts. Tile-to-tile similarities (~0.8) dwarf a tile's similarity to the prompt (~0.5 to a reference photo, ~0.25 to text), so a learned tile in `s` would outscore the prompt everywhere.
 
 - A tile at least `learn_similarity` to a **confirmed** background tile, and closer to it than to any good tile, is not sent.
-- A tile at least `learn_similarity` to a good tile, and no closer to a background tile, is sent, whatever its `s`.
+- A tile at least `good_similarity` to a **confirmed** good tile, and no closer to a background tile, is sent, whatever its `s`.
 - Any other tile is decided by `s` as before.
 
 After a change, every queued tile is rescored and reprioritized: each waiting tile that no longer passes is dropped (tiles in flight are kept), and tiles like a good tile go ahead of all the others in the queue, best score first within each group.
 
-A background tile is confirmed once the verifier has said no `confirmations` times to tiles within `learn_similarity` of it. The verifier misses targets too, so with a single no, one missed target would suppress the target from then on. A distractor seen frame after frame (a car, a patch of ground) is soon said no to again. For the same reason, a no is never learned if it looks like a good tile: at least as close to the good tiles as to the background tiles, or within `learn_similarity` of a good tile. A tile is added only if it's below `learn_similarity` to everything in its set, and at most `max_learned` per set are kept, oldest first out.
+A background tile is confirmed once the verifier has said no `confirmations` times to tiles within `learn_similarity` of it. The verifier misses targets too, so with a single no, one missed target would suppress the target from then on. A distractor seen frame after frame (a car, a patch of ground) is soon said no to again. For the same reason, a no is never learned if it looks like a good tile: at least as close to the good tiles as to the background tiles, or within `learn_similarity` of a good tile. A tile is added only if it's below `learn_similarity` (`good_similarity` for a good tile) to everything in its set, and at most `max_learned` per set are kept, oldest first out.
+
+A good tile is confirmed the same way, once the verifier has said yes `good_confirmations` times to tiles within `good_similarity` of it; until then it is a candidate, which still guards tiles like it from being learned or dropped as background but forces nothing. The verifier also says yes to the odd distractor (a rusty tanker, a traffic cone), and since `max_send` is 1, one wrong yes that forced its look-alikes would take the frame's only slot from the target in every frame after. A target seen frame after frame is soon said yes to again. A no within `good_similarity` of a candidate counts against it, and once its no's reach its yes's the candidate is forgotten, so tiles like it can be learned as background. `good_similarity` is above `learn_similarity` because tiles of one scene are ~0.8 similar to each other: a good tile that close would force the plain ground around the target.
 
 Replayed over the logged tiles of the normal-network runs (3 scenes × 3 trials), the defaults cut the tiles sent by 24% with an image prompt (precision 30% → 39%) without losing a tile the verifier confirmed, and by 12% with a text prompt (precision 51% → 57%), losing 10 of 444 confirmed tiles, all but one of them blurry or not a person. A lower `learn_similarity` suppresses more, but below ~0.8 it starts suppressing targets: a small target lying on the ground is about 0.8 similar to an empty tile of that ground.
 
@@ -70,8 +72,10 @@ When more than `max_queue` tiles wait, the lowest-priority tile is dropped, in f
 | `npu` | `true` | With `quantized`, run on the HTP through QNN (`libs/`); `false` runs it on the CPU |
 | `threads` | `4` | CPU threads for the text encoder, and for the image encoder off the HTP |
 | `learn` | `true` | Learn from the verifier's answers (see above) |
-| `learn_similarity` | `0.85` | Cosine similarity of tile embeddings at which two tiles count as the same thing, for the gate and for adding a learned tile |
+| `learn_similarity` | `0.85` | Cosine similarity of tile embeddings at which two tiles count as the same thing, for the background gate and for adding a background tile |
 | `confirmations` | `2` | No's to tiles within `learn_similarity` of each other before tiles like them stop being sent |
+| `good_similarity` | `0.9` | Cosine similarity at which a tile counts as the same thing as a good tile, for forcing it to be sent and for adding a good tile |
+| `good_confirmations` | `2` | Yes's to tiles within `good_similarity` of each other before tiles like them are sent whatever their score |
 | `max_learned` | `32` | Most yes and most no answers kept learned, each |
 | `log_scores` | `false` | Log every frame's scores, not only frames that pick a tile |
 | `log_tiles` | `false` | Write each input frame to `STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg` and each tile sent to `STEELEAGLE_FILES/<engine>/out/<frame id>_<tile number>.jpeg` (JPEG, quality 75). `<engine>` is `STEELEAGLE_ENGINE_ENDPOINT`, the frame id is the `RawFrame`'s `id`, and the tile number is the tile's index in the frame's tiling, row by row. A tile sent again overwrites its file |

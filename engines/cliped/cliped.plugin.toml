@@ -102,19 +102,31 @@ default = false
 [[args]]
 name = "learn"
 type = "boolean"
-description = "Learn from the verifier's yes or no about each tile sent: tiles at least learn_similarity to one it said yes to are sent, and tiles that close to one it said no to (confirmed by `confirmations` no's) are not, and the queued tiles are rescored, dropping the ones that no longer pass"
+description = "Learn from the verifier's yes or no about each tile sent: tiles at least good_similarity to one it said yes to (confirmed by `good_confirmations` yes's) are sent, and tiles at least learn_similarity to one it said no to (confirmed by `confirmations` no's) are not, and the queued tiles are rescored, dropping the ones that no longer pass"
 default = true
 
 [[args]]
 name = "learn_similarity"
 type = "number"
-description = "Cosine similarity of tile embeddings, in (0, 1], at which two tiles count as the same thing, for the gate and for adding a learned tile; lower suppresses more, and risks suppressing targets: below ~0.8 a small target lying on ground counts as that ground"
+description = "Cosine similarity of tile embeddings, in (0, 1], at which two tiles count as the same thing, for the background gate and for adding a background tile; lower suppresses more, and risks suppressing targets: below ~0.8 a small target lying on ground counts as that ground"
 default = 0.85
 
 [[args]]
 name = "confirmations"
 type = "number"
 description = "No's, to tiles within learn_similarity of each other, before tiles like them stop being sent; 2 keeps one wrong no from the verifier from suppressing a target"
+default = 2
+
+[[args]]
+name = "good_similarity"
+type = "number"
+description = "Cosine similarity of tile embeddings, in (0, 1], at which a tile counts as the same thing as one the verifier said yes to, for forcing it to be sent and for adding a good tile; above learn_similarity because tiles of one scene are ~0.8 similar, so a good tile that close would force the plain ground around the target"
+default = 0.9
+
+[[args]]
+name = "good_confirmations"
+type = "number"
+description = "Yes's, to tiles within good_similarity of each other, before tiles like them are sent whatever their score; 2 keeps one wrong yes from the verifier from crowding the target out of every frame. A no to a tile that close to an unconfirmed one counts against it, and once the no's reach its yes's it is forgotten"
 default = 2
 
 [[args]]

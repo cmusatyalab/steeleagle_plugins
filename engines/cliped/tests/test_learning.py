@@ -7,7 +7,16 @@ import pytest
 import uriel
 from conftest import VERIFIER, BrightnessEncoder, input_id, make_input
 
-from cliped.clip import ADDED_BACKGROUND, ADDED_GOOD, CONFIRMED, GUARDED, KNOWN, Selector
+from cliped.clip import (
+    ADDED_BACKGROUND,
+    ADDED_GOOD,
+    CONFIRMED,
+    CONFIRMED_GOOD,
+    DROPPED_GOOD,
+    GUARDED,
+    KNOWN,
+    Selector,
+)
 from cliped.engine import GENERIC_RESULT_TYPE, Cliped, read_verdict
 from cliped.send_queue import SendQueue, Tile
 from steeleagle_protocol.v1.messages.frame import frame_pb2
@@ -53,18 +62,77 @@ def test_a_no_gates_tiles_like_it_only_once_confirmed():
     assert sel.learn(near, False) == KNOWN
 
 
-def test_a_yes_sends_tiles_like_it_whatever_their_score():
+def test_a_yes_sends_tiles_like_it_whatever_their_score_only_once_confirmed():
     sel = selector()
     weak = unit(0.1, 1, 0.5)  # looks more like the background than the prompt: s < 0
     s, verdict = sel.score(weak)
     assert s[0] < 0 and not sel.passes(weak)[0]
     assert sel.learn(unit(0.12, 1, 0.5), True) == ADDED_GOOD
+    # One yes could be the verifier passing a distractor: it forces nothing yet
+    assert not sel.passes(weak)[0] and not sel.confirmed_good
+    assert sel.learn(unit(0.11, 1, 0.5), True) == CONFIRMED_GOOD
     assert sel.passes(weak)[0]
+    assert len(sel.good) == 1 and sel.yeses == [2]
+    # A further yes to the same thing changes nothing
     assert sel.learn(weak, True) == KNOWN
 
 
-def test_the_learned_tiles_leave_s_alone():
+def test_with_one_good_confirmation_a_yes_forces_at_once():
+    sel = selector(good_confirmations=1)
+    weak = unit(0.1, 1, 0.5)
+    assert sel.learn(unit(0.12, 1, 0.5), True) == CONFIRMED_GOOD
+    assert sel.passes(weak)[0]
+
+
+def test_a_no_drops_a_candidate_good_tile_so_tiles_like_it_can_become_background():
+    sel = selector()
+    tanker = unit(0.3, 0.1, 1)
+    assert sel.learn(tanker, True) == ADDED_GOOD
+    assert sel.learn(unit(0.31, 0.1, 1), False) == DROPPED_GOOD
+    assert sel.good == [] and sel.yeses == [] and sel.good_noes == []
+    # No longer guarded: the next no's are learned and confirmed as background
+    assert sel.learn(unit(0.32, 0.1, 1), False) == ADDED_BACKGROUND
+    assert sel.learn(unit(0.31, 0.1, 1), False) == CONFIRMED
+    assert not sel.passes(tanker)[0]
+
+
+def test_a_no_never_drops_a_confirmed_good_tile():
+    sel = selector()
+    sel.learn(TARGET, True)
+    assert sel.learn(unit(1, 0.21, 0.5), True) == CONFIRMED_GOOD
+    assert sel.learn(unit(1, 0.22, 0.5), False) == GUARDED
+    assert len(sel.confirmed_good) == 1 and sel.good_noes == [0]
+
+
+def test_a_no_beyond_good_similarity_to_a_candidate_is_guarded_and_does_not_count_against_it():
+    sel = selector(similarity=0.9, good_similarity=0.999)
+    sel.learn(TARGET, True)
+    near = unit(1, 0.3, 0.5)  # within similarity of TARGET, not within good_similarity
+    assert 0.9 <= float(near @ TARGET) < 0.999
+    assert sel.learn(near, False) == GUARDED
+    assert len(sel.good) == 1 and sel.good_noes == [0]
+
+
+def test_a_tile_between_the_two_similarities_of_a_confirmed_good_tile_is_not_forced():
+    sel = selector(similarity=0.8, good_similarity=0.99, good_confirmations=1)
+    sel.learn(unit(0.12, 1, 0.5), True)
+    between = unit(0.1, 1, 0.8)  # s < 0, ~0.97 to the good tile
+    assert 0.8 <= float(between @ unit(0.12, 1, 0.5)) < 0.99
+    assert sel.score(between)[1][0] == 0 and not sel.passes(between)[0]
+
+
+def test_a_candidate_keeps_tiles_like_it_from_being_dropped_without_forcing_them():
     sel = selector(confirmations=1)
+    sel.learn(GROUND, False)  # a confirmed background tile
+    tile = unit(0.6, 0.1, 1)
+    assert float(tile @ GROUND) >= 0.9
+    assert sel.score(tile)[1][0] == -1
+    sel.learn(unit(0.62, 0.1, 1), True)  # a candidate closer to the tile than GROUND is
+    assert sel.score(tile)[1][0] == 0
+
+
+def test_the_learned_tiles_leave_s_alone():
+    sel = selector(confirmations=1, good_confirmations=1)
     sel.learn(GROUND, False)
     sel.learn(TARGET, True)
     tiles = np.stack([GROUND, TARGET, unit(0.5, 1, 0.5)])
@@ -74,7 +142,7 @@ def test_the_learned_tiles_leave_s_alone():
 
 
 def test_a_no_that_looks_like_a_good_tile_is_guarded():
-    sel = selector()
+    sel = selector(good_confirmations=1)
     sel.learn(TARGET, True)
     # No background tiles yet: guarded if within similarity of a good tile
     assert sel.learn(unit(1, 0.25, 0.5), False) == GUARDED
@@ -96,7 +164,8 @@ def test_at_most_max_learned_are_kept_oldest_first_out():
 
 
 def test_select_sends_a_tile_like_a_yes_and_never_one_like_a_confirmed_no():
-    sel = Selector(X, Y[None], learn=True, similarity=0.9, confirmations=1, k=1, margin=0.0, max_send=2)
+    sel = Selector(X, Y[None], learn=True, similarity=0.9, confirmations=1, good_confirmations=1, k=1, margin=0.0,
+                   max_send=2)
     sel.learn(unit(0, 0.5, 1), True)
     sel.learn(unit(1, 0, 0), False)
     # The first would win on s, the third does not pass at all
@@ -157,7 +226,8 @@ def learning_cliped():
     encoder = BrightnessEncoder()
     return Cliped(
         encoder,
-        Selector(encoder.t, encoder.b, k=4, margin=0.0, max_send=8, learn=True, similarity=0.99),
+        Selector(encoder.t, encoder.b, k=4, margin=0.0, max_send=8, learn=True, similarity=0.99,
+                 good_similarity=0.99),
         SendQueue(max_size=8),
         prompt="a white square",
         verifier=VERIFIER,
@@ -198,10 +268,14 @@ def test_a_yes_puts_queued_tiles_like_it_first_and_new_ones_too(learning_cliped)
         pixels[100:] = level
         return frame_pb2.RawFrame(data=pixels.tobytes(), h_res=400, v_res=300, channels=3, id=id).SerializeToString()
     cliped.on_input(make_input(1, frame(140, 1)), now=0)  # queues the dim tiles
-    cliped.queue.next(input_id(1), now=0)  # reintegration sends one
+    cliped.queue.next(input_id(1), now=0)  # reintegration sends two
+    cliped.queue.next(input_id(2), now=0)
     cliped.on_input(make_input(2, frame(200, 2)), now=0)  # queues bright ones, which beat the dim on s
-    # The verifier says yes to the dim tile: the dim tiles waiting go first
+    # A first yes to a dim tile only makes it a candidate: nothing is forced
     cliped.on_event(result_event(1, {"match": True}))
+    assert not any(t.must_send for t in cliped.queue._tiles)
+    # A second yes confirms it: the dim tiles waiting go first
+    cliped.on_event(result_event(2, {"match": True}))
     nxt = cliped.queue.next(carrier=input_id(3), now=0)
     assert nxt.frame_id == 1 and nxt.must_send
     # A new dim frame's tiles are queued as must-sends too

@@ -177,6 +177,8 @@ def cut_tiles(rgb, boxes, size):
 
 # What Selector.learn did with an answer
 ADDED_GOOD = "good"
+CONFIRMED_GOOD = "confirmed good"
+DROPPED_GOOD = "dropped good"
 ADDED_BACKGROUND = "background"
 CONFIRMED = "confirmed"
 KNOWN = "known"
@@ -196,8 +198,20 @@ class Selector:
     photo, ~0.25 to text), so a learned tile in s would outscore t
     everywhere. A tile at least `similarity` to a confirmed background tile,
     and closer to it than to any good tile, is dropped; one at least
-    `similarity` to a good tile, and no closer to a background tile, is sent;
-    any other tile is decided by s as without learning.
+    `good_similarity` to a confirmed good tile, and no closer to a background
+    tile, is sent; any other tile is decided by s as without learning.
+
+    A good tile is confirmed the same way, once the verifier said yes
+    `good_confirmations` times to tiles within `good_similarity` of it. Until
+    then it is a candidate, which forces nothing: the verifier also says yes
+    to the odd distractor, and with at most `max_send` tiles a frame, one
+    wrong yes that forced its look-alikes would crowd the target out of every
+    frame from then on. A target seen frame after frame is soon said yes to
+    again. A no within `good_similarity` of a candidate counts against it,
+    and once the no's reach its yes's the candidate is dropped (DROPPED_GOOD),
+    so that tiles like it can be learned as background. `good_similarity` is
+    above `similarity` because tiles of one scene are ~0.8 similar to each
+    other: a good tile that close would force plain ground around the target.
 
     A background tile is confirmed once the verifier said no `confirmations`
     times to tiles within `similarity` of it: its first no, and each later no
@@ -205,21 +219,30 @@ class Selector:
     too, and one missed target confirmed at once would suppress the target
     from then on; a distractor seen in frame after frame is soon said no to
     again. For the same reason, a no is never learned (GUARDED) if it is at
-    least as close to a good tile as to the background tiles, or within
-    `similarity` of a good tile. A tile is added only if it is below
-    `similarity` to every tile in its set, and at most `max_learned` per set
-    are kept, oldest dropped first."""
+    least as close to a good tile, candidate or confirmed, as to the
+    background tiles, or within `similarity` of one. A tile is added only if
+    it is below `similarity` (`good_similarity` for a good tile) to every tile
+    in its set, and at most `max_learned` per set are kept, oldest dropped
+    first."""
 
     def __init__(self, t, b, *, k=2, ema=0.9, margin=0.25, max_send=1, learn=False, similarity=0.85,
-                 confirmations=2, max_learned=32):
+                 confirmations=2, max_learned=32, good_similarity=0.9, good_confirmations=2):
         self.t, self.b = t, b
         self.k, self.ema, self.margin, self.max_send = k, ema, margin, max_send
         self.learning, self.similarity, self.confirmations, self.max_learned = (
             learn, similarity, confirmations, max_learned)
+        self.good_similarity, self.good_confirmations = good_similarity, good_confirmations
         self.thr = None
-        self.good = []  # tiles said yes to
+        self.good = []  # tiles said yes to, candidates and confirmed
+        self.yeses = []  # how many yes's each good tile has had
+        self.good_noes = []  # how many no's each good tile has had while a candidate
         self.backgrounds = []  # tiles said no to
         self.noes = []  # how many no's each background tile has had
+
+    @property
+    def confirmed_good(self):
+        """The good tiles that force tiles like them to be sent."""
+        return [x for x, yeses in zip(self.good, self.yeses) if yeses >= self.good_confirmations]
 
     def score(self, v):
         """For each embedding in `v`: its relevance s, and its verdict, +1 if
@@ -230,12 +253,16 @@ class Selector:
         if not (self.good or self.backgrounds):
             return s, verdict
         none = np.full(len(v), -np.inf)
+        # Any good tile, candidate or not, keeps a tile like it from being
+        # dropped; only a confirmed one forces it to be sent
         p = (v @ np.array(self.good).T).max(axis=1) if self.good else none
+        good = self.confirmed_good
+        pc = (v @ np.array(good).T).max(axis=1) if good else none
         n = (v @ np.array(self.backgrounds).T).max(axis=1) if self.backgrounds else none
         confirmed = [x for x, noes in zip(self.backgrounds, self.noes) if noes >= self.confirmations]
         nc = (v @ np.array(confirmed).T).max(axis=1) if confirmed else none
         verdict[(nc >= self.similarity) & (nc > p)] = -1
-        verdict[(p >= self.similarity) & (p >= n)] = 1
+        verdict[(pc >= self.good_similarity) & (pc >= n)] = 1
         return s, verdict
 
     def relevance(self, v):
@@ -262,19 +289,33 @@ class Selector:
 
     def learn(self, x, match):
         """Learns the verifier's answer `match` about the tile with embedding
-        `x`: ADDED_GOOD or ADDED_BACKGROUND if the tile was added; CONFIRMED
-        if a no confirmed a background tile, so that it now gates; KNOWN if
-        it was too close to a tile in its set otherwise; GUARDED for a no
-        that looks like a good tile (see the class). Only ADDED_GOOD and
-        CONFIRMED change what passes."""
+        `x`: ADDED_GOOD or ADDED_BACKGROUND if the tile was added (a good one
+        as a candidate); CONFIRMED_GOOD or CONFIRMED if the answer confirmed a
+        good or a background tile, so that it now gates; DROPPED_GOOD if a no
+        dropped a candidate good tile; KNOWN if it was too close to a tile in
+        its set otherwise; GUARDED for a no that looks like a good tile (see
+        the class). Only CONFIRMED_GOOD, CONFIRMED and DROPPED_GOOD (a
+        candidate kept tiles like it from being dropped) change what passes."""
         x = np.asarray(x, dtype=np.float64)
         x = x / np.linalg.norm(x)
-        near_good = max((float(g @ x) for g in self.good), default=-np.inf)
+        good_sims = np.array([float(g @ x) for g in self.good])
+        j = int(good_sims.argmax()) if len(good_sims) else None
+        near_good = float(good_sims[j]) if j is not None else -np.inf
         if match:
-            if near_good >= self.similarity:
-                return KNOWN
+            if near_good >= self.good_similarity:
+                if self.yeses[j] >= self.good_confirmations:
+                    return KNOWN
+                self.yeses[j] += 1
+                return CONFIRMED_GOOD if self.yeses[j] == self.good_confirmations else KNOWN
             self.good = [*self.good, x][-self.max_learned:]
-            return ADDED_GOOD
+            self.yeses = [*self.yeses, 1][-self.max_learned:]
+            self.good_noes = [*self.good_noes, 0][-self.max_learned:]
+            return CONFIRMED_GOOD if self.good_confirmations <= 1 else ADDED_GOOD
+        if near_good >= self.good_similarity and self.yeses[j] < self.good_confirmations:
+            self.good_noes[j] += 1
+            if self.good_noes[j] >= self.yeses[j]:
+                del self.good[j], self.yeses[j], self.good_noes[j]
+                return DROPPED_GOOD
         sims = np.array([float(n @ x) for n in self.backgrounds])
         near_background = float(sims.max()) if len(sims) else np.inf
         if near_good >= min(self.similarity, near_background):

@@ -16,6 +16,7 @@ matched to the source frame the fake drone logged with that timestamp.
 import csv
 import logging
 import os
+import signal
 import time
 from pathlib import Path
 
@@ -32,6 +33,20 @@ CSV_HEADER = ("frame_id", "send_ts_ns", "recv_ts_ns", "latency_ms", "bytes", "ki
 
 ENCODED_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
 RAW_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/RawFrame"
+
+# How long the engine waits for an input before checking for a signal: Python
+# runs signal handlers only between bytecodes, never inside uriel's native
+# wait, so waiting without end would leave a SIGTERM unhandled while idle.
+SIGNAL_CHECK_SECONDS = 1.0
+
+
+def exit_on_sigterm(signum, frame):
+    """Turns SIGTERM into SystemExit, so run_engine's finally block closes the
+    CSV and its buffered rows reach the disk. A SIGTERM sent to the process
+    group also arrives forwarded by pixi and uv, so later ones are ignored
+    rather than interrupting that finally block."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise SystemExit(128 + signum)
 
 
 def csv_file_path(path):
@@ -92,12 +107,16 @@ def run_engine(name, args):
     if writer:
         writer.writerow(CSV_HEADER)
 
+    signal.signal(signal.SIGTERM, exit_on_sigterm)
     try:
         with uriel.Engine(name, max_output_size=args["max_output_size"]) as engine:
             logger.info("engine %s ready; reporting every %ss%s", name,
                         args["report_interval_seconds"],
                         f", per-frame rows to {args['csv_path']}" if csv_file else "")
-            for input in engine:
+            while True:
+                input = engine.next(SIGNAL_CHECK_SECONDS)
+                if input is None:
+                    continue
                 recv_ns = time.time_ns()  # Before parsing, so it is not counted.
                 try:
                     frame, kind, width, height = parse_frame(input)

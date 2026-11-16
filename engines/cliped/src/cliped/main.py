@@ -43,6 +43,8 @@ DEFAULTS = {
     "learn": True,
     "learn_similarity": 0.85,
     "confirmations": 2,
+    "good_similarity": 0.9,
+    "good_confirmations": 2,
     "max_learned": 32,
     "log_sent": "",
     "log_scored": "",
@@ -57,7 +59,8 @@ VERIFIER_DEFAULTS = {
     "log_tiles": False,
     "question": "",
 }
-POSITIVE_INTS = ("tile_size", "stride", "max_send", "k", "max_queue", "threads", "confirmations", "max_learned")
+POSITIVE_INTS = ("tile_size", "stride", "max_send", "k", "max_queue", "threads", "confirmations",
+                 "good_confirmations", "max_learned")
 
 LD_LIBRARY_PATH = "LD_LIBRARY_PATH"
 ADSP_LIBRARY_PATH = "ADSP_LIBRARY_PATH"
@@ -111,13 +114,14 @@ def parse_args(content):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value) or value < 1:
             raise ConfigError(f"{name} must be a positive integer, not {value!r}")
         args[name] = int(value)
-    for name in ("margin", "ema", "learn_similarity"):
+    for name in ("margin", "ema", "learn_similarity", "good_similarity"):
         if isinstance(args[name], bool) or not isinstance(args[name], (int, float)):
             raise ConfigError(f"{name} must be a number, not {args[name]!r}")
     if not 0 <= args["ema"] < 1:
         raise ConfigError("ema must be in [0, 1)")
-    if not 0 < args["learn_similarity"] <= 1:
-        raise ConfigError("learn_similarity must be in (0, 1]")
+    for name in ("learn_similarity", "good_similarity"):
+        if not 0 < args[name] <= 1:
+            raise ConfigError(f"{name} must be in (0, 1]")
     backgrounds = args["backgrounds"]
     if (not isinstance(backgrounds, list) or not backgrounds
             or not all(isinstance(bg, str) and bg.strip() for bg in backgrounds)):
@@ -218,11 +222,13 @@ def build(args, verifier, *, image=None, tile_log=None):
         log.info("searching for the image %s", image)
 
     if args["learn"]:
-        log.info("learning from the verifier's answers (similarity %.2f, %d no's to gate, at most %d of each)",
-                 args["learn_similarity"], args["confirmations"], args["max_learned"])
+        log.info("learning from the verifier's answers (similarity %.2f, %d no's to gate; good similarity %.2f, "
+                 "%d yes's to force; at most %d of each)", args["learn_similarity"], args["confirmations"],
+                 args["good_similarity"], args["good_confirmations"], args["max_learned"])
     selector = Selector(t, b, k=args["k"], ema=args["ema"], margin=args["margin"], max_send=args["max_send"],
                         learn=args["learn"], similarity=args["learn_similarity"],
-                        confirmations=args["confirmations"], max_learned=args["max_learned"])
+                        confirmations=args["confirmations"], max_learned=args["max_learned"],
+                        good_similarity=args["good_similarity"], good_confirmations=args["good_confirmations"])
     from cliped.sent_log import ScoredLog, SentLog
 
     queue = SendQueue(max_size=args["max_queue"])

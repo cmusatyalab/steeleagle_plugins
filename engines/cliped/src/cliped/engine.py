@@ -29,7 +29,7 @@ import numpy as np
 import uriel
 from google.protobuf.message import DecodeError
 
-from cliped.clip import ADDED_GOOD, CONFIRMED, cut_tiles, tile_boxes
+from cliped.clip import CONFIRMED, CONFIRMED_GOOD, DROPPED_GOOD, cut_tiles, tile_boxes
 from cliped.send_queue import Tile
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from steeleagle_protocol.v1.messages.result import result_pb2
@@ -162,10 +162,10 @@ class Cliped:
         if match is None or tile.embedding is None:
             return
         outcome = self.selector.learn(tile.embedding, match)
-        message = "verifier: %s for the tile of frame %d: %s (%d good, %d background tiles)"
+        message = "verifier: %s for the tile of frame %d: %s (%d good, %d confirmed; %d background tiles)"
         args = ["yes" if match else "no", tile.frame_id, outcome, len(self.selector.good),
-                len(self.selector.backgrounds)]
-        if outcome in (ADDED_GOOD, CONFIRMED):
+                len(self.selector.confirmed_good), len(self.selector.backgrounds)]
+        if outcome in (CONFIRMED_GOOD, CONFIRMED, DROPPED_GOOD):
             dropped = self.queue.rescore(lambda t: self.selector.passes(t.embedding))
             message += "; rescored the queue, dropping %d (%d left)"
             args += [len(dropped), len(self.queue)]
