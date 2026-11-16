@@ -13,7 +13,7 @@
 // Every function here is pure: it returns a new flow and never mutates its
 // input.
 import {
-    engineLocation, findDaemon, findTemplateEngine, findVehicle, hostLabel, isEngineProducer, resolveNode,
+    engineLocation, findDaemon, findTemplateEngine, findVehicle, hostLabel, isEngineProducer, orchestrator, resolveNode,
     serviceName, shortType, splitTemplateName, templateName,
 } from './flowCatalog.js';
 import { daemonRequest, describeFailure } from './daemonApi.js';
@@ -60,6 +60,56 @@ const isVehicleProducer = (node) => node.kind === 'producer' && !isEngineProduce
 // builder shows.
 export function exportName(flow, catalog, node) {
     return nodeLabel(flow, node);
+}
+
+// A flow config names its nodes relative to the vehicle that runs it, which
+// qualifies them itself (internal/fleet/flownames.go), so it holds no host
+// names or addresses: vehicle.<stream>, local.<engine>.<producer>, and
+// local.<engine> or remote.<engine> for an engine on the vehicle's daemon or
+// the orchestrator. Deploy sends a flow with these names, and the TOML export
+// and import use them too.
+const VEHICLE_PREFIX = 'vehicle.';
+const LOCAL_PREFIX = 'local.';
+const REMOTE_PREFIX = 'remote.';
+
+// A node's name in a flow config for the flow's vehicle (see above). Throws
+// for an engine (or an engine producer's engine) on neither the vehicle's
+// daemon nor the orchestrator, and for a producer of an orchestrator engine,
+// which a vehicle can't take.
+export function flowName(flow, catalog, node) {
+    if (isVehicleProducer(node)) return VEHICLE_PREFIX + node.stream;
+    const parts = splitTemplateName(node.engine);
+    const location = engineLocation(catalog, flow.vehicle, node.engine);
+    if (!parts || location === null) {
+        throw new Error(`${nodeLabel(flow, node)} is neither on the vehicle's daemon nor on the orchestrator`);
+    }
+    if (isEngineProducer(node)) {
+        if (location !== 'local') throw new Error(`${nodeLabel(flow, node)} is a producer of an engine not on the vehicle's daemon`);
+        return `${LOCAL_PREFIX}${parts.bare}.${node.producer}`;
+    }
+    return `${location}.${parts.bare}`;
+}
+
+// The template name (nodeLabel) of a flow config node name for `vehicle`:
+// the inverse of flowName. Throws for a name with none of the prefixes, or
+// whose daemon the catalog doesn't list.
+function templateNameOf(catalog, vehicle, name) {
+    const rest = (prefix) => (name.startsWith(prefix) && name.length > prefix.length ? name.slice(prefix.length) : null);
+    const stream = rest(VEHICLE_PREFIX);
+    if (stream !== null) return `${displayName(vehicle)}.${stream}`;
+    const local = rest(LOCAL_PREFIX);
+    if (local !== null) {
+        const daemon = findDaemon(catalog, daemonOf(vehicle));
+        if (!daemon) throw new Error(`${name}: ${displayName(vehicle)}'s daemon isn't in the flow catalog`);
+        return `${hostLabel(catalog, daemon)}.${local}`;
+    }
+    const remote = rest(REMOTE_PREFIX);
+    if (remote !== null) {
+        const daemon = orchestrator(catalog);
+        if (!daemon) throw new Error(`${name}: the orchestrator isn't in the flow catalog`);
+        return `${hostLabel(catalog, daemon)}.${remote}`;
+    }
+    throw new Error(`flow node ${name} isn't named vehicle.<stream>, local.<engine> or remote.<engine>; export the flow again from the Flow Builder`);
 }
 
 // The producer (other than `exceptId`) on a primary camera, if any. Primary
@@ -568,30 +618,43 @@ export function toTemplate(flow, catalog) {
     };
 }
 
+// The flow's template when it can name the mission's engines (the DSL routes
+// name them as in the mission built for the flow's vehicle), else null: the
+// flow is empty, the catalog isn't loaded, or the flow has errors.
+export function templateIfValid(flow, catalog) {
+    if (!flow || flow.nodes.length === 0 || !catalog) return null;
+    try {
+        return validateFlow(flow, catalog).errors.length === 0 ? toTemplate(flow, catalog) : null;
+    } catch {
+        return null;
+    }
+}
+
 // The flow as a config.FlowConfig TOML document: top-level [[producers]],
-// [[engines]] and [[edges]] tables. Engines carry their location relative to
-// the flow's vehicle. Callbacks have no TOML representation, so they're left
-// out (and counted in a comment).
+// [[engines]] and [[edges]] tables, with the names and locations Deploy would
+// send the flow's vehicle (flowName). Callbacks have no TOML representation,
+// so they're left out (and counted in a comment).
 export function toFlowToml(flow, catalog) {
     const { errors } = validateFlow(flow, catalog);
     if (errors.length) throw new Error(`flow has ${errors.length} error(s); fix them before exporting TOML`);
 
-    const template = toTemplate(flow, catalog);
-    const producers = template.producers.flatMap((p) => [
+    const byId = new Map(flow.nodes.map((n) => [n.id, n]));
+    const name = (node) => flowName(flow, catalog, node);
+    const producers = flow.nodes.filter((n) => n.kind === 'producer').flatMap((n) => [
         '[[producers]]',
-        `name = ${tomlString(p.name)}`,
+        `name = ${tomlString(name(n))}`,
         // Always written: left out, Uriel computes its own count, not 1
-        `tokens = ${p.tokens}`,
+        `tokens = ${n.tokens}`,
     ]);
-    const engines = template.engines.flatMap((e) => [
+    const engines = flow.nodes.filter((n) => n.kind === 'engine').flatMap((n) => [
         '[[engines]]',
-        `name = ${tomlString(e.name)}`,
-        `location = ${tomlString(engineLocation(catalog, flow.vehicle, e.name))}`,
+        `name = ${tomlString(name(n))}`,
+        `location = ${tomlString(engineLocation(catalog, flow.vehicle, n.engine))}`,
     ]);
-    const edges = template.edges.flatMap((e) => [
+    const edges = flow.edges.filter((e) => e.kind === 'output').flatMap((e) => [
         '[[edges]]',
-        `from = ${tomlString(e.from)}`,
-        `to = ${tomlString(e.to)}`,
+        `from = ${tomlString(name(byId.get(e.source)))}`,
+        `to = ${tomlString(name(byId.get(e.target)))}`,
         `timeout = ${tomlString(e.timeout)}`,
     ]);
 
@@ -612,14 +675,10 @@ const ROW_HEIGHT = 150;
 // "{host}.{engine}.{producer}" for a catalog engine becomes that engine's
 // producer (kept even if the engine doesn't advertise it, so validateFlow
 // flags it); any other becomes the vehicle's stream of its name, whatever
-// vehicle its prefix names. An engine name
-// with no host (an old TOML export, where bare meant the vehicle's own daemon)
-// is qualified with that daemon's name. Engine hosts and engines the catalog doesn't know are kept, so
-// validateFlow flags them. Nodes are laid out in columns: producers, then
+// vehicle its prefix names. Engine hosts and engines the catalog doesn't
+// know are kept, so validateFlow flags them. Nodes are laid out in columns: producers, then
 // engines by depth.
 export function fromTemplate(template, catalog, vehicle) {
-    const daemon = vehicle ? findDaemon(catalog, daemonOf(vehicle)) : null;
-    const home = daemon ? hostLabel(catalog, daemon) : null;
     // The server sends empty lists as JSON null.
     const tProducers = template.producers ?? [];
     const tEngines = template.engines ?? [];
@@ -634,7 +693,7 @@ export function fromTemplate(template, catalog, vehicle) {
     });
     const engines = tEngines.map((e, i) => ({
         id: `e${i + 1}`, kind: 'engine',
-        engine: home && !splitTemplateName(e.name) ? `${home}.${e.name}` : e.name, position: { x: 0, y: 0 },
+        engine: e.name, position: { x: 0, y: 0 },
     }));
     const ids = new Map();
     for (const [i, p] of tProducers.entries()) if (!ids.has(p.name)) ids.set(p.name, producers[i].id);
@@ -668,11 +727,24 @@ export function fromTemplate(template, catalog, vehicle) {
     return { ...emptyFlow(), vehicle, nodes, edges };
 }
 
-// Parses flow TOML text on the server and builds a flow for `vehicle`.
-// Throws the server's reason (unknown keys, the old format, parse errors).
+// The template of a flow config parsed by the server, whose nodes are named
+// relative to `vehicle` (flowName), with every name made a template name.
+export function fromFlowConfig(config, catalog, vehicle) {
+    const name = (n) => templateNameOf(catalog, vehicle, n);
+    return {
+        vehicle,
+        producers: (config.producers ?? []).map((p) => ({ ...p, name: name(p.name) })),
+        engines: (config.engines ?? []).map((e) => ({ ...e, name: name(e.name) })),
+        edges: (config.edges ?? []).map((e) => ({ ...e, from: name(e.from), to: name(e.to) })),
+    };
+}
+
+// Parses flow TOML text on the server and builds a flow for `vehicle`. Throws
+// the server's reason (unknown keys, the old format, parse errors), or why a
+// node name isn't one a flow config gives it (flowName).
 export async function importFlowToml(text, catalog, vehicle) {
     const result = await daemonRequest('POST', '/api/flows/from_toml', { toml: text });
     const failure = describeFailure(result);
     if (failure) throw new Error(failure);
-    return fromTemplate(result.body, catalog, vehicle);
+    return fromTemplate(fromFlowConfig(result.body, catalog, vehicle), catalog, vehicle);
 }

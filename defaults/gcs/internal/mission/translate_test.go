@@ -410,7 +410,7 @@ func normalize(t *testing.T, v any) any {
 }
 
 func TestAstToGraphInvertsGraphToAst(t *testing.T) {
-	graph := AstToGraph(graphToAst(t, exGraph(t)), exIndex(t))
+	graph := AstToGraph(graphToAst(t, exGraph(t)), exIndex(t), nil)
 	want := normalize(t, exGraph(t)).(map[string]any)
 	got := normalize(t, graph).(map[string]any)
 	for _, key := range []string{"nodes", "events", "edges", "start_id"} {
@@ -425,7 +425,7 @@ func TestAstToGraphAcceptsIntegralFloatsFromEaglec(t *testing.T) {
 	// Go marshals Float 15.0 as 15
 	ast := jsonMap(t, `{"Actions": {"Decls": [{"Type": "actions.Patrol", "Name": "p",
 		"Attrs": [{"Key": "Altitude", "Value": {"Float": 15}}]}]}}`)
-	node := AstToGraph(ast, exIndex(t))["nodes"].([]any)[0].(map[string]any)
+	node := AstToGraph(ast, exIndex(t), nil)["nodes"].([]any)[0].(map[string]any)
 	params := node["params"].(map[string]any)
 	if v, ok := params["Altitude"].(float64); !ok || v != 15 {
 		t.Errorf("Altitude = %#v, want float64 15", params["Altitude"])
@@ -450,7 +450,7 @@ func TestAstToGraphInlinesDataAndWarns(t *testing.T) {
   "Mission": {"Start": "gimbal", "Blocks": [
     {"Action": "gimbal", "Rules": [{"Event": "done", "Next": "dance"}]}]}
 }`)
-	graph := normalize(t, AstToGraph(ast, exIndex(t))).(map[string]any)
+	graph := normalize(t, AstToGraph(ast, exIndex(t), nil)).(map[string]any)
 	eq(t, graph["nodes"], jsonValue(t, `[
   {"instance_id": "gimbal", "type_name": "SetGimbalPose", "params": {"Pose": {"Pitch": -90, "Roll": 0, "Yaw": 0}}},
   {"instance_id": "dance", "type_name": "Dance", "params": {"Loud": true}},
@@ -465,7 +465,7 @@ func TestAstToGraphInlinesDataAndWarns(t *testing.T) {
 }
 
 func TestAstToGraphWithoutMission(t *testing.T) {
-	graph := normalize(t, AstToGraph(map[string]any{}, exIndex(t)))
+	graph := normalize(t, AstToGraph(map[string]any{}, exIndex(t), nil))
 	eq(t, graph, jsonValue(t, `{"nodes": [], "events": [], "edges": [], "start_id": null,
 		"modules": [], "imports": [], "warnings": []}`))
 }
@@ -474,7 +474,7 @@ func TestAstToGraphAcceptsFloat64Numbers(t *testing.T) {
 	ast := map[string]any{"Actions": map[string]any{"Decls": []any{map[string]any{
 		"Type": "actions.TakeOff", "Name": "t", "Attrs": []any{map[string]any{
 			"Key": "Altitude", "Value": map[string]any{"Float": 5.5}}}}}}}
-	node := AstToGraph(ast, exIndex(t))["nodes"].([]any)[0].(map[string]any)
+	node := AstToGraph(ast, exIndex(t), nil)["nodes"].([]any)[0].(map[string]any)
 	eq(t, node["params"], map[string]any{"Altitude": 5.5})
 }
 
@@ -641,7 +641,7 @@ func TestGraphToAstEngineUnknown(t *testing.T) {
 func TestAstToGraphEngine(t *testing.T) {
 	ast := jsonMap(t, `{"Actions": {"Decls": [{"Type": "actions.Track", "Name": "trk", "Attrs": [{"Key": "Engine", "Value": {"Ident": "DetectionEngine_yolo"}}]}]}}`)
 
-	g := AstToGraph(ast, engineIndex(t))
+	g := AstToGraph(ast, engineIndex(t), nil)
 
 	eq(t, g["nodes"].([]any)[0].(map[string]any)["params"], map[string]any{"Engine": "yolo"})
 }

@@ -327,7 +327,30 @@ func (s *Service) resolveForValidate(cat flows.Catalog, t flows.Template, g Grap
 	return t.Resolve(cat, s.gcsIP, target, cameras, validateMissionName, GraphRoles(g))
 }
 
-// ServeRenderDSL serves POST /api/render_dsl.
+// flowEngineNames maps each engine of flow to its name in the mission of the
+// vehicle the flow was designed for (local.<engine> or remote.<engine>), as
+// Deploy builds it, so a rendered DSL names engines as the built one does.
+// It is nil without a flow. It writes a 503 and returns ok=false when the
+// catalog can't be listed; a flow that doesn't resolve is returned as flowErr.
+func (s *Service) flowEngineNames(w http.ResponseWriter, r *http.Request, flow *flows.Template) (names map[string]string, flowErr error, ok bool) {
+	if flow.Empty() {
+		return nil, nil, true
+	}
+	if s.catalog == nil {
+		writeError(w, http.StatusServiceUnavailable, noDaemon)
+		return nil, nil, false
+	}
+	cat, err := s.catalog(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "Cannot list the flow catalog: "+err.Error())
+		return nil, nil, false
+	}
+	names, err = flow.EngineNames(cat)
+	return names, err, true
+}
+
+// ServeRenderDSL serves POST /api/render_dsl. With a flow, engines are named
+// as in the mission of the flow's vehicle (flowEngineNames).
 func (s *Service) ServeRenderDSL(w http.ResponseWriter, r *http.Request) {
 	st := s.ready503(w, r)
 	if st == nil {
@@ -337,7 +360,15 @@ func (s *Service) ServeRenderDSL(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &g) {
 		return
 	}
-	ast, err := GraphToAst(g.Graph, st.Index, s.header, nil)
+	engines, flowErr, ok := s.flowEngineNames(w, r, g.Flow)
+	if !ok {
+		return
+	}
+	if flowErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, flowErr.Error())
+		return
+	}
+	ast, err := GraphToAst(g.Graph, st.Index, s.header, engines)
 	if err == nil {
 		var dsl string
 		if dsl, err = AstToDSL(ast); err == nil {
@@ -348,14 +379,16 @@ func (s *Service) ServeRenderDSL(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusUnprocessableEntity, err.Error())
 }
 
-// ServeParseDSL serves POST /api/parse_dsl.
+// ServeParseDSL serves POST /api/parse_dsl. With a flow, engine idents are
+// mapped back to the flow's template names, inverting ServeRenderDSL.
 func (s *Service) ServeParseDSL(w http.ResponseWriter, r *http.Request) {
 	st := s.ready503(w, r)
 	if st == nil {
 		return
 	}
 	var req struct {
-		DSL string `json:"dsl"`
+		DSL  string          `json:"dsl"`
+		Flow *flows.Template `json:"flow"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -366,7 +399,20 @@ func (s *Service) ServeParseDSL(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	graph := AstToGraph(ast, st.Index)
+	engines, flowErr, ok := s.flowEngineNames(w, r, req.Flow)
+	if !ok {
+		return
+	}
+	var idents map[string]string // ident suffix -> template name
+	if flowErr != nil {
+		upgrade = append(upgrade, "Engines are kept as named: the flow doesn't resolve: "+flowErr.Error())
+	} else if engines != nil {
+		idents = make(map[string]string, len(engines))
+		for template, name := range engines {
+			idents[constName(name)] = template
+		}
+	}
+	graph := AstToGraph(ast, st.Index, idents)
 	warnings := []any{}
 	for _, m := range upgrade {
 		warnings = append(warnings, m)
