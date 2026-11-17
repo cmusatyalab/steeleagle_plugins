@@ -126,6 +126,8 @@ Run the detector with a lower `confidence` (and `nms_score_threshold`) than usua
 
 To track one individual among others of its class (one person of several, say the one in the blue jacket), give the verifier a reference photo: set its `image` along with `question = "box"`. It then asks whether the object in the red box is the target in the reference, judging only that object, so a crop whose context also holds the target is still a no for the person next to it. Give box_rerank the same `image`: ranking by `s` (the default `rank`), until the verifier has answered, the individuals in a frame are then ranked against each other by their CLIP likeness to the reference, onboard, rather than by confidence, and its answers take over as they come. Frames never wait for the verifier either way. `require_verified = true` reports no box at all until the verifier has confirmed the target (and none while it looks unlike every confirmed crop): only for when reporting the wrong individual is worse than reporting none. Individuals of one class may embed close together: if a no about another one vetoes the target, raise `learn_similarity`.
 
+Ranking orders a frame's boxes against each other, so it always reports one, even when the target isn't among them: then it reports the box most like it, e.g. another person. With `gate = true`, each crop also gets a margin, how much more it is like the prompt ("a person in a red shirt") than like `class_prompt` ("a person"), and box_rerank learns where to cut it from the verifier's answers: the midpoint between the mean margin of the crops it said yes to and of those it said no to (once it has one of each, and while the yes's are higher). An unverified box is reported only above the cut; a confirmed one regardless. This is apart from the tile learning, which compares crops with each other and can't tell instances of one class apart; the margin measures the attributes the prompt names. Offline, on two drone videos of three people, it raised precision for a person in a red shirt from 0.69 to 0.91 at the same recall. The margin is logged as `margin` in `log_candidates`, and the cut in the summary.
+
 `log_candidates` writes every candidate of every frame (its box, confidence, `s`, verdict, whether it was reported and queued), to score what was reported against labeled boxes; `log_tiles` writes each crop the verifier is sent.
 
 | Arg | Default | Description |
@@ -145,6 +147,8 @@ To track one individual among others of its class (one person of several, say th
 | `cooldown` | `5.0` | Seconds before crops like an answered one are asked about again |
 | `prompt_weight` | `0.0` | Weight of `s` against confidence among unverified boxes, with `rank = "confidence"` |
 | `rank` | `prompt` | How a frame's unverified boxes are ranked: `prompt` (by `s`, against each other), or `confidence` |
+| `gate` | `false` | Learn from the verifier whether the best box is the target at all, and report none if not (see below; text prompts only) |
+| `class_prompt` | `a <first class>` | With `gate`: the prompt for any box of the class |
 | `timeout` | `1000` | Longest wait for the detector's result on a frame, in ms |
 | `learn_similarity`, `confirmations`, `good_similarity`, `good_confirmations`, `max_learned` | `0.85`, `2`, `0.9`, `2`, `32` | As for the edge filter |
 | `backgrounds`, `quantized`, `npu`, `threads`, `max_queue` | | As for the edge filter |

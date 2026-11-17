@@ -149,6 +149,7 @@ class Candidate:
     embedding: np.ndarray
     s: float  # how much more like the prompt than a background
     verdict: int
+    margin: float = float("nan")  # how much more like the prompt than the class, with a gate
 
     @property
     def score(self):
@@ -165,7 +166,7 @@ class CandidateLog:
     Line-buffered."""
 
     HEADER = ("frame_id", "timestamp_ns", "candidate", "class", "score", "left", "top", "right", "bottom",
-              "frame_width", "frame_height", "s", "verdict", "reported", "queued", "ms")
+              "frame_width", "frame_height", "s", "verdict", "reported", "queued", "ms", "margin")
 
     def __init__(self, path):
         self.path = log_path(path)
@@ -178,7 +179,7 @@ class CandidateLog:
         for i, c in enumerate(candidates):
             self._writer.writerow((frame.id, stamp, i, c.detection.class_name, f"{c.score:.4f}", *c.box, width,
                                    height, f"{c.s:.4f}", c.verdict, int(i == reported), int(i in queued),
-                                   f"{ms:.1f}"))
+                                   f"{ms:.1f}", "" if c.margin != c.margin else f"{c.margin:.4f}"))
 
     def close(self):
         self._file.close()
@@ -193,7 +194,7 @@ class Reranker:
     def __init__(self, encoder, selector, queue, *, detector, verifier, class_name, classes=(), confidence=0.5,
                  max_candidates=8, context=1.25, verify_context=2.0, min_verify_side=96, max_verify_side=256,
                  novelty=0.92, cooldown_s=5.0, require_verified=False, prompt_weight=0.0, rank=RANK_PROMPT,
-                 timeout_ns=1_000_000_000,
+                 gate=None, timeout_ns=1_000_000_000,
                  clock=time.monotonic_ns, tile_log=None, candidate_log=None,
                  summary_interval_ns=SUMMARY_INTERVAL_NS):
         self.encoder = encoder
@@ -216,6 +217,8 @@ class Reranker:
         if rank not in RANKS:
             raise ValueError(f"rank must be one of {RANKS}, not {rank!r}")
         self.rank = rank
+        # An instance_gate.InstanceGate, or None
+        self.gate = gate
         self.timeout_ns = timeout_ns
         self.clock = clock
         self.tile_log = tile_log
@@ -294,6 +297,8 @@ class Reranker:
         self._answered.append((tile.embedding, now))
         self.answers["yes" if match else "no"] += 1
         outcome = self.selector.learn(tile.embedding, match)
+        if self.gate is not None:
+            self.gate.learn(tile.embedding, match)
         message = "verifier: %s for the box of frame %d (score %.2f): %s (%d good, %d confirmed; %d no's, %d vetoing)"
         args = ["yes" if match else "no", tile.frame_id, tile.score, outcome, len(self.selector.good),
                 len(self.selector.confirmed_good), len(self.selector.backgrounds), self.vetoing]
@@ -343,17 +348,23 @@ class Reranker:
             crops.append(cv2.resize(rgb[y0:y1, x0:x1], (size, size), interpolation=cv2.INTER_LINEAR))
         v = self.encoder.encode_tiles(crops)
         s, verdict = self.selector.score(v)
-        return [Candidate(d, box, v[i], float(s[i]), int(verdict[i])) for i, (d, box) in enumerate(found)]
+        margin = self.gate.margins(v) if self.gate is not None else np.full(len(found), np.nan)
+        return [Candidate(d, box, v[i], float(s[i]), int(verdict[i]), float(margin[i]))
+                for i, (d, box) in enumerate(found)]
 
     def pick(self, candidates):
         """The index of the candidate to report, or None. A confirmed one
         wins; then, with rank "confidence", the most confident (plus
         prompt_weight times s), or with rank "prompt", the one most like the
         prompt: the frame's candidates are ranked against each other by s,
-        as cliped ranks a frame's tiles, so its scale doesn't matter."""
+        as cliped ranks a frame's tiles, so its scale doesn't matter. With a
+        gate, an unverified box must also be more like the prompt than the
+        gate's learned cutoff, so a frame where the target isn't among the
+        boxes reports none."""
         eligible = [i for i, c in enumerate(candidates)
                     if c.verdict == CONFIRMED_TARGET
-                    or (c.verdict == UNVERIFIED and not self.require_verified and c.score >= self.confidence)]
+                    or (c.verdict == UNVERIFIED and not self.require_verified and c.score >= self.confidence
+                        and (self.gate is None or self.gate.passes(c.margin)))]
         if not eligible:
             return None
         if self.rank == RANK_PROMPT:
@@ -426,6 +437,14 @@ class Reranker:
                          else "reported unverified"] += 1
             self._counts["over the top box" if chosen != 0 else "top box"] += 1
 
+    def _gate_summary(self):
+        if self.gate is None:
+            return ""
+        cutoff = self.gate.cutoff
+        return " | gate " + ("not cutting yet" if cutoff is None else f"cutoff {cutoff:+.3f}") + \
+            f" (margins: yes {np.mean(self.gate.yes) if self.gate.yes else float('nan'):+.3f}, " \
+            f"no {np.mean(self.gate.no) if self.gate.no else float('nan'):+.3f})"
+
     def summarize(self):
         """Logs what happened to the frames, if a summary is due."""
         now = self.clock()
@@ -438,13 +457,13 @@ class Reranker:
             logger.info(
                 "last %.0f s: %d frames, %d candidates (%d vetoed) | reported %d confirmed, %d unverified "
                 "(%d over the top box) | none: %d without candidates, %d all held back%s | verifier %d yes, %d no; "
-                "queue %d (%d in flight)",
+                "queue %d (%d in flight)%s",
                 (now - self._summary_at_ns) / 1e9, c["frames"], c["candidates"], c["vetoed"],
                 c["reported confirmed"], c["reported unverified"], c["over the top box"], c["no detection"],
                 c["all held back"],
                 "".join(f", {c[why]} {why}" for why in (SKIPPED, TIMED_OUT, DISCONNECTED, UNDECODABLE, TOO_LATE)
                         if c[why]),
-                self.answers["yes"], self.answers["no"], len(self.queue), self.queue.in_flight)
+                self.answers["yes"], self.answers["no"], len(self.queue), self.queue.in_flight, self._gate_summary())
         self._counts = Counter()
         self._summary_at_ns = now
 

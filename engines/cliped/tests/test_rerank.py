@@ -330,3 +330,20 @@ def test_rank_must_be_known():
                                            "rank": "size"}))
     args = main.parse_rerank_args(json.dumps({"detector": "yolo", "verifier": "v", "class": "c", "prompt": "p"}))
     assert args["rank"] == "prompt"
+
+
+def test_with_a_gate_a_frame_without_the_target_reports_nothing_once_it_has_learned():
+    from cliped.instance_gate import InstanceGate
+
+    # The prompt's vector is the dog's color; the class prompt's, between all
+    r = make_reranker(gate=InstanceGate(np.array([0.0, 1.0, 0.0]), np.ones(3) / np.sqrt(3)), novelty=0.999)
+    only_chair = ((CHAIR, BLUE),)
+    # Before any answer, the chair is reported: nothing better
+    assert reported(r.decide(frame(0, only_chair), detections((CHAIR, 0.9)), now=0)) is not None
+    v = Verifier(r)
+    r.decide(frame(1), detections((DOG, 0.9), (CHAIR, 0.8)), now=10)
+    v.answer_all(is_dog, now=11)
+    assert r.gate.cutoff is not None
+    assert r.decide(frame(2, only_chair), detections((CHAIR, 0.9)), now=20) == b""
+    # The dog still is
+    assert reported(r.decide(frame(3), detections((DOG, 0.9), (CHAIR, 0.8)), now=30))[0] == DOG

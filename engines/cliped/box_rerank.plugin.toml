@@ -106,6 +106,18 @@ description = "How a frame's unverified boxes (above confidence) are ranked: \"c
 default = "prompt"
 
 [[args]]
+name = "gate"
+type = "boolean"
+description = "Learns from the verifier's answers whether a frame's best box is the target at all, and reports none if not: an unverified box must be more like the prompt, over the class prompt, than the midpoint of the boxes the verifier said yes and no to. For a target that is one instance of the detector's class (a person in a red shirt among people). Needs a text prompt"
+default = false
+
+[[args]]
+name = "class_prompt"
+type = "string"
+description = "With gate: the prompt for any box of the class, against which the prompt's likeness is measured. Default: \"a <first of classes>\" (e.g. \"a person\")"
+default = ""
+
+[[args]]
 name = "timeout"
 type = "number"
 description = "The longest to wait for the detector's result on a frame, in milliseconds; the frame then has no detection"

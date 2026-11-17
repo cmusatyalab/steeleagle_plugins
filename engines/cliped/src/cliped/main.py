@@ -83,6 +83,8 @@ RERANK_DEFAULTS = {
     "cooldown": 5.0,
     "prompt_weight": 0.0,
     "rank": "prompt",
+    "gate": False,
+    "class_prompt": "",
     "timeout": 1000,
     "backgrounds": BACKGROUNDS,
     "quantized": True,
@@ -239,7 +241,11 @@ def parse_rerank_args(content):
     for name in ("novelty", "learn_similarity", "good_similarity"):
         _number(args, name, 0, 1, low_open=True)
     _backgrounds(args)
-    _booleans(args, "require_verified", "quantized", "npu", "log_tiles")
+    _booleans(args, "require_verified", "quantized", "npu", "log_tiles", "gate")
+    _strings(args, "class_prompt")
+    if args["gate"] and args["image"]:
+        raise ConfigError("gate needs a text prompt: an image's likeness is on another scale than a text's")
+    args["class_prompt"] = args["class_prompt"] or f"a {args['classes'][0]}"
     return args
 
 
@@ -302,10 +308,10 @@ def ensure_qnn_on_library_path():
     os.execv(sys.executable, [sys.executable, "-m", "cliped.main", *sys.argv[1:]])
 
 
-def encoders(args, image=None):
-    """The image encoder of `args`, and the prompt vector t (of the image
-    file `image` if given, of the text prompt if not) and background vectors
-    b."""
+def encoders(args, image=None, texts=()):
+    """The image encoder of `args`, the prompt vector t (of the image file
+    `image` if given, of the text prompt if not), the background vectors b,
+    and a vector for each of the prompts `texts`."""
     import torch
 
     from cliped.clip import Encoder, NpuImageEncoder, image_vector, text_vectors
@@ -315,6 +321,7 @@ def encoders(args, image=None):
     # The text encoder always runs FP32 on the CPU, once, for the prompt
     text_encoder = Encoder(visual_weights=None if args["quantized"] else FP32_WEIGHTS)
     t, b = text_vectors(text_encoder, None if image else args["prompt"], args["backgrounds"])
+    extra = [text_vectors(text_encoder, text, args["backgrounds"])[0] for text in texts]
     if args["quantized"]:
         qnn_dir = LIBS_DIR if args["npu"] else None
         image_encoder = NpuImageEncoder(QUANTIZED_MODEL, qnn_dir, num_threads=args["threads"])
@@ -326,7 +333,7 @@ def encoders(args, image=None):
     if image is not None:
         t = image_vector(image_encoder, read_rgb(image))
         log.info("searching for the image %s", image)
-    return image_encoder, t, b
+    return image_encoder, t, b, extra
 
 
 def build(args, verifier, *, image=None, tile_log=None):
@@ -337,7 +344,7 @@ def build(args, verifier, *, image=None, tile_log=None):
     from cliped.send_queue import SendQueue
 
     log = logging.getLogger("cliped")
-    image_encoder, t, b = encoders(args, image)
+    image_encoder, t, b, _ = encoders(args, image)
     if args["learn"]:
         log.info("learning from the verifier's answers (similarity %.2f, %d no's to gate; good similarity %.2f, "
                  "%d yes's to force; at most %d of each)", args["learn_similarity"], args["confirmations"],
@@ -368,10 +375,15 @@ def build_rerank(args, detector, verifier, *, image=None, tile_log=None):
     """The Reranker of `args`, reranking the detections of the engine
     `detector`, verified by the engine `verifier`."""
     from cliped.clip import Selector
+    from cliped.instance_gate import InstanceGate
     from cliped.rerank import CandidateLog, Reranker
     from cliped.send_queue import SendQueue
 
-    image_encoder, t, b = encoders(args, image)
+    image_encoder, t, b, extra = encoders(args, image, [args["class_prompt"]] if args["gate"] else [])
+    gate = InstanceGate(t, extra[0]) if args["gate"] else None
+    if gate is not None:
+        logging.getLogger("cliped").info("gate: learning a cutoff on likeness to %r over %r",
+                                         args["prompt"], args["class_prompt"])
     selector = Selector(t, b, learn=True, similarity=args["learn_similarity"],
                         confirmations=args["confirmations"], max_learned=args["max_learned"],
                         good_similarity=args["good_similarity"], good_confirmations=args["good_confirmations"])
@@ -394,6 +406,7 @@ def build_rerank(args, detector, verifier, *, image=None, tile_log=None):
         require_verified=args["require_verified"],
         prompt_weight=args["prompt_weight"],
         rank=args["rank"],
+        gate=gate,
         timeout_ns=args["timeout"] * 1_000_000,
         tile_log=tile_log,
         candidate_log=CandidateLog(args["log_candidates"]) if args["log_candidates"] else None,
