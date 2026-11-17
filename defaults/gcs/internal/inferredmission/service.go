@@ -30,6 +30,7 @@ type sectionSummary struct {
 	InferenceStatus string  `json:"inference_status,omitempty"`
 	CompileStatus   string  `json:"compile_status,omitempty"`
 	InferenceText   string  `json:"inference_text,omitempty"`
+	VisionInference string  `json:"vision_inference,omitempty"`
 	Error           string  `json:"error,omitempty"`
 	Elapsed         float64 `json:"elapsed,omitempty"`
 	InferenceTime   float64 `json:"inference_elapsed,omitempty"`
@@ -48,6 +49,7 @@ type section struct {
 	History              []historyItem    `json:"history,omitempty"`
 	VisionPrompt         string           `json:"vision_prompt,omitempty"`
 	VisionReply          string           `json:"vision_reply,omitempty"`
+	VisionEvidence       string           `json:"vision_evidence,omitempty"`
 	DSLReference         map[string]any   `json:"dsl_reference,omitempty"`
 	Task                 *task            `json:"task,omitempty"`
 	Instruction          string           `json:"instruction,omitempty"`
@@ -251,7 +253,7 @@ func (s *Service) modelsForPrompt(version string) map[string]string {
 	if s.generation.Temperature != nil {
 		models["dsl_temperature"] = strconv.FormatFloat(*s.generation.Temperature, 'f', -1, 64)
 	}
-	if version == promptVersion {
+	if usesMissionTemplates(version) {
 		for _, key := range []string{"dsl_temperature", "reasoning_effort", "dsl_endpoint_hash"} {
 			delete(models, key)
 		}
@@ -455,7 +457,7 @@ func (s *Service) resume(r *run) error {
 	if r.meta.Source != "uploaded_video" || r.running || r.meta.Status != "paused" {
 		return errors.New("Only a paused video analysis can be resumed.")
 	}
-	if r.meta.PromptVersion != promptVersion && !s.generation.Configured() {
+	if !usesMissionTemplates(r.meta.PromptVersion) && !s.generation.Configured() {
 		return errors.New("Configure the DSL model to resume this older analysis.")
 	}
 	if !maps.Equal(s.modelsForPrompt(r.meta.PromptVersion), r.meta.Models) {
@@ -519,7 +521,7 @@ func (s *Service) processSection(r *run, meta session, row section, load func() 
 	frameStart := time.Now()
 	frames, frameErr := load()
 	row.FramePreparationTime = time.Since(frameStart).Seconds()
-	if frameErr != nil && (meta.PromptVersion != promptVersion || s.ctx.Err() != nil) {
+	if frameErr != nil && (!usesMissionTemplates(meta.PromptVersion) || s.ctx.Err() != nil) {
 		return fail(frameErr.Error())
 	}
 	images := make([]nl2dsl.Image, len(frames))
@@ -547,8 +549,8 @@ func (s *Service) processSection(r *run, meta session, row section, load func() 
 	previous := slices.SortedFunc(maps.Values(r.rows), func(a, b section) int { return a.Index - b.Index })
 	r.mu.Unlock()
 	row.History = selectHistory(previous, row.Start, meta.Settings)
-	if meta.PromptVersion == promptVersion {
-		return s.processV6(r, meta, row, images, frameErr, start, publishVision)
+	if usesMissionTemplates(meta.PromptVersion) {
+		return s.processTemplateMission(r, meta, row, images, frameErr, start, publishVision)
 	}
 	row.VisionPrompt = buildPrompt(r.prompt, row, meta.Settings.HistoryMode)
 	row.Status, row.InferenceStatus = "inferring", "running"

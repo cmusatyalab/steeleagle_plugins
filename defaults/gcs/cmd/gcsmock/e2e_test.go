@@ -900,7 +900,7 @@ func TestE2EMockAIConfig(t *testing.T) {
 	if err := json.Unmarshal(state, &effective); err != nil {
 		t.Fatal(err)
 	}
-	if !effective.Configured || effective.PromptVersion != "v6" || effective.Models["dsl_provider"] != "local" ||
+	if !effective.Configured || effective.PromptVersion != "v7" || effective.Models["dsl_provider"] != "local" ||
 		effective.Models["vision_model"] != "gpt-4o" || effective.Models["vision_temperature"] != "0" ||
 		effective.Settings["section_seconds"] != float64(12) || effective.Settings["frame_fps"] != float64(2) ||
 		effective.Settings["history_mode"] != "uniform" || effective.Settings["section_mode"] != "sliding" {

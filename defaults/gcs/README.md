@@ -111,17 +111,20 @@ start, the server still runs and the compiler routes answer 503 with the reason.
 ### AI Chat and Inferred Mission
 
 The Plan page has **Chat** and **Inferred Mission** tabs. Chat uses the GCS's
-Go NL2DSL service. Inferred Mission V6 produces one natural-language
-recommendation, which GCS converts to a mission with the same V4 schema and
-compiler as Mission Builder. Apply opens the candidate on the canvas for
-review. Use the existing Map, Flow Builder, Compile and Deploy controls to
-finish the mission.
+Go NL2DSL service. Inferred Mission V7 recommends a continuation and explains
+which observations support it. Uploaded MP4s use sampled images and their
+timestamps. Live observations can add matched detections and telemetry. The
+model can infer tracking from the images before GCS checks the vehicle's
+available camera and detector routes.
 
-When the evidence is unclear or the proposed continuation cannot use the
-selected resources, V6 tries to compile **wait 30 seconds, then return home**
-for the selected vehicle. The wait comes from policy. Analysis prepares the
-draft for review and deployment. Link-loss activation requires a mission
-already loaded on the vehicle and a separate onboard trigger.
+GCS uses the V4 schema and compiler from Mission Builder and presents one
+compiled candidate. When the evidence is unclear or the proposed continuation
+cannot be bound or compiled, GCS tries **Wait 30 seconds, then return home**
+for the selected vehicle. The fallback comes from policy. Plan retains the
+vision recommendation and its reason for review. **Apply to Mission Builder**
+opens the compiled candidate on the canvas. Use Map, Flow Builder, Compile and
+Deploy to finish the mission. Link-loss activation requires a mission already
+loaded on the vehicle and a separate onboard trigger.
 
 See [Detector evidence in Inferred Mission](internal/inferredmission/detector-context.md)
 for live detector requirements and Aviary verification.
@@ -143,10 +146,11 @@ started with `eagle init`, the private `~/.config/steeleagle/eagled.env`
 file can provide these variables when the daemon starts. Keep key values out
 of plugin args and Raw TOML.
 
-Use **Apply** for provider, model, and inference settings. New V6 inference
-runs use the vision model and local mission templates. Archived V5 runs
-still use the Chat model for DSL generation. Use the main video settings to adjust
-sections, sampling, and history. **Advanced inference settings** contains
+Use **Apply** for provider, model, and inference settings. New runs use V7 and
+local mission templates. Resumed runs retain their recorded prompt. V6 uses
+local mission templates and V5 uses the Chat model for DSL generation. Use the
+main video settings to adjust sections, sampling, and history.
+**Advanced inference settings** contains
 image size, request timeouts, video upload limits, and the active-run limit.
 `chat_temperature` and `vision_temperature` are optional, in the range
 0–1. An omitted field uses the provider default. Leave temperature blank

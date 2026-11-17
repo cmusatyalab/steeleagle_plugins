@@ -14,10 +14,14 @@ import (
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
 )
 
-//go:embed prompts/v6.md
+//go:embed prompts/v7.md
 var visionPrompt string
 
-const promptVersion = "v6"
+const promptVersion = "v7"
+
+func usesMissionTemplates(version string) bool {
+	return version == "v6" || version == promptVersion
+}
 
 const (
 	targets       = "person|bicycle|car|motorcycle|bus|truck|train|boat|airplane|bird|dog|cat|horse|sheep|cow|elephant|bear|zebra|giraffe|bench|umbrella|backpack|suitcase|kite|frisbee|skateboard|surfboard|skis|snowboard"
@@ -97,8 +101,18 @@ func selectHistory(rows []section, start float64, settings Settings) []historyIt
 		return nil
 	}
 	var history []historyItem
+	wait := (task{Kind: "wait", Seconds: fallbackWait}).instructionV6()
 	for _, row := range rows {
-		if row.End > start || row.InferenceStatus != "valid" {
+		if row.End > start {
+			continue
+		}
+		text := row.VisionInference
+		if text == "" {
+			if row.InferenceStatus != "valid" {
+				continue
+			}
+			text = row.InferenceText
+		} else if text == wait {
 			continue
 		}
 		weight := 1.0
@@ -106,7 +120,7 @@ func selectHistory(rows []section, start float64, settings Settings) []historyIt
 			age := math.Max(0, start-row.End) / settings.SectionSeconds
 			weight = math.Round(math.Exp2(-age/settings.HalfLifeSections)*1e8) / 1e8
 		}
-		history = append(history, historyItem{Section: row.Index, Start: row.Start, End: row.End, Weight: weight, Text: row.InferenceText})
+		history = append(history, historyItem{Section: row.Index, Start: row.Start, End: row.End, Weight: weight, Text: text})
 	}
 	return history[max(0, len(history)-settings.HistorySections):]
 }

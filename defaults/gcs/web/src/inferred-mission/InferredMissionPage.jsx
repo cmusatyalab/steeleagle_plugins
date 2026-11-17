@@ -79,10 +79,11 @@ function uploadVideo(file, onProgress) {
     });
 }
 
-function ModelStages({ label, models }) {
+function ModelStages({ label, models, promptVersion }) {
     return (
         <div className="im-models" role="group" aria-label={label}>
             <span>Vision analysis <strong>{models.vision_model || 'Unknown'}</strong>
+                {promptVersion && ` · prompt ${promptVersion.toUpperCase()}`}
                 {models.vision_temperature != null && models.vision_temperature !== '' && ` · temperature ${models.vision_temperature}`}
             </span>
             <span>DSL generation <strong>{models.dsl_model || 'Unknown'}</strong>
@@ -105,6 +106,10 @@ function SectionDetail({ row, session, onApply }) {
     const frameLabel = `Frame ${shownFrame + 1} of ${row.frame_count}`
         + (Number.isFinite(frameTime) ? ` · +${frameTime.toFixed(2)} s` : '');
     const offset = session.video_takeoff_offset || 0;
+    const hasVision = Boolean(row.vision_inference || row.vision_evidence);
+    const separateProposal = row.vision_inference && row.vision_inference !== row.inference_text;
+    const visionEvidence = row.vision_evidence && <p className="im-note"><strong>Why</strong> {row.vision_evidence}</p>;
+    const missionHeading = row.compile_status === 'compiled' ? 'Compiled mission' : 'Mission candidate';
     const downloads = [
         { label: 'Download DSL', url: `${path}/files/mission.dsl`, visible: Boolean(row.dsl) },
         { label: 'Download V4 graph JSON', url: `${path}/files/mission.json`, visible: Boolean(row.mission_json) },
@@ -135,7 +140,14 @@ function SectionDetail({ row, session, onApply }) {
                 <span>{timestamp(row.start - offset)}–{timestamp(row.end - offset)} · {label(row.input_quality)}</span>
             </div>
             <div className="im-inference">
+                {separateProposal && <div className="im-vision-summary">
+                    <h4>{session.source_type === 'uploaded_video' ? 'Video inference' : 'Live inference'}</h4>
+                    <p>{row.vision_inference}</p>
+                    {visionEvidence}
+                </div>}
+                {hasVision && <h4>{missionHeading}{row.inference_status === 'fallback' && ' · fallback'}</h4>}
                 <p className="im-mission">{row.inference_text || `Inference ${label(row.inference_status)}.`}</p>
+                {!separateProposal && visionEvidence}
                 {row.adaptation && <p className="im-note">{row.adaptation}</p>}
                 {row.error && <p role="alert" className="im-error">{row.error}</p>}
                 {row.unresolved?.map(message => <p key={message} className="im-note">{message}</p>)}
@@ -195,7 +207,7 @@ function SectionDetail({ row, session, onApply }) {
                             </>}
                         </TabPanel>
                         <TabPanel header="History">
-                            {session.models && <ModelStages label="Selected run models" models={session.models} />}
+                            {session.models && <ModelStages label="Selected run models" models={session.models} promptVersion={session.prompt_version} />}
                             {row.history?.length ? <ol>
                                 {row.history.map(item => <li key={item.section}>Section {item.section} · weight {item.weight.toFixed(3)} · {item.text}</li>)}
                             </ol> : <p>No prior inferred missions used.</p>}
@@ -555,7 +567,7 @@ export default function InferredMissionPage({ activeTab, onApplyArtifact, getPla
                         </div>
                         {!videoMode && <p className="im-note" id="im-takeoff-help">Leave blank to start the timeline at the first valid frame after you start observing.</p>}
                     </details>
-                    {config ? <ModelStages label="New run models" models={config.models} /> : <span className="im-muted">Loading model settings…</span>}
+                    {config ? <ModelStages label="New run models" models={config.models} promptVersion={config.prompt_version} /> : <span className="im-muted">Loading model settings…</span>}
                     {config && !config.configured && <p className="im-note">Configure the vision model and its API key on the backend.</p>}
                 </div>
                 <div className="im-start-panel">
@@ -590,7 +602,9 @@ export default function InferredMissionPage({ activeTab, onApplyArtifact, getPla
                             onClick={() => setSelectedIndex(item.index)} className="im-section">
                             <span><strong>#{String(item.index).padStart(3, '0')}</strong> {timestamp(item.start - (session.video_takeoff_offset || 0))}–{timestamp(item.end - (session.video_takeoff_offset || 0))}</span>
                             {item.status !== 'completed' && <span className="im-muted">{label(item.status)}</span>}
-                            <span className="im-section-nl">{item.inference_text || item.error || 'Preparing section'}</span>
+                            <span className="im-section-nl">{item.vision_inference || item.inference_text || item.error || 'Preparing section'}</span>
+                            {item.vision_inference && item.vision_inference !== item.inference_text && item.inference_status === 'fallback'
+                                && <span className="im-muted">Fallback mission</span>}
                             {(Number.isFinite(item.inference_elapsed) || compiledDSLReady(item)) && <span className="im-section-timing">
                                 <span>Vision {durationLabel(item.inference_elapsed)}</span>
                                 {compiledDSLReady(item) && <span>DSL ready {durationLabel(item.elapsed)}</span>}

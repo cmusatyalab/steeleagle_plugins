@@ -51,7 +51,7 @@ outputs = ["web/dist/**"]
 [tasks.build]
 cmd = "go build -trimpath -o bin/gcs ./cmd/gcs"
 depends-on = ["web-build", "uriel"]
-inputs = ["go.mod", "go.sum", "**/*.go"]
+inputs = ["go.mod", "go.sum", "**/*.go", "internal/inferredmission/prompts/*.md"]
 outputs = ["bin/gcs"]
 
 # The start task is what the plugin runner invokes; the plugin's args come in

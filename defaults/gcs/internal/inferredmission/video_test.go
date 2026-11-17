@@ -118,10 +118,16 @@ func TestSlidingMP4WorkersHistoryAndPause(t *testing.T) {
 			if gate != nil && !await(r.Context(), gate) {
 				return
 			}
-			fmt.Fprintf(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":%q}]}]}`, instruction)
+			reply, err := json.Marshal(map[string]string{"recommendation": instruction, "evidence": "The sampled images show the current activity."})
+			if err != nil {
+				t.Error(err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprintf(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":%q}]}]}`, reply)
 			return
 		}
-		t.Error("V6 invoked a second model request to translate its recommendation")
+		t.Error("V7 invoked a second model request to translate its recommendation")
 		w.WriteHeader(http.StatusBadRequest)
 	}))
 	t.Cleanup(model.Close)

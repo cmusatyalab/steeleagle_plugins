@@ -61,12 +61,19 @@ func TestE2ENL2DSLSDK13(t *testing.T) {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
-				if !bytes.Contains(body, []byte(`"input_image"`)) || !bytes.Contains(body, []byte("mission inference V6")) {
-					t.Error("expected only a V6 vision request, followed by deterministic compilation")
+				if !bytes.Contains(body, []byte(`"input_image"`)) || !bytes.Contains(body, []byte("mission inference V7")) ||
+					bytes.Contains(body, []byte("track_routes")) {
+					t.Error("expected a V7 image request without track routes, followed by deterministic compilation")
 					http.Error(w, "unexpected model request", http.StatusBadRequest)
 					return
 				}
-				reply := map[string]string{"type": "output_text", "text": tc.instruction}
+				answer, err := json.Marshal(map[string]string{"recommendation": tc.instruction, "evidence": "This is the activity supported by the sampled frames."})
+				if err != nil {
+					t.Error(err)
+					http.Error(w, "could not encode model reply", http.StatusInternalServerError)
+					return
+				}
+				reply := map[string]string{"type": "output_text", "text": string(answer)}
 				_ = json.NewEncoder(w).Encode(map[string]any{"output": []any{reply}})
 			}))
 			defer model.Close()
@@ -124,6 +131,8 @@ func TestE2ENL2DSLSDK13(t *testing.T) {
 			var row struct {
 				Status, Error, DSL, Adaptation string
 				CompileStatus                  string `json:"compile_status"`
+				VisionInference                string `json:"vision_inference"`
+				VisionEvidence                 string `json:"vision_evidence"`
 				Attempts                       []struct{ Errors []string }
 				Mission                        struct{ Graph mission.Graph } `json:"mission_json"`
 			}
@@ -135,6 +144,9 @@ func TestE2ENL2DSLSDK13(t *testing.T) {
 			})
 			if row.Status != "completed" || row.CompileStatus != "compiled" {
 				t.Fatalf("inference %s, compile %s, want completed/compiled: %s, diagnostics: %v", row.Status, row.CompileStatus, row.Error, row.Attempts)
+			}
+			if row.VisionInference != tc.instruction || row.VisionEvidence == "" {
+				t.Fatalf("lost the model's recommendation or its supporting observation: %+v", row)
 			}
 			for _, want := range tc.wantDSL {
 				if !strings.Contains(row.DSL, want) {

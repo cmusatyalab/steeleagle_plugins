@@ -62,7 +62,7 @@ func parseV6Instruction(text string) (task, error) {
 		}
 		return t, nil
 	}
-	return task{}, fmt.Errorf("the model did not return a supported V6 mission description")
+	return task{}, fmt.Errorf("the model did not return a supported mission description")
 }
 
 func (t task) instructionV6() string {
@@ -245,22 +245,29 @@ func observedTrackClass(route v6TrackRoute, vehicle string, evidence *liveEviden
 	return false
 }
 
-func buildV6Prompt(base string, row section, mode string, caps v6Capabilities) string {
-	data, _ := json.Marshal(map[string]any{
+func buildTemplatePrompt(base, version string, row section, mode string, caps v6Capabilities) string {
+	context := map[string]any{
 		"section": row.Index, "duration_seconds": row.End - row.Start, "input_quality": row.InputQuality,
 		"history_mode": mode, "history": row.History, "telemetry": row.Telemetry, "live_evidence": row.Evidence,
-		"runtime_capabilities": caps,
-	})
-	return strings.TrimSpace(base) + "\n\n## Current evidence and runtime capabilities\n" + string(data)
+	}
+	heading := "Current evidence"
+	if version == "v6" {
+		context["runtime_capabilities"] = caps
+		heading += " and runtime capabilities"
+	} else {
+		context["map_polygons"] = caps.Polygons
+	}
+	data, _ := json.Marshal(context)
+	return strings.TrimSpace(base) + "\n\n## " + heading + "\n" + string(data)
 }
 
-func (s *Service) processV6(r *run, meta session, row section, images []nl2dsl.Image, frameErr error, start time.Time, publishVision func()) error {
+func (s *Service) processTemplateMission(r *run, meta session, row section, images []nl2dsl.Image, frameErr error, start time.Time, publishVision func()) error {
 	refCtx, cancel := context.WithTimeout(s.ctx, min(10*time.Second, timeout(meta.Settings.GenerationTimeout)))
 	ref, refErr := s.generator.Compiler.DraftReference(refCtx, meta.Plan)
 	cancel()
 	caps := readV6Capabilities(ref)
 	row.DSLReference = ref
-	row.VisionPrompt = buildV6Prompt(r.prompt, row, meta.Settings.HistoryMode, caps)
+	row.VisionPrompt = buildTemplatePrompt(r.prompt, meta.PromptVersion, row, meta.Settings.HistoryMode, caps)
 	row.Status, row.InferenceStatus = "inferring", "running"
 	if err := r.setSection(row); err != nil {
 		return err
@@ -273,7 +280,7 @@ func (s *Service) processV6(r *run, meta session, row section, images []nl2dsl.I
 		fallbackReason = "Could not sample the section imagery: " + frameErr.Error()
 	case len(images) == 0:
 		fallbackReason = "No images were available for this section."
-	case refErr != nil:
+	case refErr != nil && meta.PromptVersion == "v6":
 		fallbackReason = "The selected vehicle's mission capabilities could not be confirmed."
 	default:
 		inferenceStart := time.Now()
@@ -284,14 +291,22 @@ func (s *Service) processV6(r *run, meta session, row section, images []nl2dsl.I
 		row.VisionReply = reply.Text
 		if err != nil {
 			fallbackReason = "Vision was unavailable: " + err.Error()
-		} else if proposed, err := parseV6Instruction(reply.Text); err != nil {
+			break
+		}
+		proposed, err := row.readVisionRecommendation(meta.PromptVersion, reply.Text)
+		switch {
+		case err != nil:
 			fallbackReason = "Vision gave no usable mission recommendation: " + err.Error()
-		} else if proposed.Kind == "wait" {
+		case proposed.Kind == "wait":
 			fallbackReason = "The evidence did not establish a more specific continuation."
-		} else if err := caps.bind(&proposed, meta.Plan.Vehicle, row.Evidence); err != nil {
-			fallbackReason = "The proposed mission could not use the selected resources: " + err.Error()
-		} else {
-			recommendation = proposed
+		case refErr != nil:
+			fallbackReason = "The selected vehicle's mission capabilities could not be confirmed."
+		default:
+			if err := caps.bind(&proposed, meta.Plan.Vehicle, row.Evidence); err != nil {
+				fallbackReason = "The proposed mission could not use the selected resources: " + err.Error()
+			} else {
+				recommendation = proposed
+			}
 		}
 	}
 	if s.ctx.Err() != nil {
@@ -306,7 +321,7 @@ func (s *Service) processV6(r *run, meta session, row section, images []nl2dsl.I
 		row.InferenceText = row.Instruction
 		if fallbackReason != "" {
 			row.InferenceStatus = "fallback"
-			row.Adaptation = fallbackReason + " The 30-second wait comes from the fallback policy."
+			row.Adaptation = strings.TrimRight(fallbackReason, ". ") + ". The 30-second wait comes from the fallback policy."
 		} else if recommendation.Kind == "climb" {
 			row.Adaptation = "The 30-second wait after the climb comes from the fallback policy."
 		}

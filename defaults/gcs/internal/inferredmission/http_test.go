@@ -55,10 +55,10 @@ func testService(t *testing.T, root string, block chan struct{}, entered chan st
 					return
 				}
 			}
-			_, _ = io.WriteString(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":"Wait 5 seconds, then return home."}]}]}`)
+			_, _ = io.WriteString(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"recommendation\":\"Wait 30 seconds, then return home.\",\"evidence\":\"The images are stationary.\"}"}]}]}`)
 			return
 		}
-		t.Error("V6 invoked a second model request to translate its recommendation")
+		t.Error("V7 invoked a second model request to translate its recommendation")
 		w.WriteHeader(http.StatusBadRequest)
 	}))
 	t.Cleanup(model.Close)

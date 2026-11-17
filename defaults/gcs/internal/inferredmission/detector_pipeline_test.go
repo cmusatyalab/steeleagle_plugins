@@ -32,6 +32,10 @@ func TestV6DetectorEvidenceChangesCompiledMission(t *testing.T) {
 		track    = `Track the "Inspection Marker: Red", then return home. If the battery drops to 30 percent, return home.`
 		wait     = "Wait 30 seconds, then return home."
 	)
+	archivedPrompt, err := os.ReadFile("prompts/v6.md")
+	if err != nil {
+		t.Fatal(err)
+	}
 	var frame bytes.Buffer
 	if err := jpeg.Encode(&frame, image.NewGray(image.Rect(0, 0, 8, 8)), nil); err != nil {
 		t.Fatal(err)
@@ -76,7 +80,7 @@ func TestV6DetectorEvidenceChangesCompiledMission(t *testing.T) {
 					t.Fatal("expected the same frame and timestamp in each vision request")
 				}
 				basePrompt, evidenceJSON, ok := strings.Cut(body.Instructions, "\n\n## Current evidence and runtime capabilities\n")
-				if !ok || basePrompt != strings.TrimSpace(visionPrompt) {
+				if !ok || basePrompt != strings.TrimSpace(string(archivedPrompt)) {
 					t.Fatal("missing the V6 instructions and structured evidence")
 				}
 				var prompt struct {
@@ -116,8 +120,8 @@ func TestV6DetectorEvidenceChangesCompiledMission(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(s.Close)
-			r := &run{dir: t.TempDir(), rows: map[int]section{}, changed: make(chan struct{}), prompt: visionPrompt, live: &liveInput{}}
-			meta := session{Source: "live", Vehicle: vehicle, Producer: producer, Settings: settings, PromptVersion: promptVersion, Plan: plan}
+			r := &run{dir: t.TempDir(), rows: map[int]section{}, changed: make(chan struct{}), prompt: string(archivedPrompt), live: &liveInput{}}
+			meta := session{Source: "live", Vehicle: vehicle, Producer: producer, Settings: settings, PromptVersion: "v6", Plan: plan}
 			s.watchLiveDetection(t.Context(), r, meta, liveDetectionSource{
 				engine: func(_ context.Context, v, p string) (string, error) {
 					if v != vehicle || p != producer {
