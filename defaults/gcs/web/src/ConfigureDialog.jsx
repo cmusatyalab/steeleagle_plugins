@@ -87,6 +87,7 @@ function ConfigureDialog({ daemon, focus, onHide, onApplied }) {
         const notices = [];
         if (pkgs.error) notices.push(`Couldn't list this daemon's packages (${pkgs.error}); plugin args show as free-form rows.`);
         const { config } = cfg;
+        if (config.config_notice) notices.push(config.config_notice);
         setRaw(config.raw_toml);
         if (config.form) {
             const st = formToState(config.form, list);
@@ -413,6 +414,7 @@ function ConfigureDialog({ daemon, focus, onHide, onApplied }) {
                                             key={svc.key}
                                             svc={svc}
                                             packages={packages}
+                                            currentGCS={loaded?.own && svc.origName === loaded.selfService}
                                             hasSimulator={state.simulator.present}
                                             simPackage={state.simulator.package}
                                             errors={serviceErrors(svc.key)}

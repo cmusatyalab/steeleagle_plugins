@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -68,7 +69,7 @@ type BuildTarget struct {
 	// without a flow.
 	Flow     []byte
 	Manifest []byte
-	// Engines maps the engine names the mission uses to their full names
+	// Engines maps the engine names the mission uses to their resolved names
 	// (see GraphToAst): nil uses them as written, and an empty map allows
 	// none.
 	Engines map[string]string
@@ -156,27 +157,32 @@ func (s *Service) scopedState(ctx context.Context, plugin []byte) (*State, error
 // vehiclePlugin returns the plugin config of the named running vehicle, or
 // writes an error and returns false.
 func (s *Service) vehiclePlugin(w http.ResponseWriter, r *http.Request, name string) ([]byte, bool) {
-	if s.vehicles == nil {
-		writeError(w, http.StatusServiceUnavailable, noDaemon)
+	plugin, status, err := s.lookupVehiclePlugin(r.Context(), name)
+	if err != nil {
+		writeError(w, status, err.Error())
 		return nil, false
 	}
-	vs, err := s.vehicles(r.Context())
+	return plugin, true
+}
+
+func (s *Service) lookupVehiclePlugin(ctx context.Context, name string) ([]byte, int, error) {
+	if s.vehicles == nil {
+		return nil, http.StatusServiceUnavailable, errors.New(noDaemon)
+	}
+	vs, err := s.vehicles(ctx)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "Cannot list vehicles: "+err.Error())
-		return nil, false
+		return nil, http.StatusServiceUnavailable, fmt.Errorf("Cannot list vehicles: %w", err)
 	}
 	for _, v := range vs {
 		if v.Name != name {
 			continue
 		}
 		if v.Driver == nil {
-			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("vehicle %s has no driver config: %v", name, v.DriverErr))
-			return nil, false
+			return nil, http.StatusUnprocessableEntity, fmt.Errorf("vehicle %s has no driver config: %v", name, v.DriverErr)
 		}
-		return v.Config, true
+		return v.Config, 0, nil
 	}
-	writeError(w, http.StatusNotFound, fmt.Sprintf("vehicle %s is not running", name))
-	return nil, false
+	return nil, http.StatusNotFound, fmt.Errorf("vehicle %s is not running", name)
 }
 
 // graphRequest is a mission graph as the frontend posts it; unknown fields
@@ -252,19 +258,23 @@ func (s *Service) ServeCompile(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &g) {
 		return
 	}
-	target := BuildTarget{Key: "amd64", Arch: "amd64", Engines: map[string]string{}}
-	if g.Vehicle != "" {
-		var ok bool
-		if target.Plugin, ok = s.vehiclePlugin(w, r, g.Vehicle); !ok {
-			return
+	plan := PlanningContext{Vehicle: g.Vehicle, Flow: g.Flow, GeoJSON: g.GeoJSON}
+	target, bindings, status, err := s.validationTarget(r.Context(), plan, g.Graph)
+	if err != nil {
+		if status == http.StatusOK {
+			writeJSON(w, status, map[string]any{"errors": []GraphError{{Message: err.Error()}}})
+		} else {
+			writeError(w, status, err.Error())
 		}
-	}
-	flowErr, ok := s.addFlow(w, r, g, &target)
-	if !ok {
 		return
 	}
-	if flowErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"errors": []GraphError{{Message: flowErr.Error()}}})
+	st, err := s.planningState(r.Context(), target)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	if issues := bindingErrors(g.Graph, st.Index, plan, bindings.forRegistry(st.Index), false); len(issues) > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"errors": issues})
 		return
 	}
 	_, errs, err := s.CompileGraph(r.Context(), g.Graph, []BuildTarget{target})
@@ -277,30 +287,6 @@ func (s *Service) ServeCompile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// addFlow resolves the request's flow, if it has one, into target. It writes
-// a 503 and returns ok=false when the daemon can't be reached; a flow that
-// fails to check or resolve is returned as flowErr for the caller to report.
-func (s *Service) addFlow(w http.ResponseWriter, r *http.Request, g graphRequest, target *BuildTarget) (flowErr error, ok bool) {
-	if g.Flow.Empty() {
-		return nil, true
-	}
-	if s.catalog == nil {
-		writeError(w, http.StatusServiceUnavailable, noDaemon)
-		return nil, false
-	}
-	cat, err := s.catalog(r.Context())
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "Cannot list the flow catalog: "+err.Error())
-		return nil, false
-	}
-	res, err := s.resolveForValidate(cat, *g.Flow, g.Graph)
-	if err != nil {
-		return err, true
-	}
-	target.Flow, target.Manifest, target.Engines = res.Flow, res.Manifest, res.Engines
-	return nil, true
 }
 
 // resolveForValidate checks the flow and resolves it for the vehicle it was
@@ -327,30 +313,56 @@ func (s *Service) resolveForValidate(cat flows.Catalog, t flows.Template, g Grap
 	return t.Resolve(cat, s.gcsIP, target, cameras, validateMissionName, GraphRoles(g))
 }
 
-// flowEngineNames maps each engine of flow to its name in the mission of the
-// vehicle the flow was designed for (local.<engine> or remote.<engine>), as
-// Deploy builds it, so a rendered DSL names engines as the built one does.
-// It is nil without a flow. It writes a 503 and returns ok=false when the
-// catalog can't be listed; a flow that doesn't resolve is returned as flowErr.
-func (s *Service) flowEngineNames(w http.ResponseWriter, r *http.Request, flow *flows.Template) (names map[string]string, flowErr error, ok bool) {
+// flowEngineNames resolves engine names relative to the flow's vehicle, as
+// Deploy does. Catalog failures and invalid flows have distinct statuses.
+func (s *Service) flowEngineNames(ctx context.Context, flow *flows.Template) (map[string]string, int, error) {
 	if flow.Empty() {
-		return nil, nil, true
+		return nil, 0, nil
 	}
 	if s.catalog == nil {
-		writeError(w, http.StatusServiceUnavailable, noDaemon)
-		return nil, nil, false
+		return nil, http.StatusServiceUnavailable, errors.New(noDaemon)
 	}
-	cat, err := s.catalog(r.Context())
+	cat, err := s.catalog(ctx)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "Cannot list the flow catalog: "+err.Error())
-		return nil, nil, false
+		return nil, http.StatusServiceUnavailable, fmt.Errorf("Cannot list the flow catalog: %w", err)
 	}
-	names, err = flow.EngineNames(cat)
-	return names, err, true
+	names, err := flow.EngineNames(cat)
+	if err != nil {
+		return nil, http.StatusUnprocessableEntity, err
+	}
+	return names, 0, nil
+}
+
+// flowEngineAliases restores template names from relative identifiers or older
+// identifiers based on template names. Relative identifiers take precedence
+// so rendered DSL round-trips even if a daemon is named "local" or "remote".
+// Ambiguous aliases within either set remain unresolved.
+func flowEngineAliases(flow *flows.Template, names map[string]string) map[string]string {
+	if flow.Empty() {
+		return nil
+	}
+	aliases := make(map[string]string, len(flow.Engines)+len(names))
+	add := func(set map[string]string, alias, name string) {
+		if existing, ok := set[alias]; ok && existing != name {
+			set[alias] = ""
+		} else {
+			set[alias] = name
+		}
+	}
+	for _, engine := range flow.Engines {
+		add(aliases, constName(engine.Name), engine.Name)
+	}
+	relative := make(map[string]string, len(names))
+	for template, name := range names {
+		add(relative, constName(name), template)
+	}
+	maps.Copy(aliases, relative)
+	return aliases
 }
 
 // ServeRenderDSL serves POST /api/render_dsl. With a flow, engines are named
-// as in the mission of the flow's vehicle (flowEngineNames).
+// as in the mission of the flow's vehicle. Otherwise their names are quoted
+// so that editing or importing the DSL preserves them verbatim.
 func (s *Service) ServeRenderDSL(w http.ResponseWriter, r *http.Request) {
 	st := s.ready503(w, r)
 	if st == nil {
@@ -360,15 +372,16 @@ func (s *Service) ServeRenderDSL(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &g) {
 		return
 	}
-	engines, flowErr, ok := s.flowEngineNames(w, r, g.Flow)
-	if !ok {
+	engines, status, err := s.flowEngineNames(r.Context(), g.Flow)
+	if err != nil {
+		writeError(w, status, err.Error())
 		return
 	}
-	if flowErr != nil {
-		writeError(w, http.StatusUnprocessableEntity, flowErr.Error())
-		return
+	mode := previewEngineNames
+	if g.Flow.Empty() {
+		mode = portableEngineNames
 	}
-	ast, err := GraphToAst(g.Graph, st.Index, s.header, engines)
+	ast, err := graphToAstWithMode(g.Graph, st.Index, s.header, engines, mode)
 	if err == nil {
 		var dsl string
 		if dsl, err = AstToDSL(ast); err == nil {
@@ -387,8 +400,9 @@ func (s *Service) ServeParseDSL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		DSL  string          `json:"dsl"`
-		Flow *flows.Template `json:"flow"`
+		DSL  string           `json:"dsl"`
+		Flow *flows.Template  `json:"flow"`
+		Plan *PlanningContext `json:"planning_context"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -399,20 +413,47 @@ func (s *Service) ServeParseDSL(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	engines, flowErr, ok := s.flowEngineNames(w, r, req.Flow)
-	if !ok {
-		return
-	}
-	var idents map[string]string // ident suffix -> template name
-	if flowErr != nil {
-		upgrade = append(upgrade, "Engines are kept as named: the flow doesn't resolve: "+flowErr.Error())
-	} else if engines != nil {
-		idents = make(map[string]string, len(engines))
-		for template, name := range engines {
-			idents[constName(name)] = template
+	var graph map[string]any
+	if req.Plan != nil {
+		plan := *req.Plan
+		if plan.Flow == nil {
+			plan.Flow = req.Flow
 		}
+		target, status, err := s.planningTarget(r.Context(), plan)
+		if err != nil {
+			writeError(w, status, err.Error())
+			return
+		}
+		st, err = s.planningState(r.Context(), target)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		target, bindings, _, flowErr := s.resolvePlanningFlow(r.Context(), plan, Graph{}, target)
+		graph = astToGraph(ast, st.Index, flowEngineAliases(plan.Flow, target.Engines), false)
+		g, err := graphFromParsed(graph)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		bindings = bindings.forRegistry(st.Index)
+		bindTrackDraft(g, st.Index, bindings)
+		graph["nodes"], graph["events"] = g.Nodes, g.Events
+		graph["binding_errors"] = append([]GraphError{}, draftBindingErrors(g, st.Index, plan, bindings, flowErr)...)
+	} else {
+		engines, status, err := s.flowEngineNames(r.Context(), req.Flow)
+		if status == http.StatusServiceUnavailable {
+			writeError(w, status, err.Error())
+			return
+		}
+		var idents map[string]string // ident suffix -> template name
+		if err != nil {
+			upgrade = append(upgrade, "Engines are kept as named: the flow doesn't resolve: "+err.Error())
+		} else {
+			idents = flowEngineAliases(req.Flow, engines)
+		}
+		graph = AstToGraph(ast, st.Index, idents)
 	}
-	graph := AstToGraph(ast, st.Index, idents)
 	warnings := []any{}
 	for _, m := range upgrade {
 		warnings = append(warnings, m)
@@ -421,6 +462,9 @@ func (s *Service) ServeParseDSL(w http.ResponseWriter, r *http.Request) {
 		warnings = append(warnings, more...)
 	}
 	configured := map[string]bool{}
+	if _, ok := st.Index.Key("actions", climbActionType); ok {
+		configured[climbModulePath] = true
+	}
 	for _, i := range s.cfg.Imports {
 		configured[i.Path] = true
 	}
@@ -456,22 +500,27 @@ func (s *Service) ServeBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "arch must be amd64 or arm64")
 		return
 	}
-	target := BuildTarget{Key: req.Arch, Arch: req.Arch, Engines: map[string]string{}}
-	if req.Vehicle != "" {
-		var ok bool
-		if target.Plugin, ok = s.vehiclePlugin(w, r, req.Vehicle); !ok {
-			return
+	plan := PlanningContext{Vehicle: req.Vehicle, Flow: req.Flow, GeoJSON: req.GeoJSON}
+	target, bindings, status, err := s.validationTarget(r.Context(), plan, req.Graph)
+	if err != nil {
+		if status == http.StatusOK {
+			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("Build failed for %s: %s", req.Arch, err))
+		} else {
+			writeError(w, status, err.Error())
 		}
-	}
-	flowErr, ok := s.addFlow(w, r, req, &target)
-	if !ok {
 		return
 	}
-	if flowErr != nil {
-		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("Build failed for %s: %s", req.Arch, flowErr))
+	target.Key, target.Arch = req.Arch, req.Arch
+	st, err := s.planningState(r.Context(), target)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	bins, errs, err := s.CompileGraph(r.Context(), req.Graph, []BuildTarget{target})
+	errs := bindingErrors(req.Graph, st.Index, plan, bindings.forRegistry(st.Index), false)
+	var bins map[string][]byte
+	if len(errs) == 0 {
+		bins, errs, err = s.CompileGraph(r.Context(), req.Graph, []BuildTarget{target})
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -502,6 +551,7 @@ func (s *Service) CompileGraph(ctx context.Context, g Graph, targets []BuildTarg
 		return nil, nil, err
 	}
 	errs := StructuralErrors(g)
+	errs = append(errs, bindingErrors(g, st.Index, PlanningContext{}, planningBindings{}, false)...)
 	geojson, featureErrs := PrepareGeoJSON(g.GeoJSON)
 	for _, m := range featureErrs {
 		errs = append(errs, GraphError{Message: m})

@@ -53,6 +53,15 @@ func TestParseDriverTelemetryOnly(t *testing.T) {
 	}
 }
 
+func TestParseDriverLegacyAviaryCamera(t *testing.T) {
+	const rawFrame = "steeleagle_protocol/v1/messages/frame/RawFrame"
+	legacy := strings.Replace(driverTOML, `output = "`+rawFrame+`"`, `type = "`+rawFrame+`"`, 1)
+	streams, problems, err := ParseDriver([]byte(legacy))
+	if err != nil || len(problems) != 0 || len(streams) != 3 || streams[1].Name != "rgb" || streams[1].Type != rawFrame {
+		t.Fatalf("legacy Aviary camera not recognized: streams=%+v problems=%v err=%v", streams, problems, err)
+	}
+}
+
 func TestParseDriverSkipsBadCameras(t *testing.T) {
 	_, problems, err := ParseDriver([]byte(`
 [driver]

@@ -41,6 +41,21 @@ describe('missionDraft', () => {
         expect(JSON.parse(localStorage.getItem(MISSION_DRAFT_KEY)).version).toBe(MISSION_DRAFT_VERSION);
     });
 
+    it('clears legacy selectable empty rows in saved binding fields', () => {
+        const saved = structuredClone(draft);
+        const actualObject = { label: 'survey object', value: null };
+        saved.nodes[0].data.params = {
+            Camera: { label: '(no values)', value: null },
+            Camera2: 'Camera_front',
+            Options: actualObject,
+        };
+        saved.eventInstances[0].params = { Engine: { label: '(add a matching engine on the Flow Builder tab)', value: null } };
+        saveMissionDraft(saved);
+        const restored = loadMissionDraft();
+        expect(restored.nodes[0].data.params).toEqual({ Camera: null, Camera2: 'Camera_front', Options: actualObject });
+        expect(restored.eventInstances[0].params).toEqual({ Engine: null });
+    });
+
     it('treats corrupt, malformed or other-version storage as empty', () => {
         localStorage.setItem(MISSION_DRAFT_KEY, '{not json');
         expect(loadMissionDraft()).toEqual(emptyMissionDraft());

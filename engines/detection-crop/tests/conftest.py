@@ -76,5 +76,3 @@ class Clock:
 
     def advance_ms(self, ms):
         self.ns += ms * 1_000_000
-
-

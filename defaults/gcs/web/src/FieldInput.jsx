@@ -70,22 +70,32 @@ function unsetDisplay(field, zeroValue) {
 // engines(engineType) -> the flow's matching [{label, value}] (see flowEngines.js).
 const noEngines = () => [];
 
+function BindingDropdown({ value, options, onChange, placeholder, emptyMessage }) {
+    return (
+        <Dropdown
+            value={typeof value === 'string' ? value : null}
+            options={options}
+            optionValue="value"
+            disabled={options.length === 0}
+            onChange={e => onChange(e.value ?? null)}
+            className="w-full"
+            placeholder={options.length ? placeholder : emptyMessage}
+        />
+    );
+}
+
 function FieldInput({ field, value, onChange, namedAreas = [], engines = noEngines, enums = {} }) {
     if (field.engine_type) {
         // The value is an engine of the flow on the Flow Builder tab, stored
         // as its template name ({host}.{name}), filtered to engines whose
         // result matches the field's engine type.
-        const choices = engines(field.engine_type);
         return (
-            <Dropdown
-                value={value ?? null}
-                options={choices.length
-                    ? choices
-                    : [{ label: '(add a matching engine on the Flow Builder tab)', value: null }]
-                }
-                onChange={e => onChange(e.value)}
-                className="w-full"
+            <BindingDropdown
+                value={value}
+                options={engines(field.engine_type)}
+                onChange={onChange}
                 placeholder="Select engine"
+                emptyMessage="Add a matching engine in Flow Builder"
             />
         );
     }
@@ -96,15 +106,12 @@ function FieldInput({ field, value, onChange, namedAreas = [], engines = noEngin
         // constant the compiler generates from that GeoJSON, so a name
         // that isn't drawn (or isn't the right geometry) is a compile error.
         return (
-            <Dropdown
-                value={value ?? null}
-                options={namedAreas.length
-                    ? namedAreas.map(a => ({ label: a, value: a }))
-                    : [{ label: '(draw an area on the Map tab)', value: null }]
-                }
-                onChange={e => onChange(e.value)}
-                className="w-full"
+            <BindingDropdown
+                value={value}
+                options={namedAreas.map(a => ({ label: a, value: a }))}
+                onChange={onChange}
                 placeholder="Select area"
+                emptyMessage="Draw an area on the Map tab"
             />
         );
     }
@@ -116,16 +123,16 @@ function FieldInput({ field, value, onChange, namedAreas = [], engines = noEngin
         // prefix for a readable label while still sending the full name
         // as the ident_ref value the compiler expects.
         const options = values.map(v => ({
-            label: v.startsWith(field.enum_type) ? v.slice(field.enum_type.length) : v,
+            label: v.startsWith(field.enum_type) ? v.slice(field.enum_type.length).replace(/^_/, '') : v,
             value: v,
         }));
         return (
-            <Dropdown
-                value={value ?? field.default ?? null}
-                options={options.length ? options : [{ label: '(no values)', value: null }]}
-                onChange={e => onChange(e.value)}
-                className="w-full"
+            <BindingDropdown
+                value={value ?? field.default}
+                options={options}
+                onChange={onChange}
                 placeholder={`Select ${field.enum_type}`}
+                emptyMessage={field.go_type === 'params.Camera' ? 'No camera available for this vehicle' : 'No options available'}
             />
         );
     }

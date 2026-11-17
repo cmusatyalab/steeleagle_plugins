@@ -6,13 +6,14 @@ import { InputText } from 'primereact/inputtext';
 import { InputTextarea } from 'primereact/inputtextarea';
 import { Tag } from 'primereact/tag';
 import KeyValueEditor from './KeyValueEditor.jsx';
+import GCSAISettings from './GCSAISettings.jsx';
 import { JSON_TYPES, defaultValue } from './configForm.js';
 
 // A service's plugin args: first the args its plugin TOML declares, each
 // with its description and an input of its type, prefilled with its default;
 // then free-form rows for any others. `args` is configForm's argsState;
 // `errors` maps an arg name or row id to its message.
-function ArgsEditor({ args, errors = {}, onChange, disabled }) {
+function ArgsEditor({ args, errors = {}, onChange, disabled, gcsAI, currentGCS }) {
     const update = (name, patch) => onChange({
         ...args,
         declared: args.declared.map((d) => (d.name === name ? { ...d, ...patch } : d)),
@@ -24,6 +25,9 @@ function ArgsEditor({ args, errors = {}, onChange, disabled }) {
     };
 
     const input = (d) => {
+        if (gcsAI && d.name === 'ai' && d.type === 'object') {
+            return <GCSAISettings text={d.text} onChange={text => update(d.name, { text })} disabled={disabled} currentGCS={currentGCS} />;
+        }
         switch (d.type) {
             case 'boolean':
                 return <InputSwitch checked={!!d.value} onChange={(e) => update(d.name, { value: e.value })} disabled={disabled} />;

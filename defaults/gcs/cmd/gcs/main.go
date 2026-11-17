@@ -27,6 +27,7 @@ import (
 
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
 	"github.com/cmusatyalab/steeleagle/config"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/aiconfig"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/control"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/daemons"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/dump"
@@ -85,13 +86,15 @@ type args struct {
 	// came from Uriel; empty to record none. See package dump.
 	DumpDir string `json:"dump_dir"`
 	// PrometheusURL is where the Metrics page's numbers are queried.
-	PrometheusURL string `json:"prometheus_url"`
+	PrometheusURL string           `json:"prometheus_url"`
+	AI            aiconfig.Options `json:"ai"`
 }
 
 // parseArgs reads the plugin's args from JSON, defaulting the ones it leaves
 // out as gcs.plugin.toml does.
 func parseArgs(content string) (args, error) {
-	a := args{HTTPAddr: defaultHTTPAddr, MaxInputSize: defaultMaxInputSize, PrometheusURL: defaultPrometheusURL}
+	a := args{HTTPAddr: defaultHTTPAddr, MaxInputSize: defaultMaxInputSize, PrometheusURL: defaultPrometheusURL,
+		AI: aiconfig.Defaults()}
 	if content != "" {
 		if err := json.Unmarshal([]byte(content), &a); err != nil {
 			return args{}, fmt.Errorf("invalid plugin args: %w", err)
@@ -258,6 +261,27 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	register, inference := registerAI(ctx, engine, a.AI, missions.svc, hub, log)
+	if inference != nil {
+		defer inference.Close()
+		if catalog != nil {
+			inference.SetLiveDetectionSource(func(ctx context.Context, vehicle, producer string) (string, error) {
+				raw, err := flowOf(ctx, vehicle)
+				if err != nil || len(raw) == 0 {
+					return "", err
+				}
+				flow, err := config.ParseFlowConfigFromBytes(raw)
+				if err != nil {
+					return "", err
+				}
+				cat, err := catalog(ctx)
+				if err != nil {
+					return "", err
+				}
+				return liveDetector(cat, flow, gcsIP, vehicle, producer), nil
+			}, results)
+		}
+	}
 	if conn != nil {
 		// Detections of the engines on this machine are placed on the map
 		collector := pins.NewCollector(pinStore, poses, log)
@@ -270,7 +294,10 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: newHandler(hub, controller, vehicles, missions, daemonsRoutes, metricsRoutes, pinStore, uiConfig{Mapbox: a.Mapbox}, web, log), ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{
+		Handler:           newHandler(hub, controller, vehicles, missions, daemonsRoutes, metricsRoutes, pinStore, uiConfig{Mapbox: a.Mapbox}, web, log, register),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	errs := make(chan error, 2)
 	go func() {
 		log.Info().Str("addr", ln.Addr().String()).Msg("serving web UI")
@@ -323,6 +350,13 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 					recorder.Write(msg.Producer, msg.Seq, msg.Frame, time.Now())
 				}
 				next(msg)
+			}
+		}
+		if inference != nil {
+			next := publish
+			publish = func(msg feed.Message) {
+				next(msg)
+				observeFeed(inference, msg)
 			}
 		}
 		if err := feed.Run(ctx, engine, a.MaxInputSize, log, publish); err != nil {
@@ -481,8 +515,9 @@ type uiConfig struct {
 // newHandler serves the API, and the web UI from the directory web. vehicles
 // serves the vehicle list, missions the mission routes, orchestration the
 // daemon routes, metricsRoutes the Metrics page's routes and /metrics,
-// pinStore the detection pins, and ui the web UI's settings.
-func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Handler, missions missionRoutes, orchestration daemonRoutes, metricsRoutes map[string]http.Handler, pinStore *pins.Store, ui uiConfig, web string, log zerolog.Logger) http.Handler {
+// pinStore the detection pins, and ui the web UI's settings. Extensions
+// register optional routes such as the AI endpoints.
+func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Handler, missions missionRoutes, orchestration daemonRoutes, metricsRoutes map[string]http.Handler, pinStore *pins.Store, ui uiConfig, web string, log zerolog.Logger, extensions ...func(*http.ServeMux)) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -512,6 +547,9 @@ func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Hand
 	}
 	for pattern, h := range metricsRoutes {
 		mux.Handle(pattern, h)
+	}
+	for _, register := range extensions {
+		register(mux)
 	}
 	mux.HandleFunc("/api/", http.NotFound)
 	if _, err := os.Stat(filepath.Join(web, "index.html")); err != nil {

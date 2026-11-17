@@ -63,10 +63,8 @@ type Topology struct {
 }
 
 const (
-	rawFrameID     = "steeleagle_protocol/v1/messages/frame/RawFrame"
-	encodedFrameID = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
-	telemetryID    = "steeleagle_protocol/v1/messages/telemetry/Telemetry"
-	detectionID    = "steeleagle_protocol/v1/messages/result/DetectionResult"
+	rawFrameID  = "steeleagle_protocol/v1/messages/frame/RawFrame"
+	detectionID = "steeleagle_protocol/v1/messages/result/DetectionResult"
 
 	// yoloService is the bare name of the mock detection engine.
 	yoloService = "yolo"
@@ -96,11 +94,12 @@ type Daemon struct {
 	vehiclepb.UnimplementedLoaderServiceServer
 	daemonpb.UnimplementedTransferServiceServer
 
-	top   Topology
-	flows FlowApplier
-	log   zerolog.Logger
-	state map[string]*vehicleState
-	store *daemonStore
+	top         Topology
+	flows       FlowApplier
+	log         zerolog.Logger
+	state       map[string]*vehicleState
+	store       *daemonStore
+	gcsManifest []byte
 	// transferDelay is how long each transferred chunk takes, so the GCS's
 	// upload progress can be watched.
 	transferDelay time.Duration
@@ -121,17 +120,16 @@ type vehicleState struct {
 }
 
 // NewDaemon returns a daemon serving vehicles, keyed by full name.
-func NewDaemon(top Topology, vehicles map[string]*Vehicle, flows FlowApplier, log zerolog.Logger) *Daemon {
-	store, err := newDaemonStore(top)
+func NewDaemon(top Topology, vehicles map[string]*Vehicle, flows FlowApplier, log zerolog.Logger, gcs mockGCSConfig) (*Daemon, error) {
+	store, err := newDaemonStore(top, gcs)
 	if err != nil {
-		// The seed configs are built from constants, so this is a bug
-		panic(fmt.Sprintf("seed mock daemon configs: %v", err))
+		return nil, fmt.Errorf("seed mock daemon configs: %w", err)
 	}
-	d := &Daemon{top: top, flows: flows, log: log, state: map[string]*vehicleState{}, store: store, transferDelay: defaultTransferDelay}
+	d := &Daemon{top: top, flows: flows, log: log, state: map[string]*vehicleState{}, store: store, gcsManifest: gcs.manifest, transferDelay: defaultTransferDelay}
 	for n, v := range vehicles {
 		d.state[n] = &vehicleState{v: v, missions: map[string]uploadedMission{}}
 	}
-	return d
+	return d, nil
 }
 
 // Register registers the services on s.
@@ -228,10 +226,6 @@ func (d *Daemon) listAll(
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	gcsConf, err := engineConfig("gcs", "generic", []string{encodedFrameID, telemetryID}, "")
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
 	yoloConf, err := engineConfig(yoloService, "detection", []string{rawFrameID}, detectionID)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
@@ -273,7 +267,7 @@ func (d *Daemon) listAll(
 	}
 	out = append(out, daemonpb.Service_builder{
 		Name: d.top.GCSIP + ".gcs", Category: daemonpb.ServiceCategory_SERVICE_CATEGORY_ENGINE,
-		Plugin: "gcs", Config: gcsConf, Running: true, Auth: "admin",
+		Plugin: "gcs", Uri: mockGCSPackage, Config: d.gcsManifest, Running: true, Auth: "admin",
 	}.Build())
 	// Like eagled, list the other daemons that have vehicles, but not the
 	// GCS's own

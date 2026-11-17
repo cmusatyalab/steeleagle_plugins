@@ -108,6 +108,109 @@ Compiling runs `go build`, so the first build needs network access (`GOPROXY`)
 or a warm Go module cache. If the config is invalid, or the compiler can't
 start, the server still runs and the compiler routes answer 503 with the reason.
 
+### AI Chat and Inferred Mission
+
+The Plan page has **Chat** and **Inferred Mission** tabs. Chat uses the GCS's
+Go NL2DSL service. Inferred Mission V7 recommends a continuation and explains
+which observations support it. Uploaded MP4s use sampled images and their
+timestamps. Live observations can add matched detections and telemetry. The
+model can infer tracking from the images before GCS checks the vehicle's
+available camera and detector routes.
+
+GCS uses the V4 schema and compiler from Mission Builder and presents one
+compiled candidate. When the evidence is unclear or the proposed continuation
+cannot be bound or compiled, GCS tries **Wait 30 seconds, then return home**
+for the selected vehicle. The fallback comes from policy. Plan retains the
+vision recommendation and its reason for review. **Apply to Mission Builder**
+opens the compiled candidate on the canvas. Use Map, Flow Builder, Compile and
+Deploy to finish the mission. Link-loss activation requires a mission already
+loaded on the vehicle and a separate onboard trigger.
+
+See [Detector evidence in Inferred Mission](internal/inferredmission/detector-context.md)
+for live detector requirements and Aviary verification.
+
+In **Orchestrate → Configure**, open the GCS service and expand **AI**. Open
+the GCS directly through `localhost` or `127.0.0.1` on its host to save,
+replace, or clear provider keys. A local SSH port forward to the same GCS
+also works. Browsers connected over the network can view credential status.
+New provider requests use the saved key immediately. The GCS stores it in a
+service-specific file with mode `0600` under
+`~/.config/steeleagle/gcs/credentials` (or `$XDG_CONFIG_HOME/steeleagle/gcs/credentials`).
+The form shows credential status and never reads back key values.
+
+OpenAI Chat and video inference use the OpenAI key. Anthropic Chat uses the
+Anthropic key, and vision still uses OpenAI. `OPENAI_API_KEY` and
+`ANTHROPIC_API_KEY` in the GCS process environment remain fallbacks when
+there is no UI-saved key, including after **Clear saved key**. For services
+started with `eagle init`, the private `~/.config/steeleagle/eagled.env`
+file can provide these variables when the daemon starts. Keep key values out
+of plugin args and Raw TOML.
+
+Use **Apply** for provider, model, and inference settings. New runs use V7 and
+local mission templates. Resumed runs retain their recorded prompt. V6 uses
+local mission templates and V5 uses the Chat model for DSL generation. Use the
+main video settings to adjust sections, sampling, and history.
+**Advanced inference settings** contains
+image size, request timeouts, video upload limits, and the active-run limit.
+`chat_temperature` and `vision_temperature` are optional, in the range
+0–1. An omitted field uses the provider default. Leave temperature blank
+for reasoning models such as `gpt-6.1-sol` and for providers or models that
+do not support it. Configure and the Plan tabs distinguish saved settings
+from the models currently in use.
+
+```toml
+[services.plugin.args.ai]
+chat_provider = "openai"
+chat_model = "gpt-6.1-sol"
+chat_reasoning_effort = "medium"
+vision_model = "gpt-6.1-sol"
+vision_reasoning_effort = "medium"
+data_dir = "/var/lib/steeleagle/gcs-analysis"
+
+[services.plugin.args.ai.inferred_mission]
+section_mode = "non_overlapping"
+section_seconds = 15
+frame_fps = 1
+history_mode = "recency"
+history_sections = 10
+half_life_sections = 3
+```
+
+The GCS process must be able to write to `data_dir`. It defaults to
+`steeleagle/gcs/inferred-mission` within the service user's configuration
+directory. `STEELEAGLE_INFERRED_MISSION_DATA` can override it. Use a distinct
+data directory for each GCS instance. For a trusted model gateway, set
+`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, or
+`STEELEAGLE_VISION_BASE_URL` to the provider's versioned base URL.
+
+Use **Advanced options → Section window** in a new run to override the
+configured section mode. The default is consecutive 15-second windows at
+1 fps. To reproduce the sliding experiment, set `section_mode = "sliding"`,
+`section_seconds = 5`, and `frame_fps = 1`. Windows start one second apart.
+Sliding MP4 runs share up to five concurrent section workers; live runs
+process their overlapping windows in order.
+
+The report shows wall time for the run and timing for each section. Rename
+or archive an idle run from Saved runs; restore it before resuming. Archiving
+keeps the source, sampled frames, and records. JSON downloads use the run's
+name, UTC creation time, and section index.
+
+Install FFmpeg and ffprobe for both MP4 and live analysis. Live Observe lists
+currently streaming V4 cameras. Keep the camera → encoder → GCS and
+telemetry → GCS edges in the active dataflow. A live run can also use a
+reachable local detector on that camera's active flow. Detector labels are
+matched to sampled frames by their transport identity. History shows the
+matched evidence and available motion telemetry. Ordinary MP4 runs use
+their own frames and can resume after a restart. Saved live runs remain
+available for review. The graph JSON download uses the V4 format and carries
+a schema version.
+
+For local verification, run `pixi run mock` and open the Plan page at
+`http://localhost:8002`. Test a short MP4 and a mock camera separately.
+The mock supplies frames and telemetry. A draft referencing a detector or
+map feature requires the corresponding Flow Builder or Map configuration
+before compilation. Detector behavior requires a real detector.
+
 ### Flows in missions
 
 A flow designed on the Flow Builder tab ships with Deploy: the Plan page sends it
@@ -266,6 +369,36 @@ Run it in `gcs/` and open <http://localhost:8002>:
 ```sh
 pixi run mock
 ```
+
+The mock reads `gcs.plugin.toml` from this checkout so Configure shows the
+same declared args as the installed plugin. Set `XDG_CONFIG_HOME` to a
+separate directory when testing saved credentials in the mock. To use custom non-secret
+settings in the running GCS, set the API key in the shell environment and
+pass a file containing the `ai` object directly:
+
+```sh
+pixi run mock -ai-config /path/to/gcs-ai.json
+```
+
+For example, `gcs-ai.json` can contain:
+
+```json
+{
+  "chat_model": "gpt-4.1",
+  "chat_temperature": 0.2,
+  "vision_model": "gpt-6.1-sol",
+  "inferred_mission": {
+    "section_mode": "sliding",
+    "section_seconds": 5,
+    "frame_fps": 1,
+    "history_mode": "recency"
+  }
+}
+```
+
+The file seeds the mock's Configure form and the GCS process at startup.
+Configure's Apply operation still simulates the daemon restart. To change
+the mock's running settings, edit the file and restart the mock.
 
 Ctrl-C stops the mock and the GCS. By default there are three vehicles:
 `100.64.0.1.alpha` and `100.64.0.1.bravo` on the GCS's daemon (`100.64.0.1`),

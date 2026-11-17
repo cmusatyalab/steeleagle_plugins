@@ -63,6 +63,19 @@ type harness struct {
 	d        *Daemon
 }
 
+func newTestDaemon(t *testing.T, top Topology, vehicles map[string]*Vehicle, flows FlowApplier) *Daemon {
+	t.Helper()
+	gcs, err := loadGCSConfig(options{gcsManifest: "../../gcs.plugin.toml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewDaemon(top, vehicles, flows, zerolog.Nop(), gcs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 func newHarness(t *testing.T, tweaks ...func(*Topology)) *harness {
 	t.Helper()
 	names := []string{alphaName, bravoName, charlieName}
@@ -79,7 +92,7 @@ func newHarness(t *testing.T, tweaks ...func(*Topology)) *harness {
 	for _, tweak := range tweaks {
 		tweak(&top)
 	}
-	d := NewDaemon(top, vehicles, flows, zerolog.Nop())
+	d := newTestDaemon(t, top, vehicles, flows)
 	ln := bufconn.Listen(1 << 20)
 	s := grpc.NewServer()
 	d.Register(s)
@@ -473,7 +486,7 @@ func TestListServicesRemotesArchAndGCSExcluded(t *testing.T) {
 		Vehicles: []string{alphaName, bravoName, charlieName},
 		Archs:    map[string]string{"100.64.0.3": "arm64"},
 	}
-	d := NewDaemon(top, nil, &recordingFlows{}, zerolog.Nop())
+	d := newTestDaemon(t, top, nil, &recordingFlows{})
 	resp, err := d.ListServices(context.Background(), &daemonpb.ListServicesRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -493,7 +506,7 @@ func TestListServicesEnginesHaveConfigs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := NewDaemon(o.topology(), nil, &recordingFlows{}, zerolog.Nop())
+	d := newTestDaemon(t, o.topology(), nil, &recordingFlows{})
 	resp, err := d.ListServices(context.Background(), &daemonpb.ListServicesRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -539,7 +552,7 @@ func TestListServicesEnginesHaveConfigs(t *testing.T) {
 }
 
 func TestRestartService(t *testing.T) {
-	d := NewDaemon(Topology{GCSIP: "100.64.0.9"}, nil, nil, zerolog.Nop())
+	d := newTestDaemon(t, Topology{GCSIP: "100.64.0.9"}, nil, nil)
 	ctx := context.Background()
 	if _, err := d.RestartService(ctx, daemonpb.RestartServiceRequest_builder{ServiceNames: "100.64.0.9.gcs"}.Build()); err != nil {
 		t.Errorf("restart gcs: %v", err)
@@ -552,7 +565,7 @@ func TestRestartService(t *testing.T) {
 // TestStopService checks that a stopped service is listed as stopped and not
 // running until it is restarted, and that an unknown one can't be stopped.
 func TestStopService(t *testing.T) {
-	d := NewDaemon(Topology{GCSIP: "100.64.0.9", Detector: "100.64.0.9.detector"}, nil, nil, zerolog.Nop())
+	d := newTestDaemon(t, Topology{GCSIP: "100.64.0.9", Detector: "100.64.0.9.detector"}, nil, nil)
 	ctx := context.Background()
 	const detector = "100.64.0.9.detector"
 	listed := func() *daemonpb.Service {
