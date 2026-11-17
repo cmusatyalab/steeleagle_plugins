@@ -100,6 +100,12 @@ description = "Weight of the CLIP prompt score s against confidence when ranking
 default = 0.0
 
 [[args]]
+name = "rank"
+type = "string"
+description = "How a frame's unverified boxes (above confidence) are ranked: \"confidence\", the detector's (plus prompt_weight times s), or \"prompt\", their CLIP prompt score s against each other, as cliped ranks a frame's tiles: the box most like the prompt or image wins, whatever s's scale. A confirmed box wins either way. \"confidence\" only for a prompt that just names the detector's class, which can't tell its boxes apart"
+default = "prompt"
+
+[[args]]
 name = "timeout"
 type = "number"
 description = "The longest to wait for the detector's result on a frame, in milliseconds; the frame then has no detection"

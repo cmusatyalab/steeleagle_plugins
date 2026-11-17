@@ -114,7 +114,8 @@ def is_dog(tile):
 
 
 def test_with_nothing_learned_it_reports_the_most_confident_box_renamed_and_queues_every_box():
-    r = make_reranker()
+    # Ranked by confidence: the prompt ranking (the default) is tested below
+    r = make_reranker(rank="confidence")
     result = r.decide(frame(), detections((CHAIR, 0.8, "chair"), (DOG, 0.6, "Robotic Dog")), now=0)
     # Only the class's boxes are candidates
     assert reported(result) == (DOG, 0.6, "robotic dog")
@@ -295,3 +296,37 @@ def test_the_box_question_asks_about_the_reference_when_there_is_one():
     assert main.box_question(args, b"reference") == BOX_IMAGE_QUESTION
     assert main.box_question(args, None) == BOX_QUESTION
     assert main.box_question(main.parse_verifier_args(json.dumps({"prompt": "p"})), b"reference") is None
+
+
+def _candidates(*rows):
+    """Stand-ins for Candidates: (verdict, s, score) each."""
+    from types import SimpleNamespace
+
+    return [SimpleNamespace(verdict=v, s=s, score=score) for v, s, score in rows]
+
+
+def test_rank_prompt_picks_the_candidate_most_like_the_prompt_among_the_eligible():
+    # The most confident (0.9) is least like the prompt; one under the
+    # confidence (0.3) is most like it but not eligible
+    cands = _candidates((0, 0.40, 0.9), (0, 0.55, 0.6), (0, 0.70, 0.3))
+    assert make_reranker(rank="confidence").pick(cands) == 0
+    assert make_reranker().pick(cands) == 1
+    # Only the order of s matters: shifting and scaling it picks the same
+    shifted = _candidates((0, 4.0, 0.9), (0, 5.5, 0.6), (0, 7.0, 0.3))
+    assert make_reranker(rank="prompt").pick(shifted) == 1
+
+
+def test_rank_prompt_still_puts_a_confirmed_box_first_and_never_a_vetoed_one():
+    cands = _candidates((-1, 0.9, 0.9), (0, 0.6, 0.8), (1, 0.1, 0.2))
+    assert make_reranker(rank="prompt").pick(cands) == 2
+    assert make_reranker(rank="prompt").pick(cands[:2]) == 1
+
+
+def test_rank_must_be_known():
+    with pytest.raises(ValueError):
+        make_reranker(rank="size")
+    with pytest.raises(main.ConfigError):
+        main.parse_rerank_args(json.dumps({"detector": "yolo", "verifier": "v", "class": "c", "prompt": "p",
+                                           "rank": "size"}))
+    args = main.parse_rerank_args(json.dumps({"detector": "yolo", "verifier": "v", "class": "c", "prompt": "p"}))
+    assert args["rank"] == "prompt"

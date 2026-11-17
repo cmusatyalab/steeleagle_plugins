@@ -82,6 +82,7 @@ RERANK_DEFAULTS = {
     "novelty": 0.92,
     "cooldown": 5.0,
     "prompt_weight": 0.0,
+    "rank": "prompt",
     "timeout": 1000,
     "backgrounds": BACKGROUNDS,
     "quantized": True,
@@ -231,6 +232,10 @@ def parse_rerank_args(content):
     _number(args, "verify_context", 1, 10)
     _number(args, "cooldown", 0, 3600)
     _number(args, "prompt_weight", -100, 100)
+    from cliped.rerank import RANKS
+
+    if args["rank"] not in RANKS:
+        raise ConfigError(f"rank must be one of {', '.join(RANKS)}, not {args['rank']!r}")
     for name in ("novelty", "learn_similarity", "good_similarity"):
         _number(args, name, 0, 1, low_open=True)
     _backgrounds(args)
@@ -388,6 +393,7 @@ def build_rerank(args, detector, verifier, *, image=None, tile_log=None):
         cooldown_s=args["cooldown"],
         require_verified=args["require_verified"],
         prompt_weight=args["prompt_weight"],
+        rank=args["rank"],
         timeout_ns=args["timeout"] * 1_000_000,
         tile_log=tile_log,
         candidate_log=CandidateLog(args["log_candidates"]) if args["log_candidates"] else None,

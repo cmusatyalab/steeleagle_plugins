@@ -121,6 +121,13 @@ def pixel_box(bbox, width, height):
     return left, top, right, bottom
 
 
+# How the unverified candidates of a frame are ranked: by confidence (plus
+# prompt_weight times s), or by their CLIP prompt score s against each other
+RANK_CONFIDENCE = "confidence"
+RANK_PROMPT = "prompt"
+RANKS = (RANK_CONFIDENCE, RANK_PROMPT)
+
+
 def square_around(box, scale, min_side, width, height):
     """The square (left, top, right, bottom) centered on `box`, its side
     `scale` times the box's longer side and at least `min_side`, shifted to
@@ -185,7 +192,8 @@ class Reranker:
 
     def __init__(self, encoder, selector, queue, *, detector, verifier, class_name, classes=(), confidence=0.5,
                  max_candidates=8, context=1.25, verify_context=2.0, min_verify_side=96, max_verify_side=256,
-                 novelty=0.92, cooldown_s=5.0, require_verified=False, prompt_weight=0.0, timeout_ns=1_000_000_000,
+                 novelty=0.92, cooldown_s=5.0, require_verified=False, prompt_weight=0.0, rank=RANK_PROMPT,
+                 timeout_ns=1_000_000_000,
                  clock=time.monotonic_ns, tile_log=None, candidate_log=None,
                  summary_interval_ns=SUMMARY_INTERVAL_NS):
         self.encoder = encoder
@@ -205,6 +213,9 @@ class Reranker:
         self.cooldown_s = cooldown_s
         self.require_verified = require_verified
         self.prompt_weight = prompt_weight
+        if rank not in RANKS:
+            raise ValueError(f"rank must be one of {RANKS}, not {rank!r}")
+        self.rank = rank
         self.timeout_ns = timeout_ns
         self.clock = clock
         self.tile_log = tile_log
@@ -335,12 +346,18 @@ class Reranker:
         return [Candidate(d, box, v[i], float(s[i]), int(verdict[i])) for i, (d, box) in enumerate(found)]
 
     def pick(self, candidates):
-        """The index of the candidate to report, or None."""
+        """The index of the candidate to report, or None. A confirmed one
+        wins; then, with rank "confidence", the most confident (plus
+        prompt_weight times s), or with rank "prompt", the one most like the
+        prompt: the frame's candidates are ranked against each other by s,
+        as cliped ranks a frame's tiles, so its scale doesn't matter."""
         eligible = [i for i, c in enumerate(candidates)
                     if c.verdict == CONFIRMED_TARGET
                     or (c.verdict == UNVERIFIED and not self.require_verified and c.score >= self.confidence)]
         if not eligible:
             return None
+        if self.rank == RANK_PROMPT:
+            return max(eligible, key=lambda i: (candidates[i].verdict, candidates[i].s, candidates[i].score))
         return max(eligible, key=lambda i: (candidates[i].verdict,
                                             candidates[i].score + self.prompt_weight * candidates[i].s))
 
