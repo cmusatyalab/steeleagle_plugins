@@ -62,6 +62,12 @@ type = "string"
 description = "Mapbox access token for the web UI's maps; empty shows no basemap"
 default = ""
 
+[[args]]
+name = "ai"
+type = "object"
+description = "Chat and video inference settings. Save API keys separately in the AI panel on the GCS host."
+default = {}
+
 [engine]
 # Engine type: (detection, classification, guidance, position, generic, filter)
 type = "generic"

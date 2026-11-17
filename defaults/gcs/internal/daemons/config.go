@@ -11,8 +11,10 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	daemonpb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/services/daemon"
 	"github.com/cmusatyalab/steeleagle/config"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/aiconfig"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 )
 
@@ -42,12 +44,16 @@ func (p configPayload) candidate() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid form: %w", err)
 	}
-	return RenderForm(f)
+	raw, err := RenderForm(f)
+	if err != nil {
+		return nil, errors.New("the form cannot be rendered as TOML; check the argument values")
+	}
+	return raw, nil
 }
 
 // checkResult is what a check finds in a candidate config. Blocking is
-// whether Apply refuses it: only on the GCS's own daemon, which takes the
-// GCS down with it if its services fail.
+// whether Apply refuses it. Missing packages block only on the GCS's own
+// daemon, which takes the GCS down with it if its services fail.
 type checkResult struct {
 	Errors   []string `json:"errors"`
 	Warnings []string `json:"warnings"`
@@ -73,8 +79,8 @@ func (h *Handler) ReadConfig(ctx context.Context, ip string) ([]byte, error) {
 }
 
 // serveGetConfig serves GET /api/daemons/config?ip=: {raw_toml, config_hash,
-// form, form_error, own, self_service}. form is null, with form_error, when
-// the config can't be shown as a form.
+// form, form_error, own, self_service}. When legacy credentials are removed
+// from the response, a notice explains how applying the config removes them.
 func (h *Handler) serveGetConfig(w http.ResponseWriter, r *http.Request) {
 	ip := r.URL.Query().Get("ip")
 	if ip == "" {
@@ -87,11 +93,26 @@ func (h *Handler) serveGetConfig(w http.ResponseWriter, r *http.Request) {
 		writeRPCError(w, err)
 		return
 	}
-	out := map[string]any{"raw_toml": string(raw), "config_hash": hashConfig(raw), "own": h.own(ip), "self_service": ""}
+	document, issues, err := inspectConfigCredentials(raw)
+	if err != nil {
+		writeDetail(w, http.StatusUnprocessableEntity, "The daemon configuration cannot be displayed because its TOML is invalid. Fix it on the daemon host. "+err.Error())
+		return
+	}
+	out := map[string]any{"config_hash": hashConfig(raw), "own": h.own(ip), "self_service": ""}
+	if len(issues) > 0 {
+		var sanitized bytes.Buffer
+		if err := toml.NewEncoder(&sanitized).Encode(document); err != nil {
+			writeDetail(w, http.StatusUnprocessableEntity, "Legacy GCS credential fields could not be removed from the displayed configuration. Remove them on the daemon host.")
+			return
+		}
+		raw = sanitized.Bytes()
+		out["config_notice"] = "Legacy GCS credential fields were omitted from this view, so the displayed TOML was reformatted and comments were removed. Applying this configuration removes those fields from the daemon. Use API credentials under GCS AI settings."
+	}
+	out["raw_toml"] = string(raw)
 	if h.own(ip) {
 		_, out["self_service"] = fleet.SplitName(h.self.Engine)
 	}
-	if f, err := ParseForm(raw); err != nil {
+	if f, err := parseFormDocument(document); err != nil {
 		out["form"], out["form_error"] = nil, err.Error()
 	} else {
 		out["form"] = f
@@ -115,35 +136,66 @@ func (h *Handler) serveConvert(w http.ResponseWriter, r *http.Request) {
 			writeDetail(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if _, ok := convertibleConfig(w, raw); !ok {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"raw_toml": string(raw)})
 	case "form":
 		if p.RawTOML == nil {
 			writeDetail(w, http.StatusBadRequest, "raw_toml is required")
 			return
 		}
-		f, err := ParseForm([]byte(*p.RawTOML))
-		var te *TOMLError
-		switch {
-		case errors.As(err, &te):
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"detail": te})
-		case err != nil:
-			writeDetail(w, http.StatusUnprocessableEntity, err.Error())
-		default:
-			writeJSON(w, http.StatusOK, map[string]any{"form": f})
+		document, ok := convertibleConfig(w, []byte(*p.RawTOML))
+		if !ok {
+			return
 		}
+		f, err := parseFormDocument(document)
+		if err != nil {
+			writeDetail(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"form": f})
 	default:
 		writeDetail(w, http.StatusBadRequest, `to must be "raw" or "form"`)
 	}
+}
+
+func convertibleConfig(w http.ResponseWriter, raw []byte) (map[string]any, bool) {
+	document, issues, err := inspectConfigCredentials(raw)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"detail": err})
+		return nil, false
+	}
+	if len(issues) > 0 {
+		writeDetail(w, http.StatusUnprocessableEntity, strings.Join(issues, " "))
+		return nil, false
+	}
+	return document, true
 }
 
 // check validates raw as the daemon does, and warns of the packages it
 // needs that the daemon at ip doesn't have.
 func (h *Handler) check(ctx context.Context, ip string, raw []byte) (checkResult, error) {
 	res := checkResult{Errors: []string{}, Warnings: []string{}}
-	dc, err := config.ParseDaemonConfigFromBytes(raw)
+	_, issues, err := inspectConfigCredentials(raw)
 	if err != nil {
 		res.Errors = append(res.Errors, err.Error())
+		res.Blocking = h.own(ip)
+		return res, nil
+	}
+	if len(issues) > 0 {
+		res.Errors, res.Blocking = issues, true
+		return res, nil
+	}
+	dc, err := config.ParseDaemonConfigFromBytes(raw)
+	if err != nil {
+		var parseErr toml.ParseError
+		if errors.As(err, &parseErr) {
+			err = safeTOMLError(err)
+		}
+		res.Errors = append(res.Errors, err.Error())
 	} else {
+		res.Errors = append(res.Errors, checkGCSAI(dc)...)
 		pkgs, err := h.packages(ctx, ip)
 		if err != nil {
 			return res, err
@@ -154,6 +206,26 @@ func (h *Handler) check(ctx context.Context, ip string, raw []byte) (checkResult
 	}
 	res.Blocking = h.own(ip) && (len(res.Errors) > 0 || len(res.Warnings) > 0)
 	return res, nil
+}
+
+// checkGCSAI validates AI options before Apply can restart the GCS.
+func checkGCSAI(dc *config.DaemonConfig) []string {
+	var issues []string
+	for _, svc := range dc.Services {
+		if svc.Plugin.Plugin != "gcs" || svc.Simulate {
+			continue
+		}
+		if value, ok := svc.Plugin.Args["ai"]; ok {
+			raw, err := json.Marshal(value)
+			if err == nil {
+				_, err = aiconfig.Parse(raw)
+			}
+			if err != nil {
+				issues = append(issues, fmt.Sprintf("%s: %s", svc.Name, err))
+			}
+		}
+	}
+	return issues
 }
 
 // formOf is the part of a parsed config the package check reads.

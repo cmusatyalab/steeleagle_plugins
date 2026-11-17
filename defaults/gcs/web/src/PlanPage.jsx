@@ -1,4 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import ChatPage from './chat/ChatPage.jsx';
+import InferredMissionPage from './inferred-mission/InferredMissionPage.jsx';
 import { TabView, TabPanel } from 'primereact/tabview';
 import { Button } from 'primereact/button';
 import { SplitButton } from 'primereact/splitbutton';
@@ -302,6 +304,9 @@ function FsmCanvas({ nodes, edges, setNodes, setEdges, eventInstances, setEventI
     );
 }
 
+const CHAT_TAB_INDEX = 4;
+const INFERRED_MISSION_TAB_INDEX = 5;
+
 function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState, visible = true }) {
     const [activeIndex, setActiveIndex] = useState(0);
     const draftNotice = useRef(null);
@@ -367,8 +372,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     useEffect(() => {
         setNodes(ns => ns.map(n => ({ ...n, data: { ...n.data, schema: schema.actions[n.data.type_name] } })));
     }, [schema]);
-    // A mission compiled for one vehicle says nothing about another.
-    useEffect(() => { setMissionCompiled(false); }, [flow.vehicle]);
+    useEffect(() => { setMissionCompiled(false); }, [flow]);
     // Compile and Build use the vehicle's driver config, when one is picked.
     const vehiclePart = flow.vehicle ? { vehicle: flow.vehicle } : {};
 
@@ -730,11 +734,23 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
             toast.current.show({ severity: 'warn', summary: 'DSL warning', detail: w, life: 8000 }));
     }
 
+    function showImportResult(parsed, summary, detail) {
+        showParseWarnings(parsed);
+        const issues = parsed.binding_errors ?? [];
+        if (issues.length) {
+            highlightErrorNodes(issues);
+            toast.current.show({ severity: 'warn', summary: 'Draft needs input',
+                detail: issues.map(issue => issue.message).join(' '), life: 10000 });
+        } else {
+            toast.current.show({ severity: 'success', summary, detail });
+        }
+    }
+
     async function parseDslText(text) {
         const resp = await fetch(getApiUrl('/api/parse_dsl'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ dsl: text, flow: dslFlow }),
+            body: JSON.stringify({ dsl: text, planning_context: getAIPlanningContext() }),
         });
         if (!resp.ok) {
             let detail = `Server error ${resp.status}`;
@@ -744,6 +760,33 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
         return resp.json();
     }
 
+    function getAIPlanningContext() {
+        const context = { ...vehiclePart, geojson: features };
+        if (dslFlow) context.flow = dslFlow;
+        else if (flow.nodes.length) {
+            context.flow_issue = catalog && (!catalog.error || catalog.daemons.length)
+                ? 'Open Flow Builder and fix the errors in the current flow.'
+                : 'Open Flow Builder and reload the flow catalog.';
+        }
+        return context;
+    }
+
+    async function applyAIArtifact(target, artifact) {
+        try {
+            if (target !== 'fsm-builder' || !artifact?.payload?.normalized_dsl) {
+                throw new Error('This reply has no DSL draft to apply.');
+            }
+            const parsed = await parseDslText(artifact.payload.normalized_dsl);
+            if (!parsed.start_id || !parsed.nodes?.length) throw new Error('The draft has no valid starting action.');
+            loadFromParsed(parsed);
+            setActiveIndex(0);
+            showImportResult(parsed, 'Applied to Mission Builder', `Loaded ${parsed.nodes.length} actions for review.`);
+        } catch (error) {
+            toast.current.show({ severity: 'error', summary: 'Could not apply draft', detail: error.message });
+            throw error;
+        }
+    }
+
     async function handleLoadDsl(file) {
         if (!file) return;
         setLoadingDsl(true);
@@ -751,8 +794,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
             const text = await file.text();
             const parsed = await parseDslText(text);
             loadFromParsed(parsed);
-            showParseWarnings(parsed);
-            toast.current.show({ severity: 'success', summary: 'DSL loaded', detail: `${parsed.nodes.length} actions, ${parsed.events.length} events` });
+            showImportResult(parsed, 'DSL loaded', `${parsed.nodes.length} actions, ${parsed.events.length} events`);
         } catch (e) {
             toast.current.show({ severity: 'error', summary: 'DSL parse error', detail: e.message });
         } finally {
@@ -766,8 +808,8 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
         try {
             const parsed = await parseDslText(dslText);
             loadFromParsed(parsed);
-            showParseWarnings(parsed);
-            toast.current.show({ severity: 'success', summary: 'DSL applied', detail: `${parsed.nodes.length} actions, ${parsed.events.length} events` });
+            setActiveIndex(0);
+            showImportResult(parsed, 'DSL applied', `${parsed.nodes.length} actions, ${parsed.events.length} events`);
         } catch (e) {
             toast.current.show({ severity: 'error', summary: 'DSL parse error', detail: e.message });
         } finally {
@@ -1044,6 +1086,13 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
                             onChange={e => { setDslEdited(true); setDslText(e.target.value); }}
                         />
                     </div>
+                </TabPanel>
+                <TabPanel header="Chat" leftIcon="pi pi-comments mr-2" headerClassName="mr-2">
+                    <ChatPage active={visible && activeIndex === CHAT_TAB_INDEX} onApplyArtifact={applyAIArtifact} getPlanningContext={getAIPlanningContext} />
+                </TabPanel>
+                <TabPanel header="Inferred Mission" leftIcon="pi pi-video mr-2" headerClassName="mr-2">
+                    <InferredMissionPage activeTab={visible && activeIndex === INFERRED_MISSION_TAB_INDEX} onApplyArtifact={applyAIArtifact}
+                        getPlanningContext={getAIPlanningContext} />
                 </TabPanel>
             </TabView>
         </>

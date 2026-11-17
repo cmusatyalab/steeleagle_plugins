@@ -253,8 +253,8 @@ describe('vehicleStatusMapColor', () => {
         expect(vehicleStatusMapColor('online')).toBe(vehicleStatusColor('online'));
     });
 
-    it('uses a muted grey (not red) for "offline" -- red markers scattered across the map read as too busy', () => {
-        expect(vehicleStatusMapColor('offline')).toBe('var(--gray-500)');
+    it('uses red for offline markers so they remain visible on satellite imagery', () => {
+        expect(vehicleStatusMapColor('offline')).toBe('var(--red-500)');
     });
 });
 
@@ -268,8 +268,8 @@ describe('vehicleStatusTextColor', () => {
         expect(vehicleStatusTextColor('selected')).toBe('#ffffff');
     });
 
-    it('stays a neutral grey scale for offline/online, independent of the blue marker chevron', () => {
-        expect(vehicleStatusTextColor('offline')).toBe('var(--gray-500)');
+    it('uses red for offline labels and light grey for online labels', () => {
+        expect(vehicleStatusTextColor('offline')).toBe(vehicleStatusMapColor('offline'));
         expect(vehicleStatusTextColor('online')).toBe('var(--gray-200)');
         expect(vehicleStatusTextColor('online')).not.toBe(vehicleStatusMapColor('online'));
     });

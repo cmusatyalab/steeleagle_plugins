@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -677,30 +678,42 @@ func TestRenderWithoutFlowKeepsEngineNamesVerbatim(t *testing.T) {
 // flow's vehicle does, and parsing it with the same flow gives back the
 // canvas's template names.
 func TestRenderAndParseDSLWithFlow(t *testing.T) {
-	s := newFlowService(t, engineFake(t), flowCatalog("100.64.0.1", "100.64.0.2"))
-	tpl := localYolo()
-	tpl.Engines = append(tpl.Engines, flows.TemplateEngine{Name: "swap03.yolo"})
-	tpl.Edges = append(tpl.Edges, flows.TemplateEdge{From: "100.64.0.1.telemetry", To: "swap03.yolo", Timeout: "1s"})
+	cat := flowCatalog("100.64.0.1", "100.64.0.2")
+	// The remote engine's legacy template alias also names the relative local
+	// engine. Parsing rendered DSL must choose the relative name.
+	cat.Daemons[0].Hostname = "local"
+	s := newFlowService(t, engineFake(t), cat)
+	tpl := &flows.Template{
+		Vehicle:   "100.64.0.2.charlie",
+		Producers: []flows.TemplateProducer{{Name: "100.64.0.2.telemetry"}},
+		Engines:   []flows.TemplateEngine{{Name: "swap03.yolo"}, {Name: "local.yolo"}},
+		Edges: []flows.TemplateEdge{
+			{From: "100.64.0.2.telemetry", To: "swap03.yolo", Timeout: "1s"},
+			{From: "100.64.0.2.telemetry", To: "local.yolo", Timeout: "1s"},
+		},
+	}
 	for engine, ident := range map[string]string{
-		"100.64.0.1.yolo": "DetectionEngine_local_yolo",
-		"swap03.yolo":     "DetectionEngine_remote_yolo",
+		"swap03.yolo": "DetectionEngine_local_yolo",
+		"local.yolo":  "DetectionEngine_remote_yolo",
 	} {
 		rec := do(s.ServeRenderDSL, "POST", "/api/render_dsl", trackBody(t, engine, tpl, nil))
 		if rec.Code != 200 {
 			t.Fatalf("render %s: status %d: %s", engine, rec.Code, rec.Body)
 		}
 		dsl := decodeMap(t, rec)["dsl"].(string)
-		if !strings.Contains(dsl, ident) || strings.Contains(dsl, "100_64") || strings.Contains(dsl, "swap03") {
+		if !strings.Contains(dsl, ident) || strings.Contains(dsl, "swap03") || strings.Contains(dsl, "local.yolo") {
 			t.Fatalf("render %s: want %s, got\n%s", engine, ident, dsl)
 		}
-		body, _ := json.Marshal(map[string]any{"dsl": dsl, "flow": tpl})
-		rec = do(s.ServeParseDSL, "POST", "/api/parse_dsl", body)
-		if rec.Code != 200 {
-			t.Fatalf("parse %s: status %d: %s", engine, rec.Code, rec.Body)
+		for _, input := range []string{dsl, strings.Replace(dsl, ident, strconv.Quote(engine), 1)} {
+			body, _ := json.Marshal(map[string]any{"dsl": input, "flow": tpl})
+			rec = do(s.ServeParseDSL, "POST", "/api/parse_dsl", body)
+			if rec.Code != 200 {
+				t.Fatalf("parse %s: status %d: %s", engine, rec.Code, rec.Body)
+			}
+			g := decodeMap(t, rec)
+			eq(t, g["nodes"].([]any)[0].(map[string]any)["params"].(map[string]any)["Engine"], engine)
+			eq(t, g["warnings"], []any{})
 		}
-		g := decodeMap(t, rec)
-		eq(t, g["nodes"].([]any)[0].(map[string]any)["params"].(map[string]any)["Engine"], engine)
-		eq(t, g["warnings"], []any{})
 	}
 }
 

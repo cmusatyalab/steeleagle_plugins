@@ -6,7 +6,9 @@ package flows
 import (
 	"errors"
 	"fmt"
+	"slices"
 
+	"github.com/BurntSushi/toml"
 	"github.com/cmusatyalab/steeleagle/config"
 )
 
@@ -93,18 +95,34 @@ func ParseDriver(conf []byte) (streams []Stream, problems []string, err error) {
 	if p.Driver == nil {
 		return nil, nil, errors.New("plugin file has no [driver] table")
 	}
+	// Older installed driver packages, including Aviary, name the camera
+	// output `type`. Prefer `output` when the driver declares both.
+	var legacy struct {
+		Driver struct {
+			Cameras []struct{ Type string } `toml:"cameras"`
+		} `toml:"driver"`
+	}
+	if slices.ContainsFunc(p.Driver.Cameras, func(c config.DriverCamera) bool { return c.Output == "" }) {
+		if _, err := toml.Decode(string(conf), &legacy); err != nil {
+			return nil, nil, fmt.Errorf("legacy camera output is invalid: %w", err)
+		}
+	}
 	streams = []Stream{telemetryStream()}
-	for _, c := range p.Driver.Cameras {
+	for i, c := range p.Driver.Cameras {
+		output := c.Output
+		if output == "" && i < len(legacy.Driver.Cameras) {
+			output = legacy.Driver.Cameras[i].Type
+		}
 		switch {
 		case c.Name == "":
 			problems = append(problems, "a camera has no name; skipped")
-		case c.Output == "":
+		case output == "":
 			problems = append(problems, fmt.Sprintf("camera %q has no output type; skipped", c.Name))
 		case hasStream(streams, c.Name):
 			problems = append(problems, fmt.Sprintf("camera %q duplicates the %s stream; skipped", c.Name, c.Name))
 		default:
 			streams = append(streams, Stream{
-				Name: c.Name, Kind: "camera", Type: c.Output, Primary: c.Primary,
+				Name: c.Name, Kind: "camera", Type: output, Primary: c.Primary,
 				Description: c.Description,
 				HRes:        optInt(c.HRes), VRes: optInt(c.VRes), FPS: optInt(c.Fps),
 			})

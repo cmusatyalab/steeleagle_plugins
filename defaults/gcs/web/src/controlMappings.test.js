@@ -2,8 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { CONTROL_MAPPINGS } from './controlMappings.js';
 
 describe('CONTROL_MAPPINGS', () => {
-  it('has exactly 12 rows', () => {
-    expect(CONTROL_MAPPINGS).toHaveLength(12);
+  it('includes both gimbal pitch mappings matching App.jsx', () => {
+    expect(CONTROL_MAPPINGS).toEqual(expect.arrayContaining([
+      { action: 'Gimbal Pitch Up', keyboard: 'R', gamepad: 'D-Pad Up (12)' },
+      { action: 'Gimbal Pitch Down', keyboard: 'F', gamepad: 'D-Pad Down (13)' },
+    ]));
   });
 
   it('every row has a non-empty action', () => {

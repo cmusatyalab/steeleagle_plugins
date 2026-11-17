@@ -351,8 +351,26 @@ func typedDefault(kind, value string) any {
 //
 // An engine field's value names a flow engine. With a nil engines map the name
 // is used as written; otherwise it must be a key of engines, and its value (the
-// engine's full resolved name) is what the generated constant names.
+// engine's resolved name) is what the generated constant names.
 func GraphToAst(g Graph, ix *TypeIndex, header map[string]any, engines map[string]string) (map[string]any, error) {
+	return graphToAstWithMode(g, ix, header, engines, resolvedEngineNames)
+}
+
+// graphToPortableAst preserves template engine names for a DSL import/export
+// round trip. The compiler path resolves them to SDK constants separately.
+func graphToPortableAst(g Graph, ix *TypeIndex, header map[string]any) (map[string]any, error) {
+	return graphToAstWithMode(g, ix, header, nil, portableEngineNames)
+}
+
+type engineNamesMode int
+
+const (
+	resolvedEngineNames engineNamesMode = iota
+	portableEngineNames
+	previewEngineNames
+)
+
+func graphToAstWithMode(g Graph, ix *TypeIndex, header map[string]any, engines map[string]string, mode engineNamesMode) (map[string]any, error) {
 	type block struct {
 		action string
 		rules  []any
@@ -371,7 +389,7 @@ func GraphToAst(g Graph, ix *TypeIndex, header map[string]any, engines map[strin
 
 	actionDecls := []any{}
 	for _, n := range g.Nodes {
-		d, err := astDecl(ix, "actions", n, engines)
+		d, err := astDecl(ix, "actions", n, engines, mode)
 		if err != nil {
 			return nil, err
 		}
@@ -379,7 +397,7 @@ func GraphToAst(g Graph, ix *TypeIndex, header map[string]any, engines map[strin
 	}
 	eventDecls := []any{}
 	for _, e := range g.Events {
-		d, err := astDecl(ix, "events", GraphNode(e), engines)
+		d, err := astDecl(ix, "events", GraphNode(e), engines, mode)
 		if err != nil {
 			return nil, err
 		}
@@ -390,6 +408,9 @@ func GraphToAst(g Graph, ix *TypeIndex, header map[string]any, engines map[strin
 		"Imports": header["Imports"],
 		"Actions": map[string]any{"Decls": actionDecls},
 		"Events":  map[string]any{"Decls": eventDecls},
+	}
+	if climbDeclaration(ast) != nil {
+		addClimbImport(ast)
 	}
 	if g.StartID != nil && *g.StartID != "" {
 		bs := []any{}
@@ -422,7 +443,7 @@ func orderedParams(ix *TypeIndex, qualified string, params map[string]any) []str
 	return append(keys, rest...)
 }
 
-func astDecl(ix *TypeIndex, sec string, instance GraphNode, engines map[string]string) (map[string]any, error) {
+func astDecl(ix *TypeIndex, sec string, instance GraphNode, engines map[string]string, mode engineNamesMode) (map[string]any, error) {
 	qualified, ok := ix.Qualify(sec, instance.TypeName)
 	if !ok {
 		qualified = instance.TypeName
@@ -430,7 +451,9 @@ func astDecl(ix *TypeIndex, sec string, instance GraphNode, engines map[string]s
 	attrs := []any{}
 	for _, key := range orderedParams(ix, qualified, instance.Params) {
 		goType, _ := ix.FieldType(qualified, key)
-		value, err := astValue(ix, goType, instance.Params[key], &engineCtx{engines, instance.InstanceID, key})
+		value, err := astValue(ix, goType, instance.Params[key], &engineCtx{
+			engines: engines, mode: mode, node: instance.InstanceID, field: key,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -469,6 +492,7 @@ func isIntLiteral(s string) bool { return !strings.ContainsAny(s, ".eE") }
 // value sits in, for the error.
 type engineCtx struct {
 	engines map[string]string
+	mode    engineNamesMode
 	node    string
 	field   string
 }
@@ -488,6 +512,9 @@ func astValue(ix *TypeIndex, goType string, value any, ec *engineCtx) (map[strin
 		return map[string]any{"Ident": fmt.Sprintf("%s_%v", goType, value)}, nil
 	}
 	if s, isStr := value.(string); kind == "engine" && isStr {
+		if ec.mode == portableEngineNames || ec.mode == previewEngineNames && placeholder(s, goType) {
+			return map[string]any{"String": s}, nil
+		}
 		full := s
 		if ec.engines != nil {
 			var ok bool
@@ -509,7 +536,7 @@ func astValue(ix *TypeIndex, goType string, value any, ec *engineCtx) (map[strin
 			if t == "" {
 				t = "unknown"
 			}
-			return nil, fmt.Errorf("an object was given for a field of type %s", t)
+			return nil, fmt.Errorf("%s.%s: expected %s, got an object", ec.node, ec.field, t)
 		}
 		args := []any{}
 		for _, key := range orderedParams(ix, goType, obj) {
@@ -685,6 +712,10 @@ func GraphRoles(g Graph) []string { return nil }
 // stores; nil keeps the suffix as it is. An engine missing from a non-nil
 // map keeps its suffix and is warned about.
 func AstToGraph(ast map[string]any, ix *TypeIndex, engines map[string]string) map[string]any {
+	return astToGraph(ast, ix, engines, true)
+}
+
+func astToGraph(ast map[string]any, ix *TypeIndex, engines map[string]string, warnUnknownEngines bool) map[string]any {
 	warnings := []any{}
 	data := map[string]map[string]any{}
 	var dataOrder []string
@@ -697,7 +728,10 @@ func AstToGraph(ast map[string]any, ix *TypeIndex, engines map[string]string) ma
 		data[name] = m
 	}
 	used := map[string]bool{}
-	fc := &fromCtx{ix: ix, data: data, used: used, engines: engines, warnings: &warnings}
+	fc := &fromCtx{ix: ix, data: data, used: used, engines: engines}
+	if warnUnknownEngines {
+		fc.engineWarnings = &warnings
+	}
 
 	instances := func(stanza, sec string) []any {
 		out := []any{}
@@ -788,11 +822,11 @@ func typeKey(ix *TypeIndex, sec, typeName string, warnings *[]any) string {
 // decls by name, which of them got used, the engine names (see AstToGraph),
 // and the warnings to add to.
 type fromCtx struct {
-	ix       *TypeIndex
-	data     map[string]map[string]any
-	used     map[string]bool
-	engines  map[string]string
-	warnings *[]any
+	ix             *TypeIndex
+	data           map[string]map[string]any
+	used           map[string]bool
+	engines        map[string]string
+	engineWarnings *[]any
 }
 
 func (fc *fromCtx) attrs(owner string, attrs any) map[string]any {
@@ -809,13 +843,12 @@ func (fc *fromCtx) attrs(owner string, attrs any) map[string]any {
 // engine is the canvas's name for the engine an ident of goType names.
 func (fc *fromCtx) engine(goType, ident string) string {
 	suffix := strings.TrimPrefix(Bare(ident), Bare(goType)+"_")
-	if fc.engines == nil {
-		return suffix
-	}
-	if name, ok := fc.engines[suffix]; ok {
+	if name := fc.engines[suffix]; name != "" {
 		return name
 	}
-	*fc.warnings = append(*fc.warnings, fmt.Sprintf("Engine %s is not in the flow", ident))
+	if fc.engines != nil && fc.engineWarnings != nil {
+		*fc.engineWarnings = append(*fc.engineWarnings, fmt.Sprintf("Engine %s is not in the flow", ident))
+	}
 	return suffix
 }
 

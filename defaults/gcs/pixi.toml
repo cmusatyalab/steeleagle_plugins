@@ -22,7 +22,7 @@ nodejs = ">=22"
 pkg-config = "*"
 # Download liburiel (tools/uriel-install.sh)
 curl = "*"
-# Generates the mock harness's video clips (cmd/gcsmock)
+# Inferred Mission probing/decoding and the mock harness's video clips
 ffmpeg = "*"
 
 [activation.env]
@@ -51,7 +51,7 @@ outputs = ["web/dist/**"]
 [tasks.build]
 cmd = "go build -trimpath -o bin/gcs ./cmd/gcs"
 depends-on = ["web-build", "uriel"]
-inputs = ["go.mod", "go.sum", "**/*.go"]
+inputs = ["go.mod", "go.sum", "**/*.go", "internal/inferredmission/prompts/*.md"]
 outputs = ["bin/gcs"]
 
 # The start task is what the plugin runner invokes; the plugin's args come in
@@ -61,7 +61,7 @@ cmd = "./bin/gcs -web web/dist"
 depends-on = ["build"]
 
 # The mock harness: a fake daemon with simulated vehicles, which runs the GCS as
-# its child (see cmd/gcsmock)
+# its child (see cmd/gcsmock). Pass -ai-config /path/to/ai.json to override AI settings.
 [tasks.build-mock]
 cmd = "go build -trimpath -o bin/gcsmock ./cmd/gcsmock"
 depends-on = ["uriel"]
@@ -69,7 +69,7 @@ inputs = ["go.mod", "go.sum", "**/*.go"]
 outputs = ["bin/gcsmock"]
 
 [tasks.mock]
-cmd = "./bin/gcsmock -gcs bin/gcs -web web/dist"
+cmd = "./bin/gcsmock -gcs bin/gcs -web web/dist -gcs-manifest gcs.plugin.toml"
 depends-on = ["build", "build-mock"]
 
 # The mock harness's end-to-end test runs bin/gcs, so the server is built first

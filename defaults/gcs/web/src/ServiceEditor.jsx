@@ -23,7 +23,7 @@ const SEP = '\u0000';
 // fields to theirs. hasSimulator is whether the config has a [simulator],
 // which a simulated service needs; simPackage is its package, which a newly
 // simulated service's plugin is taken from.
-function ServiceEditor({ svc, packages, hasSimulator, simPackage, errors = {}, expanded, onToggle, onChange, onRemove, onDuplicate, disabled }) {
+function ServiceEditor({ svc, packages, hasSimulator, simPackage, errors = {}, expanded, onToggle, onChange, onRemove, onDuplicate, disabled, currentGCS }) {
     const pluginOptions = (packages ?? []).flatMap((p) => p.plugins.map((pl) => ({
         label: `${pl.name} — ${p.uri}`,
         value: `${p.uri}${SEP}${pl.name}`,
@@ -115,7 +115,8 @@ function ServiceEditor({ svc, packages, hasSimulator, simPackage, errors = {}, e
                             </div>
                             <div className="flex flex-column gap-1">
                                 <span className="font-semibold text-sm">Plugin args</span>
-                                <ArgsEditor args={svc.args} errors={errors.args ?? {}} onChange={(args) => onChange({ ...svc, args })} disabled={disabled} />
+                                <ArgsEditor args={svc.args} errors={errors.args ?? {}} onChange={(args) => onChange({ ...svc, args })}
+                                    gcsAI={svc.type === 'engine' && svc.plugin === 'gcs'} currentGCS={currentGCS} disabled={disabled} />
                             </div>
                         </>
                     )}

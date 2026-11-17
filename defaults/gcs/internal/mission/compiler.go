@@ -2,11 +2,15 @@ package mission
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,8 +19,10 @@ import (
 )
 
 const (
-	sdkModulePath = "github.com/cmusatyalab/steeleagle/sdk"
-	defaultTimeS  = 300
+	sdkModulePath   = "github.com/cmusatyalab/steeleagle/sdk"
+	climbModulePath = "github.com/cmusatyalab/steeleagle_plugins/gcsactions"
+	climbActionType = "gcsactions.ClimbToAltitude"
+	defaultTimeS    = 300
 )
 
 // defaultImports are the packages every mission imports; configured imports
@@ -266,10 +272,6 @@ func (s *sdkCompiler) run(ctx context.Context, fn func() ([]byte, error)) ([]byt
 }
 
 func (s *sdkCompiler) sdkRegistry(plugin []byte) ([]byte, error) {
-	hdr, err := json.Marshal(s.cfg.Header())
-	if err != nil {
-		return nil, err
-	}
 	w, err := compiler.NewWorkspace(nil)
 	if err != nil {
 		return nil, err
@@ -279,6 +281,21 @@ func (s *sdkCompiler) sdkRegistry(plugin []byte) ([]byte, error) {
 	if plugin != nil {
 		opts = append(opts, buildtools.WithPlugin(plugin))
 	}
+	header := s.cfg.Header()
+	missing, err := missingClimbCapability(plugin)
+	if err != nil {
+		return nil, err
+	}
+	if missing == "" {
+		addClimbImport(header)
+		if err := addClimbModule(w.Dir, header); err != nil {
+			return nil, err
+		}
+	}
+	hdr, err := json.Marshal(header)
+	if err != nil {
+		return nil, err
+	}
 	out, errs := w.Load(compiler.FromJson(hdr), opts...)
 	if err := convertErrors(errs); err != nil {
 		return nil, err
@@ -287,9 +304,19 @@ func (s *sdkCompiler) sdkRegistry(plugin []byte) ([]byte, error) {
 }
 
 func (s *sdkCompiler) sdkBuild(req BuildRequest) ([]byte, error) {
-	ast, err := json.Marshal(req.Ast)
-	if err != nil {
-		return nil, err
+	ast := req.Ast
+	decl := climbDeclaration(ast)
+	if decl != nil {
+		missing, err := missingClimbCapability(req.Plugin)
+		if err != nil {
+			return nil, err
+		}
+		if missing != "" {
+			return nil, &CompileErrors{Errors: []DeclError{{
+				Decl:    asStr(decl["Name"]),
+				Message: fmt.Sprintf("ClimbToAltitude requires driver capability %s", missing),
+			}}}
+		}
 	}
 	// The output goes outside the workspace, which Close removes.
 	f, err := os.CreateTemp("", "mission-*.bin")
@@ -304,10 +331,99 @@ func (s *sdkCompiler) sdkBuild(req BuildRequest) ([]byte, error) {
 		return nil, err
 	}
 	defer w.Close()
-	if err := convertErrors(w.Compile(compiler.FromJson(ast), opts...)); err != nil {
+	if decl != nil {
+		ast = maps.Clone(ast)
+		addClimbImport(ast)
+		if err := addClimbModule(w.Dir, ast); err != nil {
+			return nil, err
+		}
+	}
+	encoded, err := json.Marshal(ast)
+	if err != nil {
+		return nil, err
+	}
+	if err := convertErrors(w.Compile(compiler.FromJson(encoded), opts...)); err != nil {
 		return nil, err
 	}
 	return os.ReadFile(f.Name())
+}
+
+//go:embed sdkextension/climb.go
+var climbSource []byte
+
+func climbDeclaration(ast map[string]any) map[string]any {
+	for _, item := range astDecls(ast, "Actions") {
+		decl := asMap(item)
+		if decl["Type"] == climbActionType {
+			return decl
+		}
+	}
+	return nil
+}
+
+func addClimbImport(ast map[string]any) {
+	imports := asList(asMap(ast["Imports"])["Imports"])
+	for _, imp := range imports {
+		if asMap(imp)["Path"] == climbModulePath {
+			return
+		}
+	}
+	ast["Imports"] = map[string]any{"Imports": append(slices.Clone(imports), map[string]any{"Path": climbModulePath})}
+}
+
+// addClimbModule provides the bundled action to the Go workspace without
+// exposing filesystem paths in rendered missions. Explicit overrides win.
+func addClimbModule(workspace string, ast map[string]any) error {
+	modules := asList(asMap(ast["Modules"])["Modules"])
+	for _, mod := range modules {
+		if asMap(mod)["Path"] == climbModulePath {
+			return nil
+		}
+	}
+	dir := filepath.Join(workspace, "gcsactions")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module "+climbModulePath+"\n\ngo 1.26.5\n"), 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "climb.go"), climbSource, 0o600); err != nil {
+		return err
+	}
+	ast["Modules"] = map[string]any{"Modules": append(slices.Clone(modules), map[string]any{
+		"Path": climbModulePath, "Override": dir,
+	})}
+	return nil
+}
+
+func missingClimbCapability(plugin []byte) (string, error) {
+	if plugin == nil {
+		return "", nil
+	}
+	cfg, errs := buildtools.NewConfig(buildtools.WithPlugin(plugin))
+	if err := convertErrors(errs); err != nil {
+		return "", err
+	}
+	for _, capability := range []string{
+		"steeleagle_protocol/v1/services/driver/ControlService/SetRelativePositionTarget",
+		"steeleagle_protocol/v1/services/driver/SetRelativePositionTargetRequest/position",
+		"steeleagle_protocol/v1/services/driver/SetRelativePositionTargetRequest/frame",
+		"steeleagle_protocol/v1/services/driver/ReferenceFrame/REFERENCE_FRAME_BODY",
+		// SDK v0.1.3 checks this spelling when exposing ReferenceFrameBody.
+		"steeleagle_protocol/v1/services/control/ReferenceFrame/REFERENCE_FRAME_BODY",
+		"steeleagle_protocol/v1/services/driver/StreamService/StreamTelemetry",
+		"steeleagle_protocol/v1/messages/telemetry/Telemetry/timestamp",
+		"steeleagle_protocol/v1/messages/telemetry/Telemetry/position_info",
+		"steeleagle_protocol/v1/messages/telemetry/PositionInfo/relative_position",
+		"steeleagle_protocol/v1/messages/telemetry/PositionInfo/relative_position/z",
+		"steeleagle_protocol/v1/messages/telemetry/Telemetry/motion_status",
+		"steeleagle_protocol/v1/messages/telemetry/MotionStatus/MOTION_STATUS_HOLDING",
+	} {
+		if !cfg.Cap.Supports(capability) {
+			return capability, nil
+		}
+	}
+	return "", nil
 }
 
 // buildOptions returns the SDK build options for req, writing to output.

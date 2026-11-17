@@ -9,6 +9,20 @@ export const MISSION_DRAFT_VERSION = 1;
 
 const EMPTY_FEATURES = JSON.stringify({ type: 'FeatureCollection', features: [] });
 
+// Older dropdowns could store their selectable empty row instead of null.
+const legacyEmptyOptions = new Set([
+    '(no values)',
+    '(add a matching engine on the Flow Builder tab)',
+    '(draw an area on the Map tab)',
+]);
+
+function reviveDraftValue(_key, value) {
+    if (value?.value === null && legacyEmptyOptions.has(value.label) && Object.keys(value).length === 2) {
+        return null;
+    }
+    return value;
+}
+
 export function emptyMissionDraft() {
     return { nodes: [], edges: [], eventInstances: [], startNodeId: null, features: EMPTY_FEATURES };
 }
@@ -19,7 +33,7 @@ export function loadMissionDraft() {
     try {
         const raw = localStorage.getItem(MISSION_DRAFT_KEY);
         if (!raw) return emptyMissionDraft();
-        const d = JSON.parse(raw);
+        const d = JSON.parse(raw, reviveDraftValue);
         if (d?.version !== MISSION_DRAFT_VERSION) return emptyMissionDraft();
         if (!Array.isArray(d.nodes) || !Array.isArray(d.edges) || !Array.isArray(d.eventInstances)) {
             return emptyMissionDraft();
