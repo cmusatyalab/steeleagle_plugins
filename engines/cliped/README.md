@@ -3,7 +3,7 @@
 SteelEagle engine plugins for prompt-guided edge filtering:
 
 - `cliped.plugin.toml`, the edge filter: each camera frame (`RawFrame`) is cut into overlapping square tiles, every tile is scored against a text or image prompt with MobileCLIP2-S0, the frame's best tile is sent to the remote verifier, and the tiles worth sending wait in a prioritized send queue until the verifier has them, sent again by the engine's `reintegration` producer.
-- `verifier.plugin.toml`, the verifier: asks a vision-language model on Ollama (Qwen3-VL 8B Instruct by default) whether each tile matches the prompt, and forwards it if so, dropping it if not. Its answer goes back to cliped, which learns from it.
+- `verifier.plugin.toml`, the verifier: asks a vision-language model on Ollama (Qwen3-VL 30B-A3B Instruct by default) whether each tile matches the prompt, and forwards it if so, dropping it if not. Its answer goes back to cliped, which learns from it.
 - `box_rerank.plugin.toml`, the box reranker: decides which of a local detector's boxes, if any, is the target, by what the verifier said about boxes like it, and sends the boxes it has not heard about to the verifier off the frame path. See [box_rerank](#box_rerank).
 
 eagled picks one with `STEELEAGLE_PLUGIN`; unset runs the edge filter.
@@ -91,7 +91,7 @@ It needs an Ollama server (`ollama serve`); at startup it pulls the model if the
 | --- | --- | --- |
 | `prompt` | | What to look for, as a noun phrase; this or `image` is required, unless `live` holds the prompt |
 | `image` | | An image of what to look for, instead of `prompt`: a file in `STEELEAGLE_FILES`. With both set, `image` is used |
-| `model` | `qwen3-vl:8b-instruct` | Ollama model to ask |
+| `model` | `qwen3-vl:30b-a3b-instruct` | Ollama model to ask. A mixture of experts (~3B parameters active per token): as fast as `qwen3-vl:8b-instruct` and in 19 GB of GPU memory at the default `num_ctx`, but far better at small aerial crops |
 | `host` | | Ollama server URL; blank uses `OLLAMA_HOST`, or `http://localhost:11434` |
 | `timeout_ms` | `30000` | Wait for the model's answer about one frame before dropping it |
 | `question` | | The question asked about each frame, instead of the default one; `{prompt}` in it is replaced by `prompt` (or the image's name). With `image`, the model sees the reference first and the frame second. Anything but a yes drops the frame. `box` asks about the object in the red box, for box_rerank's crops: whether it is `prompt`, or, with `image`, the reference's target |
@@ -99,6 +99,7 @@ It needs an Ollama server (`ollama serve`); at startup it pulls the model if the
 | `min_side` | `0` | Enlarge each frame so its shorter side is at least this many pixels before the model sees it (box_rerank's small crops); 0 for as is |
 | `live` | | A live directory under `STEELEAGLE_FILES` to take the question and prompt from (see below); blank for none |
 | `heartbeat` | `1.0` | Seconds between prompt heartbeats (see below) |
+| `num_ctx` | `4096` | Tokens of context the model is loaded with; `0` for Ollama's default, the model's full context (262144 for Qwen3-VL), whose cache takes far more GPU memory (42 GB for `qwen3-vl:8b-instruct`, against 5.8 GB at 4096). A request needs well under 4096 |
 
 With `live`, the verifier watches `STEELEAGLE_FILES/<live>/`. At startup, `question.txt` and the prompt there win over the `question`, `prompt` and `image` args; afterwards it reads them again whenever they change (checked every heartbeat), so the target can change mid-mission. The prompt is `prompt.jpg` or `prompt.jpeg` (the newer, if both) when there is one, else `prompt.txt`. A file or the whole directory removed changes nothing: the verifier keeps what it last read. A question with anything but `{prompt}` in braces is ignored.
 

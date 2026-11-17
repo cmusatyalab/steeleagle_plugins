@@ -1,5 +1,5 @@
 """The verifier engine: asks a vision-language model served by Ollama (Qwen3-VL
-8B Instruct by default) whether each RawFrame matches the prompt, forwards the frame
+30B-A3B Instruct by default) whether each RawFrame matches the prompt, forwards the frame
 if it does and drops it if not.
 
 The prompt is text, or a reference image; with an image, the model is shown
@@ -35,7 +35,12 @@ from steeleagle_protocol.v1.messages.result import result_pb2
 
 logger = logging.getLogger("cliped.verifier")
 
-DEFAULT_MODEL = "qwen3-vl:8b-instruct"
+# A mixture of experts: 30B parameters, ~3B active per token, so it answers as
+# fast as the 8B (317 ms against 358 ms per crop on an RTX 4090) and fits in
+# 19 GB at NUM_CTX. On 147 labeled live crops of a robot dog it said yes to
+# 46 of 67 dog crops (the 8B: 18) and to 4 of 80 others (the 8B: 2), and kept
+# finding the dog in poor light, where the 8B found none
+DEFAULT_MODEL = "qwen3-vl:30b-a3b-instruct"
 DEFAULT_HOST = "http://localhost:11434"
 # Room for the result; the verifier forwards its input as is.
 MAX_OUTPUT_SIZE = 64 << 10
@@ -55,10 +60,16 @@ PROMPT_IMAGE_FILES = ("prompt.jpg", "prompt.jpeg")
 # box_rerank's crops by, which it does far better with text than with an image
 DESCRIBE_QUESTION = (
     "Describe the person or object in this image as a short phrase for an image search that must find it "
-    "from a drone, e.g. 'a person in a red shirt and green shorts' or 'a quadruped robot dog'. Name only "
-    "what is visible from above at a distance: what it is, and the colors of its clothing, hair or body. "
-    "Answer with the phrase only, under 15 words."
+    "from a drone, e.g. 'a person in a red shirt and green shorts' or 'a quadruped robot dog'. Describe only "
+    "the person or object itself, not the ground, background or what it is doing; only colors and shapes "
+    "visible from far above. Answer with the phrase only, under 15 words."
 )
+# Tokens of context the model is loaded with. A request is one or two small
+# images, a question and an answer of a few words, well under 4096; Ollama's
+# default (the model's full context, 262144 for Qwen3-VL) reserves a KV cache
+# that took qwen3-vl:8b-instruct to 42 GB of GPU memory, against 5.8 GB at
+# 4096, and leaves no room for a larger model on lambda's two 24 GB GPUs
+NUM_CTX = 4096
 # Longest side of the reference image sent to the model, in pixels. A phone
 # photo at full size costs a 30 MB PNG and twice the prompt tokens on every
 # frame, for no better answer.
@@ -106,14 +117,16 @@ class OllamaError(Exception):
 
 
 class Ollama:
-    """A client of the Ollama server at `host`, for `model`."""
+    """A client of the Ollama server at `host`, for `model`, loaded with a
+    context of `num_ctx` tokens (0 for the server's default)."""
 
-    def __init__(self, host=DEFAULT_HOST, model=DEFAULT_MODEL, timeout_s=30.0):
+    def __init__(self, host=DEFAULT_HOST, model=DEFAULT_MODEL, timeout_s=30.0, num_ctx=NUM_CTX):
         self.host = host.rstrip("/")
         if "://" not in self.host:
             self.host = f"http://{self.host}"
         self.model = model
         self.timeout_s = timeout_s
+        self.num_ctx = num_ctx
 
     def _post(self, path, body, timeout_s):
         request = urllib.request.Request(
@@ -155,6 +168,10 @@ class Ollama:
             "keep_alive": -1,  # keep it loaded between frames
             "options": {"temperature": 0, "num_predict": max_tokens},
         }
+        if self.num_ctx:
+            # Every request asks for the same context: Ollama reloads the
+            # model when it changes
+            body["options"]["num_ctx"] = self.num_ctx
         reply = self._post("/api/chat", body, self.timeout_s)
         try:
             return reply["message"]["content"]

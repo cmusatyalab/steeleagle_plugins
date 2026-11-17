@@ -57,7 +57,7 @@ DEFAULTS = {
 VERIFIER_DEFAULTS = {
     "prompt": "",
     "image": "",
-    "model": "qwen3-vl:8b-instruct",
+    "model": "qwen3-vl:30b-a3b-instruct",
     "host": "",
     "timeout_ms": 30000,
     "log_tiles": False,
@@ -65,6 +65,7 @@ VERIFIER_DEFAULTS = {
     "min_side": 0,
     "live": "",
     "heartbeat": 1.0,
+    "num_ctx": 4096,
 }
 # Defaults of the args of box_rerank.plugin.toml
 RERANK_DEFAULTS = {
@@ -282,6 +283,7 @@ def parse_verifier_args(content):
     if not isinstance(args["log_tiles"], bool):
         raise ConfigError("log_tiles must be true or false")
     _positive_int(args, "min_side", 0)
+    _positive_int(args, "num_ctx", 0)
     _number(args, "heartbeat", 0, 3600, low_open=True)
     return args
 
@@ -528,7 +530,7 @@ def main_verifier(name):
     except (ConfigError, FilesError, ValueError) as err:
         sys.exit(f"Bad args for the verifier engine: {err}")
     host = args["host"] or os.environ.get("OLLAMA_HOST") or DEFAULT_HOST
-    ollama = Ollama(host, args["model"], timeout_s=args["timeout_ms"] / 1000)
+    ollama = Ollama(host, args["model"], timeout_s=args["timeout_ms"] / 1000, num_ctx=args["num_ctx"])
     try:
         ollama.ensure_model()
     except OllamaError as err:

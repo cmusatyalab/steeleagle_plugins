@@ -1,7 +1,7 @@
 [plugin]
 name = "CLIP Edge Filter Verifier"
 type = "engine"
-description = "Asks a vision-language model on Ollama (Qwen3-VL 8B Instruct by default) whether each frame, e.g. a tile from the CLIP edge filter, matches a text or image prompt; forwards the frames that do and drops the rest"
+description = "Asks a vision-language model on Ollama (Qwen3-VL 30B-A3B Instruct by default) whether each frame, e.g. a tile from the CLIP edge filter, matches a text or image prompt; forwards the frames that do and drops the rest"
 
 [[args]]
 name = "prompt"
@@ -19,7 +19,7 @@ default = ""
 name = "model"
 type = "string"
 description = "Ollama model to ask; pulled at startup if the server does not have it"
-default = "qwen3-vl:8b-instruct"
+default = "qwen3-vl:30b-a3b-instruct"
 
 [[args]]
 name = "host"
@@ -50,6 +50,12 @@ name = "log_tiles"
 type = "boolean"
 description = "Write each input frame to STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg and each frame forwarded to STEELEAGLE_FILES/<engine>/out/<frame id>_0.jpeg, as JPEG at quality 75"
 default = false
+
+[[args]]
+name = "num_ctx"
+type = "number"
+description = "Tokens of context the model is loaded with; 0 for Ollama's default, the model's full context (262144 for Qwen3-VL), whose cache takes far more GPU memory: 42 GB for qwen3-vl:8b-instruct, against 5.8 GB at 4096. A request needs well under 4096"
+default = 4096
 
 [[args]]
 name = "live"

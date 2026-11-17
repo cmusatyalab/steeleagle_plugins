@@ -75,7 +75,7 @@ def test_log_tiles_writes_inputs_and_the_frames_forwarded(tmp_path):
 
 def test_verifier_args():
     args = main.parse_verifier_args(json.dumps({"prompt": "a tarp"}))
-    assert (args["model"], args["timeout_ms"], args["log_tiles"]) == ("qwen3-vl:8b-instruct", 30000, False)
+    assert (args["model"], args["timeout_ms"], args["log_tiles"]) == ("qwen3-vl:30b-a3b-instruct", 30000, False)
     args = main.parse_verifier_args(json.dumps({"prompt": "a tarp", "image": "t.jpg"}))
     assert (args["prompt"], args["image"]) == ("", "t.jpg")
     assert main.parse_verifier_args(json.dumps({"prompt": "a tarp"}))["question"] == ""
@@ -275,3 +275,23 @@ def test_the_live_directory_must_be_inside_the_files_directory(tmp_path):
     for bad in ("../elsewhere", "/abs", "", "."):
         with pytest.raises(FilesError):
             resolve_dir(tmp_path, bad)
+
+
+def test_the_model_is_loaded_with_a_small_context(monkeypatch):
+    from cliped.verifier import Ollama
+
+    sent = []
+
+    def post(self, path, body, timeout_s):
+        sent.append(body)
+        return {"message": {"content": "yes"}}
+
+    monkeypatch.setattr(Ollama, "_post", post)
+    Ollama("localhost:11434", "m").ask("q?", [b"png"])
+    Ollama("localhost:11434", "m", num_ctx=0).ask("q?", [b"png"])
+    assert sent[0]["options"]["num_ctx"] == 4096
+    assert "num_ctx" not in sent[1]["options"]  # Ollama's default
+    assert main.parse_verifier_args(json.dumps({"prompt": "p"}))["num_ctx"] == 4096
+    for bad in (-1, 1.5, "4096"):
+        with pytest.raises(main.ConfigError):
+            main.parse_verifier_args(json.dumps({"prompt": "p", "num_ctx": bad}))
