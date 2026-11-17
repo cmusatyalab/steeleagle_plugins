@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/feed"
 )
 
 const (
@@ -24,13 +26,9 @@ type EncodedFrame struct {
 	Data                   []byte
 	CapturedAt, ReceivedAt time.Time
 	ID                     uint64
+	Session, Seq           uint64
 	Keyframe               bool
-	RelativeAltitude       *float64
-}
-
-type altitudeReading struct {
-	meters float64
-	at     time.Time
+	Motion                 MotionEvidence
 }
 
 type liveInput struct {
@@ -39,7 +37,7 @@ type liveInput struct {
 	stop     chan struct{}
 	stopOnce sync.Once
 	dropped  atomic.Uint64
-	altitude atomic.Pointer[altitudeReading]
+	evidence evidenceCache
 }
 
 func newLiveInput(vehicle string) *liveInput {
@@ -67,27 +65,15 @@ func (s *Service) Ingest(frame EncodedFrame) {
 	}
 }
 
-func (s *Service) Telemetry(vehicle string, altitude float64, at time.Time) {
-	if math.IsNaN(altitude) || math.IsInf(altitude, 0) {
-		return
-	}
-	if !s.mu.TryRLock() {
-		return
-	}
-	defer s.mu.RUnlock()
-	for _, in := range s.live {
-		if in.vehicle == vehicle {
-			in.altitude.Store(&altitudeReading{meters: altitude, at: at})
-		}
-	}
-}
-
 type livePacket struct {
-	data    []byte
-	at      time.Time
-	capture *float64
-	id      uint64
-	key     bool
+	data      []byte
+	at        time.Time
+	capture   *float64
+	id        uint64
+	identity  frameIdentity
+	motion    *MotionEvidence
+	telemetry *nearbyMotion
+	key       bool
 }
 
 type liveSection struct {
@@ -100,6 +86,20 @@ type liveSection struct {
 func (s *Service) runLive(r *run, meta session) (string, string) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
+	s.mu.RLock()
+	source := s.liveDetector
+	s.mu.RUnlock()
+	if source.engine != nil && source.subscribe != nil {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			s.watchLiveDetection(ctx, r, meta, source)
+		}()
+		defer func() {
+			cancel()
+			<-done
+		}()
+	}
 	jobs := make(chan liveSection, 2)
 	collected := make(chan error, 1)
 	go func() {
@@ -110,6 +110,7 @@ func (s *Service) runLive(r *run, meta session) (string, string) {
 		if ctx.Err() != nil {
 			break
 		}
+		job.row.Evidence = r.live.evidence.collect(ctx, meta.Producer, job)
 		load := func() ([]sample, error) { return decodeLive(ctx, r, meta, job) }
 		if err := s.process(r, meta, job.row, load); err != nil {
 			cancel()
@@ -126,6 +127,27 @@ func (s *Service) runLive(r *run, meta session) (string, string) {
 		return "stopped", "GCS stopped during observation."
 	}
 	return "stopped", ""
+}
+
+func (s *Service) watchLiveDetection(ctx context.Context, r *run, meta session, source liveDetectionSource) {
+	lookup, cancel := context.WithTimeout(ctx, 5*time.Second)
+	engine, err := source.engine(lookup, meta.Vehicle, meta.Producer)
+	cancel()
+	if err != nil {
+		s.log.Debug().Err(err).Str("vehicle", meta.Vehicle).Msg("live inference detector lookup failed")
+		return
+	}
+	if engine == "" || ctx.Err() != nil {
+		return
+	}
+	r.live.evidence.mu.Lock()
+	r.live.evidence.engine = engine
+	r.live.evidence.mu.Unlock()
+	source.subscribe(ctx, engine, func(result feed.Result) {
+		if result.Producer == meta.Producer && result.Vehicle == meta.Vehicle && result.Session != 0 {
+			r.live.evidence.addResult(result)
+		}
+	})
 }
 
 func collectLive(ctx context.Context, r *run, meta session, jobs chan<- liveSection) error {
@@ -305,7 +327,8 @@ func collectLive(ctx context.Context, r *run, meta session, jobs chan<- liveSect
 				last = at
 				continue
 			}
-			packets = append(packets, livePacket{data: frame.Data, at: at, capture: capture, id: frame.ID, key: frame.Keyframe})
+			packets = append(packets, livePacket{data: frame.Data, at: at, capture: capture,
+				id: frame.ID, identity: frameIdentity{frame.Session, frame.Seq}, key: frame.Keyframe})
 			bytesUsed += len(frame.Data)
 			slot := int(math.Floor(elapsed.Seconds()*cfg.FrameFPS + 1e-6))
 			selected := picked.IsZero() || at.Sub(picked) >= interval-time.Microsecond
@@ -316,10 +339,17 @@ func collectLive(ctx context.Context, r *run, meta session, jobs chan<- liveSect
 				picked = at
 				lastSlot = slot
 				indices = append(indices, len(packets)-1)
-				if frame.RelativeAltitude != nil {
-					telemetry = map[string]any{"relative_altitude_m": *frame.RelativeAltitude, "source": "imaging_frame"}
-				} else if reading := in.altitude.Load(); reading != nil && math.Abs(at.Sub(reading.at).Seconds()) <= 2 {
-					telemetry = map[string]any{"relative_altitude_m": reading.meters, "source": "telemetry_feed"}
+				packet := &packets[len(packets)-1]
+				if frame.Motion != (MotionEvidence{}) {
+					motion := frame.Motion
+					packet.motion = &motion
+				}
+				reading := in.evidence.nearby(at)
+				packet.telemetry = reading
+				if frame.Motion.RelativeAltitude != nil {
+					telemetry = map[string]any{"relative_altitude_m": *frame.Motion.RelativeAltitude, "source": "imaging_frame"}
+				} else if reading != nil && reading.RelativeAltitude != nil {
+					telemetry = map[string]any{"relative_altitude_m": *reading.RelativeAltitude, "source": "telemetry_feed"}
 				} else {
 					telemetry = nil
 				}

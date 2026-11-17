@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -12,11 +11,13 @@ import (
 	"time"
 
 	framepb "github.com/cmusatyalab/steeleagle/api/go/steeleagle_protocol/v1/messages/frame"
+	"github.com/cmusatyalab/steeleagle/config"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/aiconfig"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/aicredentials"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/chat"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/feed"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/inferredmission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/nl2dsl"
@@ -120,24 +121,76 @@ func registerAI(ctx context.Context, engine string, a aiconfig.Options, missions
 func observeFeed(inference *inferredmission.Service, msg feed.Message) {
 	now := time.Now()
 	if msg.Telemetry != nil {
-		if relative := msg.Telemetry.GetPositionInfo().GetRelativePosition(); relative != nil {
-			inference.Telemetry(msg.Vehicle, float64(relative.GetZ()), now)
-		}
+		inference.IngestTelemetry(msg.Vehicle, msg.Telemetry, now)
 	}
 	frame := msg.Frame
 	if frame == nil || frame.GetCodec() != framepb.Codec_CODEC_H264 {
 		return
 	}
 	encoded := inferredmission.EncodedFrame{Producer: msg.Producer, Vehicle: msg.Vehicle, Data: frame.GetEncodedData(),
-		ReceivedAt: now, ID: frame.GetId(), Keyframe: frame.GetKeyframe()}
+		ReceivedAt: now, ID: frame.GetId(), Keyframe: frame.GetKeyframe(), Session: msg.Session, Seq: msg.Seq,
+		Motion: inferredmission.CameraMotion(frame.GetPositionInfo(), frame.GetGimbalInfo())}
 	if frame.HasTimestamp() && frame.GetTimestamp().IsValid() {
 		encoded.CapturedAt = frame.GetTimestamp().AsTime()
 	}
-	if position := frame.GetPositionInfo().GetRelativePosition(); position != nil {
-		meters := float64(position.GetZ())
-		if !math.IsNaN(meters) && !math.IsInf(meters, 0) {
-			encoded.RelativeAltitude = &meters
+	inference.Ingest(encoded)
+}
+
+// liveDetector selects one detector on the GCS's daemon that can observe the
+// requested producer in the vehicle's active flow. A full mission binding is
+// validated separately against Plan's draft flow.
+func liveDetector(cat flows.Catalog, flow *config.FlowConfig, gcsIP, vehicle, producer string) string {
+	vehicleIP, _ := fleet.SplitName(vehicle)
+	qualify := func(name string) string {
+		return fleet.QualifyFlowName(name, vehicle, vehicleIP, gcsIP)
+	}
+	from := ""
+	for _, node := range flow.Producers {
+		// Older daemons use a bare vehicle stream in active flows. A named
+		// engine producer still needs its own qualified identity.
+		bareStream := !strings.ContainsAny(node.Name, "./") && vehicle+"."+node.Name == producer
+		if qualify(node.Name) == producer || bareStream {
+			from = node.Name
+			break
 		}
 	}
-	inference.Ingest(encoded)
+	if from == "" || feed.VehicleOf(producer) != vehicle {
+		return ""
+	}
+	local, ok := cat.Daemon(gcsIP)
+	if !ok || !local.Local {
+		return ""
+	}
+	detectors := map[string]bool{}
+	for _, engine := range local.Engines {
+		kind, _ := feed.ResultType(engine.Result)
+		// Some other engines also emit DetectionResult, for example as a
+		// tile relevance result. Include only declared object detectors.
+		if engine.Typed && engine.Category != nil && *engine.Category == "detection" && kind == "DetectionResult" {
+			detectors[engine.Name] = true
+		}
+	}
+	edges := map[string][]string{}
+	for _, edge := range flow.Edges {
+		edges[edge.From] = append(edges[edge.From], edge.To)
+	}
+	pending := []string{from}
+	seen := map[string]bool{}
+	selected := ""
+	for len(pending) != 0 {
+		next := pending[0]
+		pending = pending[1:]
+		if seen[next] {
+			continue
+		}
+		seen[next] = true
+		if name := qualify(next); detectors[name] {
+			if selected != "" && selected != name {
+				return ""
+			}
+			selected = name
+		}
+		pending = append(pending, edges[next]...)
+	}
+	return selected
 }

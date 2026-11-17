@@ -1,10 +1,17 @@
 package mission
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/cmusatyalab/steeleagle/config"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
+	"github.com/rs/zerolog"
 )
 
 const waitDraft = `Actions:
@@ -95,5 +102,132 @@ func TestDraftWithUnboundEngineNeedsContext(t *testing.T) {
 	result := s.CheckDraft(t.Context(), dsl, PlanningContext{Flow: localYolo()}, nil)
 	if result.Status != "needs_context" || result.Graph == nil || len(c.builds) != 0 {
 		t.Fatalf("CheckDraft = %+v, builds = %d", result, len(c.builds))
+	}
+}
+
+func TestTrackBindingUsesTheCameraRoute(t *testing.T) {
+	const raw = "steeleagle_protocol/v1/messages/frame/RawFrame"
+	const encoded = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
+	const detector = testGCSIP + ".yolo"
+	const dsl = `Actions:
+    actions.Track track_person(Camera=params.UNBOUND_camera, Engine="UNBOUND_DETECTION_ENGINE", Class="person")
+Mission:
+    Start track_person
+`
+	for _, tc := range []struct {
+		name      string
+		accepts   string
+		transform bool
+		ambiguous bool
+		wantBound bool
+	}{
+		{name: "direct camera frames", accepts: raw, wantBound: true},
+		{name: "config 0.0.8 forwarded conversion", accepts: encoded, transform: true, wantBound: true},
+		{name: "incompatible camera frames", accepts: encoded},
+		{name: "two matching detector routes", accepts: raw, ambiguous: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := engineFake(t)
+			c.registry["actions"].(map[string]any)["actions.Track"].(map[string]any)["fields"] = []any{
+				map[string]any{"name": "Camera", "type": "params.Camera"},
+				map[string]any{"name": "Engine", "type": "params.DetectionEngine"},
+				map[string]any{"name": "Class", "type": "string"},
+			}
+			c.registry["enums"].(map[string]any)["params.Camera"] = map[string]any{
+				"fields": []any{map[string]any{"name": "Camera_front"}},
+			}
+			plugin, err := os.ReadFile("testdata/driver.plugin.toml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cat := flowCatalog(testGCSIP)
+			daemon := &cat.Daemons[0]
+			vehicle := &daemon.Vehicles[0]
+			vehicle.Streams = append(vehicle.Streams, flows.Stream{Name: "front", Kind: "camera", Type: raw})
+			daemon.Engines[0].Accepts = []string{tc.accepts}
+			const producer = "alpha.front"
+			flow := &flows.Template{
+				Vehicle: vehicle.Name, Producers: []flows.TemplateProducer{{Name: producer}},
+				Engines: []flows.TemplateEngine{{Name: detector}},
+				Edges:   []flows.TemplateEdge{{From: producer, To: detector, Timeout: "1s"}},
+			}
+			if tc.transform {
+				const encoder = testGCSIP + ".encoder"
+				daemon.Engines = append(daemon.Engines, flows.Engine{Name: encoder, Bare: "encoder", Accepts: []string{raw}, Forwards: encoded, Typed: true})
+				flow.Engines = append(flow.Engines, flows.TemplateEngine{Name: encoder})
+				flow.Edges[0].To = encoder
+				flow.Edges = append(flow.Edges, flows.TemplateEdge{From: encoder, To: detector, Timeout: "1s"})
+			}
+			if tc.ambiguous {
+				second := daemon.Engines[0]
+				second.Name, second.Bare = testGCSIP+".other", "other"
+				daemon.Engines = append(daemon.Engines, second)
+				flow.Engines = append(flow.Engines, flows.TemplateEngine{Name: second.Name})
+				flow.Edges = append(flow.Edges, flows.TemplateEdge{From: producer, To: second.Name, Timeout: "1s"})
+			}
+			plan := PlanningContext{Flow: flow, Vehicle: vehicle.Name}
+			s := NewService(c, testConfig(t), testGCSIP,
+				func(context.Context) (flows.Catalog, error) { return cat, nil },
+				func(context.Context) ([]fleet.Vehicle, error) {
+					return []fleet.Vehicle{{Name: vehicle.Name, Config: plugin, Driver: &config.DriverCap{}}}, nil
+				}, zerolog.Nop())
+			ref, err := s.DraftReference(t.Context(), plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			context := ref["planning_context"].(map[string]any)
+			eq(t, context["cameras"], []cameraBinding{{Name: "front", Constant: "params.Camera_front", FrameType: raw}})
+			if tc.wantBound {
+				eq(t, context["engines"], []engineBinding{{
+					Name: detector, FullName: detector, Constant: "params.DetectionEngine_local_yolo", EngineType: "DetectionEngine",
+					ResultType: daemon.Engines[0].Result, CameraNames: []string{"front"},
+				}})
+			}
+			draft := s.CheckDraft(t.Context(), dsl, plan, nil)
+			if tc.wantBound {
+				if draft.Status != "compiled" || !strings.Contains(draft.DSL, `Camera=params.Camera_front`) ||
+					!strings.Contains(draft.DSL, `Engine="`+detector+`"`) || len(c.builds) != 1 {
+					t.Fatalf("draft = %+v, builds = %d", draft, len(c.builds))
+				}
+				for _, attr := range asList(asMap(astDecls(c.builds[0].Ast, "Actions")[0])["Attrs"]) {
+					if asMap(attr)["Key"] == "Engine" {
+						eq(t, asMap(asMap(attr)["Value"])["Ident"], "DetectionEngine_local_yolo")
+					}
+				}
+			} else if draft.Status != "needs_context" || draft.Graph == nil || len(draft.Errors) != 2 || len(c.builds) != 0 {
+				t.Fatalf("draft = %+v, builds = %d", draft, len(c.builds))
+			}
+		})
+	}
+}
+
+func TestTrackPreviewRetainsUnboundEngineUntilCompile(t *testing.T) {
+	c := engineFake(t)
+	s := newFlowService(t, c, flowCatalog(testGCSIP))
+	body := trackBody(t, "UNBOUND_detection_engine", localYolo(), nil)
+	preview := do(s.ServeRenderDSL, http.MethodPost, "/api/render_dsl", body)
+	if preview.Code != http.StatusOK || !strings.Contains(decodeMap(t, preview)["dsl"].(string), `Engine="UNBOUND_detection_engine"`) {
+		t.Fatalf("render status %d: %s", preview.Code, preview.Body)
+	}
+	compiled := do(s.ServeCompile, http.MethodPost, "/api/compile", body)
+	if compiled.Code != http.StatusOK || !strings.Contains(compiled.Body.String(), `"node_id":"trk"`) ||
+		!strings.Contains(compiled.Body.String(), "Flow Builder") || len(c.builds) != 0 {
+		t.Fatalf("unbound graph reached build: status %d: %s", compiled.Code, compiled.Body)
+	}
+}
+
+func TestCompileIdentifiesMalformedCameraField(t *testing.T) {
+	c := engineFake(t)
+	track := c.registry["actions"].(map[string]any)["actions.Track"].(map[string]any)
+	track["fields"] = append(track["fields"].([]any), map[string]any{"name": "Camera", "type": "params.Camera"})
+	s := newFlowService(t, c, flowCatalog(testGCSIP))
+	body := trackBody(t, testGCSIP+".yolo", localYolo(), func(m map[string]any) {
+		params := m["nodes"].([]any)[0].(map[string]any)["params"].(map[string]any)
+		params["Camera"] = map[string]any{"label": "(no values)", "value": nil}
+	})
+	rec := do(s.ServeCompile, http.MethodPost, "/api/compile", body)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"node_id":"trk"`) ||
+		!strings.Contains(rec.Body.String(), "trk.Camera: Expected a camera identifier.") || len(c.builds) != 0 {
+		t.Fatalf("malformed Camera was not identified before build: status %d: %s", rec.Code, rec.Body)
 	}
 }

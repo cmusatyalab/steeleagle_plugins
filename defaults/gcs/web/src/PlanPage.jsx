@@ -372,8 +372,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     useEffect(() => {
         setNodes(ns => ns.map(n => ({ ...n, data: { ...n.data, schema: schema.actions[n.data.type_name] } })));
     }, [schema]);
-    // A mission compiled for one vehicle says nothing about another.
-    useEffect(() => { setMissionCompiled(false); }, [flow.vehicle]);
+    useEffect(() => { setMissionCompiled(false); }, [flow]);
     // Compile and Build use the vehicle's driver config, when one is picked.
     const vehiclePart = flow.vehicle ? { vehicle: flow.vehicle } : {};
 
@@ -506,7 +505,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     // The flow to ship with Validate, Download and Deploy: {flow: template} when the
     // flow has nodes and is valid, {} when it has none, and null (after a
     // toast) when it's broken -- a broken flow is never sent.
-    function flowRequestPart(quiet = false) {
+    function flowRequestPart() {
         if (flow.nodes.length === 0) return {};
         if (!catalog || (catalog.daemons.length === 0 && catalog.error)) {
             toast.current.show({
@@ -519,7 +518,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
             if (validateFlow(flow, catalog).errors.length > 0) throw new Error('invalid flow');
             return { flow: toTemplate(flow, catalog) };
         } catch {
-            if (!quiet) toast.current.show({ severity: 'warn', summary: 'Flow has errors', detail: 'Fix the flow on the Flow Builder tab first' });
+            toast.current.show({ severity: 'warn', summary: 'Flow has errors', detail: 'Fix the flow on the Flow Builder tab first' });
             return null;
         }
     }
@@ -735,11 +734,23 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
             toast.current.show({ severity: 'warn', summary: 'DSL warning', detail: w, life: 8000 }));
     }
 
+    function showImportResult(parsed, summary, detail) {
+        showParseWarnings(parsed);
+        const issues = parsed.binding_errors ?? [];
+        if (issues.length) {
+            highlightErrorNodes(issues);
+            toast.current.show({ severity: 'warn', summary: 'Draft needs input',
+                detail: issues.map(issue => issue.message).join(' '), life: 10000 });
+        } else {
+            toast.current.show({ severity: 'success', summary, detail });
+        }
+    }
+
     async function parseDslText(text) {
         const resp = await fetch(getApiUrl('/api/parse_dsl'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ dsl: text, flow: dslFlow }),
+            body: JSON.stringify({ dsl: text, planning_context: getAIPlanningContext() }),
         });
         if (!resp.ok) {
             let detail = `Server error ${resp.status}`;
@@ -750,7 +761,14 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
     }
 
     function getAIPlanningContext() {
-        return { ...vehiclePart, ...(flowRequestPart(true) ?? {}), geojson: features };
+        const context = { ...vehiclePart, geojson: features };
+        if (dslFlow) context.flow = dslFlow;
+        else if (flow.nodes.length) {
+            context.flow_issue = catalog && (!catalog.error || catalog.daemons.length)
+                ? 'Open Flow Builder and fix the errors in the current flow.'
+                : 'Open Flow Builder and reload the flow catalog.';
+        }
+        return context;
     }
 
     async function applyAIArtifact(target, artifact) {
@@ -761,10 +779,8 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
             const parsed = await parseDslText(artifact.payload.normalized_dsl);
             if (!parsed.start_id || !parsed.nodes?.length) throw new Error('The draft has no valid starting action.');
             loadFromParsed(parsed);
-            showParseWarnings(parsed);
             setActiveIndex(0);
-            toast.current.show({ severity: 'success', summary: 'Applied to Mission Builder',
-                detail: `Loaded ${parsed.nodes.length} actions for review.` });
+            showImportResult(parsed, 'Applied to Mission Builder', `Loaded ${parsed.nodes.length} actions for review.`);
         } catch (error) {
             toast.current.show({ severity: 'error', summary: 'Could not apply draft', detail: error.message });
             throw error;
@@ -778,8 +794,7 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
             const text = await file.text();
             const parsed = await parseDslText(text);
             loadFromParsed(parsed);
-            showParseWarnings(parsed);
-            toast.current.show({ severity: 'success', summary: 'DSL loaded', detail: `${parsed.nodes.length} actions, ${parsed.events.length} events` });
+            showImportResult(parsed, 'DSL loaded', `${parsed.nodes.length} actions, ${parsed.events.length} events`);
         } catch (e) {
             toast.current.show({ severity: 'error', summary: 'DSL parse error', detail: e.message });
         } finally {
@@ -793,8 +808,8 @@ function PlanPage({ theme, vehicles = [], squadList, uploadState, setUploadState
         try {
             const parsed = await parseDslText(dslText);
             loadFromParsed(parsed);
-            showParseWarnings(parsed);
-            toast.current.show({ severity: 'success', summary: 'DSL applied', detail: `${parsed.nodes.length} actions, ${parsed.events.length} events` });
+            setActiveIndex(0);
+            showImportResult(parsed, 'DSL applied', `${parsed.nodes.length} actions, ${parsed.events.length} events`);
         } catch (e) {
             toast.current.show({ severity: 'error', summary: 'DSL parse error', detail: e.message });
         } finally {

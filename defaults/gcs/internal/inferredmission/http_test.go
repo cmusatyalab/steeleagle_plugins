@@ -24,13 +24,15 @@ import (
 type videoCompiler struct{}
 
 func (videoCompiler) DraftReference(context.Context, mission.PlanningContext) (map[string]any, error) {
-	return map[string]any{"schema": map[string]any{"actions": map[string]any{"Wait": nil, "ReturnToHome": nil}}}, nil
+	return map[string]any{"schema": map[string]any{"actions": map[string]any{
+		"Wait": map[string]any{"type": "actions.Wait"}, "ReturnToHome": map[string]any{"type": "actions.ReturnToHome"},
+	}}}, nil
 }
 
 func (videoCompiler) CheckDraft(_ context.Context, dsl string, _ mission.PlanningContext, check func(mission.Graph) []string) mission.Draft {
 	start := "wait"
 	g := mission.Graph{StartID: &start,
-		Nodes: []mission.GraphNode{{InstanceID: start, TypeName: "Wait", Params: map[string]any{"Duration": 5}},
+		Nodes: []mission.GraphNode{{InstanceID: start, TypeName: "Wait", Params: map[string]any{"Duration": 30}},
 			{InstanceID: "home", TypeName: "ReturnToHome"}},
 		Edges: []mission.GraphEdge{{Source: start, EventID: "done", Target: "home"}}}
 	if issues := check(g); len(issues) > 0 {
@@ -56,7 +58,8 @@ func testService(t *testing.T, root string, block chan struct{}, entered chan st
 			_, _ = io.WriteString(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":"Wait 5 seconds, then return home."}]}]}`)
 			return
 		}
-		_, _ = io.WriteString(w, `{"output":[{"type":"function_call","name":"submit_mission_dsl","arguments":"{\"dsl\":\"V4 Wait draft\",\"summary\":\"Wait then return.\"}"}]}`)
+		t.Error("V6 invoked a second model request to translate its recommendation")
+		w.WriteHeader(http.StatusBadRequest)
 	}))
 	t.Cleanup(model.Close)
 	provider := nl2dsl.Provider{Name: "openai", ModelID: "test", Key: "fake-key", BaseURL: model.URL}
@@ -167,8 +170,8 @@ func TestVideoUploadPauseResumeAndDownload(t *testing.T) {
 	r.mu.Lock()
 	history := r.rows[2].History
 	r.mu.Unlock()
-	if len(history) != 1 || history[0].Section != 1 {
-		t.Fatalf("section 2 history = %+v", history)
+	if len(history) != 0 {
+		t.Fatalf("fallback decisions are not observations for future sections: %+v", history)
 	}
 	s.Close()
 	reopened := testService(t, root, nil, nil)

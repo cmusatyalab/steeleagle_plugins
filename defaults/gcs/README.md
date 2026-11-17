@@ -110,10 +110,21 @@ start, the server still runs and the compiler routes answer 503 with the reason.
 
 ### AI Chat and Inferred Mission
 
-The Plan page has **Chat** and **Inferred Mission** tabs. Both use the GCS's
-Go NL2DSL service and the same V4 schema and compiler as the Mission Builder.
-Apply opens the candidate on the canvas for review. Use the existing Map,
-Flow Builder, Compile and Deploy controls to finish the mission.
+The Plan page has **Chat** and **Inferred Mission** tabs. Chat uses the GCS's
+Go NL2DSL service. Inferred Mission V6 produces one natural-language
+recommendation, which GCS converts to a mission with the same V4 schema and
+compiler as Mission Builder. Apply opens the candidate on the canvas for
+review. Use the existing Map, Flow Builder, Compile and Deploy controls to
+finish the mission.
+
+When the evidence is unclear or the proposed continuation cannot use the
+selected resources, V6 tries to compile **wait 30 seconds, then return home**
+for the selected vehicle. The wait comes from policy. Analysis prepares the
+draft for review and deployment. Link-loss activation requires a mission
+already loaded on the vehicle and a separate onboard trigger.
+
+See [Detector evidence in Inferred Mission](internal/inferredmission/detector-context.md)
+for live detector requirements and Aviary verification.
 
 In **Orchestrate → Configure**, open the GCS service and expand **AI**. Open
 the GCS directly through `localhost` or `127.0.0.1` on its host to save,
@@ -132,8 +143,9 @@ started with `eagle init`, the private `~/.config/steeleagle/eagled.env`
 file can provide these variables when the daemon starts. Keep key values out
 of plugin args and Raw TOML.
 
-Use **Apply** for provider, model, and inference settings. Chat and DSL
-generation share the Chat model. Use the main video settings to adjust
+Use **Apply** for provider, model, and inference settings. New V6 inference
+runs use the vision model and local mission templates. Archived V5 runs
+still use the Chat model for DSL generation. Use the main video settings to adjust
 sections, sampling, and history. **Advanced inference settings** contains
 image size, request timeouts, video upload limits, and the active-run limit.
 `chat_temperature` and `vision_temperature` are optional, in the range
@@ -181,9 +193,13 @@ name, UTC creation time, and section index.
 
 Install FFmpeg and ffprobe for both MP4 and live analysis. Live Observe lists
 currently streaming V4 cameras. Keep the camera → encoder → GCS and
-telemetry → GCS edges in the active dataflow. MP4 runs can resume after a
-restart. Saved live runs remain available for review. The graph JSON
-download uses the V4 format and carries a schema version.
+telemetry → GCS edges in the active dataflow. A live run can also use a
+reachable local detector on that camera's active flow. Detector labels are
+matched to sampled frames by their transport identity. History shows the
+matched evidence and available motion telemetry. Ordinary MP4 runs use
+their own frames and can resume after a restart. Saved live runs remain
+available for review. The graph JSON download uses the V4 format and carries
+a schema version.
 
 For local verification, run `pixi run mock` and open the Plan page at
 `http://localhost:8002`. Test a short MP4 and a mock camera separately.

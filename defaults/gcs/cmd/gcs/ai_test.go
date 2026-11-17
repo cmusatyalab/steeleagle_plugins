@@ -7,9 +7,51 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cmusatyalab/steeleagle/config"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/aiconfig"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/nl2dsl"
 )
+
+func TestLiveDetectorUsesSelectedSourceAndActiveFlow(t *testing.T) {
+	const gcs, vehicle, producer = "10.0.0.1", "10.0.0.2.drone", "10.0.0.2.drone.front"
+	const result = "steeleagle_protocol/v1/messages/result/DetectionResult"
+	detection, classification := "detection", "classification"
+	cat := flows.Catalog{Daemons: []flows.Daemon{
+		{IP: gcs, Local: true, Engines: []flows.Engine{
+			{Name: gcs + ".objects", Typed: true, Category: &detection, Result: result},
+			{Name: gcs + ".other", Typed: true, Category: &detection, Result: result},
+			{Name: gcs + ".tiles", Typed: true, Category: &classification, Result: result},
+		}},
+		{IP: "10.0.0.2", Engines: []flows.Engine{
+			{Name: "10.0.0.2.remote", Typed: true, Category: &detection, Result: result},
+		}},
+	}}
+	flow := &config.FlowConfig{
+		Producers: []config.Producer{{Name: "vehicle.front"}, {Name: "vehicle.rear"}},
+		Edges: []config.Edge{
+			{From: "vehicle.front", To: "local.decoder"},
+			{From: "local.decoder", To: "remote.objects"},
+			{From: "local.decoder", To: "remote.tiles"},
+			{From: "local.decoder", To: "local.remote"},
+			{From: "vehicle.rear", To: "remote.other"},
+		},
+	}
+	if got := liveDetector(cat, flow, gcs, vehicle, producer); got != gcs+".objects" {
+		t.Fatalf("detector for %s = %q", producer, got)
+	}
+	oldFlow := &config.FlowConfig{
+		Producers: []config.Producer{{Name: "front"}},
+		Edges:     []config.Edge{{From: "front", To: gcs + ".objects"}},
+	}
+	if got := liveDetector(cat, oldFlow, gcs, vehicle, producer); got != gcs+".objects" {
+		t.Fatalf("detector for legacy flow = %q", got)
+	}
+	flow.Edges = append(flow.Edges, config.Edge{From: "vehicle.front", To: "remote.other"})
+	if got := liveDetector(cat, flow, gcs, vehicle, producer); got != "" {
+		t.Fatalf("ambiguous detector must not be chosen, got %q", got)
+	}
+}
 
 func TestAIProvidersUseStoredKeyChanges(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

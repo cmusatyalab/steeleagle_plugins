@@ -136,7 +136,7 @@ function SectionDetail({ row, session, onApply }) {
             </div>
             <div className="im-inference">
                 <p className="im-mission">{row.inference_text || `Inference ${label(row.inference_status)}.`}</p>
-                {row.adaptation && <p>{row.adaptation} Generation input: {row.instruction}</p>}
+                {row.adaptation && <p className="im-note">{row.adaptation}</p>}
                 {row.error && <p role="alert" className="im-error">{row.error}</p>}
                 {row.unresolved?.map(message => <p key={message} className="im-note">{message}</p>)}
             </div>
@@ -179,7 +179,7 @@ function SectionDetail({ row, session, onApply }) {
                     <TabView className="im-artifact-tabs">
                         <TabPanel header="SteelEagle DSL">
                             {row.dsl ? <pre><code>{row.dsl}</code></pre> : <p className="im-muted">
-                                {row.status === 'failed' || row.status === 'skipped' || row.status === 'gap'
+                                {row.status === 'failed' || row.status === 'skipped' || row.status === 'gap' || row.compile_status === 'unsupported_task'
                                     ? 'No validated DSL candidate for this section.' : 'Waiting for a validated DSL candidate.'}
                             </p>}
                         </TabPanel>
@@ -207,6 +207,8 @@ function SectionDetail({ row, session, onApply }) {
                                 </details>
                             ))}
                             {row.telemetry && <pre>{JSON.stringify(row.telemetry, null, 2)}</pre>}
+                            {row.evidence && <details><summary>Matched frame evidence</summary><pre>{JSON.stringify(row.evidence, null, 2)}</pre></details>}
+                            {row.vision_reply && <details><summary>Vision model reply</summary><pre>{row.vision_reply}</pre></details>}
                             {row.vision_prompt && <details><summary>Vision prompt</summary><pre>{row.vision_prompt}</pre></details>}
                             {row.dsl_reference && <details><summary>DSL reference</summary><pre>{JSON.stringify(row.dsl_reference, null, 2)}</pre></details>}
                         </TabPanel>
@@ -554,7 +556,7 @@ export default function InferredMissionPage({ activeTab, onApplyArtifact, getPla
                         {!videoMode && <p className="im-note" id="im-takeoff-help">Leave blank to start the timeline at the first valid frame after you start observing.</p>}
                     </details>
                     {config ? <ModelStages label="New run models" models={config.models} /> : <span className="im-muted">Loading model settings…</span>}
-                    {config && !config.configured && <p className="im-note">Configure the OpenAI vision key and GCS Chat model on the backend.</p>}
+                    {config && !config.configured && <p className="im-note">Configure the vision model and its API key on the backend.</p>}
                 </div>
                 <div className="im-start-panel">
                     <Button type="button" label={videoMode ? 'Start analysis' : 'Start observing'}

@@ -892,18 +892,37 @@ func TestE2EMockAIConfig(t *testing.T) {
 		t.Fatal("status exposed the OpenAI key")
 	}
 	var effective struct {
-		Configured bool           `json:"configured"`
-		Models     map[string]any `json:"models"`
-		Settings   map[string]any `json:"settings"`
+		Configured    bool           `json:"configured"`
+		Models        map[string]any `json:"models"`
+		Settings      map[string]any `json:"settings"`
+		PromptVersion string         `json:"prompt_version"`
 	}
 	if err := json.Unmarshal(state, &effective); err != nil {
 		t.Fatal(err)
 	}
-	if !effective.Configured || effective.Models["dsl_model"] != "gpt-4o-mini" || effective.Models["vision_model"] != "gpt-4o" ||
-		effective.Models["dsl_temperature"] != "0.25" || effective.Models["vision_temperature"] != "0" ||
+	if !effective.Configured || effective.PromptVersion != "v6" || effective.Models["dsl_provider"] != "local" ||
+		effective.Models["vision_model"] != "gpt-4o" || effective.Models["vision_temperature"] != "0" ||
 		effective.Settings["section_seconds"] != float64(12) || effective.Settings["frame_fps"] != float64(2) ||
 		effective.Settings["history_mode"] != "uniform" || effective.Settings["section_mode"] != "sliding" {
-		t.Fatalf("startup overrides not applied by the child: %+v", effective)
+		t.Fatalf("Inferred Mission startup overrides not applied by the child: %+v", effective)
+	}
+
+	if err := r.getJSON("/api/chat/status", &state); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(state, []byte(key)) {
+		t.Fatal("Chat status exposed the OpenAI key")
+	}
+	var chatStatus struct {
+		Configured  bool    `json:"configured"`
+		Model       string  `json:"model"`
+		Temperature float64 `json:"temperature"`
+	}
+	if err := json.Unmarshal(state, &chatStatus); err != nil {
+		t.Fatal(err)
+	}
+	if !chatStatus.Configured || chatStatus.Model != "gpt-4o-mini" || chatStatus.Temperature != 0.25 {
+		t.Fatalf("Chat startup overrides not applied by the child: %+v", chatStatus)
 	}
 }
 

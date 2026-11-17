@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -62,5 +63,16 @@ func TestPromptConditionalExampleParses(t *testing.T) {
 	}
 	if _, err := mission.ParseDSL(example + "\n"); err != nil {
 		t.Fatalf("prompt example is not valid V4 DSL: %v", err)
+	}
+}
+
+func TestResolveActionsUsesQualifiedRegistryTypes(t *testing.T) {
+	ref := map[string]any{"schema": map[string]any{"actions": map[string]any{
+		"different.ClimbToAltitude": map[string]any{"type": "different.ClimbToAltitude"},
+		"Wait":                      map[string]any{"type": "actions.Wait"},
+	}}}
+	steps, missing := resolveActions(ref, [][]string{{"gcsactions.ClimbToAltitude"}, {"actions.Wait"}})
+	if !reflect.DeepEqual(missing, []string{"gcsactions.ClimbToAltitude"}) || !reflect.DeepEqual(steps[1], []string{"Wait"}) {
+		t.Fatalf("resolved %v, missing %v", steps, missing)
 	}
 }

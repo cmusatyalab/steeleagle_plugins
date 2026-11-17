@@ -44,8 +44,10 @@ type section struct {
 	FrameIDs             []*uint64        `json:"frame_ids,omitempty"`
 	UsedReceipt          bool             `json:"uses_gcs_receive_time,omitempty"`
 	Telemetry            map[string]any   `json:"telemetry,omitempty"`
+	Evidence             *liveEvidence    `json:"evidence,omitempty"`
 	History              []historyItem    `json:"history,omitempty"`
 	VisionPrompt         string           `json:"vision_prompt,omitempty"`
+	VisionReply          string           `json:"vision_reply,omitempty"`
 	DSLReference         map[string]any   `json:"dsl_reference,omitempty"`
 	Task                 *task            `json:"task,omitempty"`
 	Instruction          string           `json:"instruction,omitempty"`
@@ -197,13 +199,14 @@ type Service struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 
-	mu         sync.RWMutex
-	runs       map[string]*run
-	live       map[string]*liveInput
-	wg         sync.WaitGroup
-	closed     bool
-	uploads    chan struct{}
-	videoSlots chan struct{}
+	mu           sync.RWMutex
+	runs         map[string]*run
+	live         map[string]*liveInput
+	liveDetector liveDetectionSource
+	wg           sync.WaitGroup
+	closed       bool
+	uploads      chan struct{}
+	videoSlots   chan struct{}
 }
 
 func New(ctx context.Context, root string, settings Settings, vision, generation nl2dsl.Provider, generator nl2dsl.Generator, log zerolog.Logger) (*Service, error) {
@@ -232,6 +235,10 @@ func (s *Service) Close() {
 }
 
 func (s *Service) models() map[string]string {
+	return s.modelsForPrompt(promptVersion)
+}
+
+func (s *Service) modelsForPrompt(version string) map[string]string {
 	// Endpoint hashes distinguish resumed runs without serializing endpoints or credentials.
 	models := map[string]string{
 		"vision_provider": s.vision.Name, "vision_model": s.vision.ModelID, "vision_reasoning_effort": s.vision.Reasoning,
@@ -244,6 +251,12 @@ func (s *Service) models() map[string]string {
 	if s.generation.Temperature != nil {
 		models["dsl_temperature"] = strconv.FormatFloat(*s.generation.Temperature, 'f', -1, 64)
 	}
+	if version == promptVersion {
+		for _, key := range []string{"dsl_temperature", "reasoning_effort", "dsl_endpoint_hash"} {
+			delete(models, key)
+		}
+		models["dsl_model"], models["dsl_provider"] = "V4 mission templates", "local"
+	}
 	return models
 }
 
@@ -252,7 +265,7 @@ func hash(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (s *Service) configured() bool { return s.vision.Configured() && s.generation.Configured() }
+func (s *Service) configured() bool { return s.vision.Configured() }
 
 func (s *Service) recover() {
 	dirs, err := os.ReadDir(filepath.Join(s.root, "runs"))
@@ -344,6 +357,9 @@ func (s *Service) start(req startRequest) (*run, error) {
 	case "live":
 		if req.Vehicle == "" || req.Producer == "" {
 			return nil, errors.New("Select a vehicle camera to observe.")
+		}
+		if r.meta.Plan.Vehicle == "" {
+			r.meta.Plan.Vehicle = req.Vehicle
 		}
 		r.meta.Status = "observing"
 		r.notice = "Waiting for fresh camera frames."
@@ -439,7 +455,10 @@ func (s *Service) resume(r *run) error {
 	if r.meta.Source != "uploaded_video" || r.running || r.meta.Status != "paused" {
 		return errors.New("Only a paused video analysis can be resumed.")
 	}
-	if !maps.Equal(s.models(), r.meta.Models) {
+	if r.meta.PromptVersion != promptVersion && !s.generation.Configured() {
+		return errors.New("Configure the DSL model to resume this older analysis.")
+	}
+	if !maps.Equal(s.modelsForPrompt(r.meta.PromptVersion), r.meta.Models) {
 		return errors.New("Model settings changed. Start a new analysis to use them.")
 	}
 	prompt, err := os.ReadFile(filepath.Join(r.dir, "prompt.md"))
@@ -498,10 +517,10 @@ func (s *Service) processSection(r *run, meta session, row section, load func() 
 		return r.setSection(row)
 	}
 	frameStart := time.Now()
-	frames, err := load()
+	frames, frameErr := load()
 	row.FramePreparationTime = time.Since(frameStart).Seconds()
-	if err != nil {
-		return fail(err.Error())
+	if frameErr != nil && (meta.PromptVersion != promptVersion || s.ctx.Err() != nil) {
+		return fail(frameErr.Error())
 	}
 	images := make([]nl2dsl.Image, len(frames))
 	row.FrameCount = len(frames)
@@ -528,6 +547,9 @@ func (s *Service) processSection(r *run, meta session, row section, load func() 
 	previous := slices.SortedFunc(maps.Values(r.rows), func(a, b section) int { return a.Index - b.Index })
 	r.mu.Unlock()
 	row.History = selectHistory(previous, row.Start, meta.Settings)
+	if meta.PromptVersion == promptVersion {
+		return s.processV6(r, meta, row, images, frameErr, start, publishVision)
+	}
 	row.VisionPrompt = buildPrompt(r.prompt, row, meta.Settings.HistoryMode)
 	row.Status, row.InferenceStatus = "inferring", "running"
 	if err := r.setSection(row); err != nil {
@@ -560,10 +582,12 @@ func (s *Service) processSection(r *run, meta session, row section, load func() 
 	row.InferenceTime = time.Since(start).Seconds()
 	switch task.Kind {
 	case "track", "precision_land":
-		row.Unresolved = []string{"The inferred class requires an operator to confirm the target and configured detection engine."}
+		row.Unresolved = []string{"Confirm the inferred target class before deploying."}
 	case "patrol", "survey":
 		row.Unresolved = []string{"Confirm the area in the Map tab before deploying."}
-	case "climb", "wait":
+	case "climb":
+		row.Unresolved = []string{"Confirm the inferred height above takeoff and wait duration before deploying."}
+	case "wait":
 		row.Unresolved = []string{"Observed waiting time does not establish the remaining task duration."}
 	}
 	if err := r.setSection(row); err != nil {
@@ -572,10 +596,18 @@ func (s *Service) processSection(r *run, meta session, row section, load func() 
 	publishVision()
 	ctx, cancel = context.WithTimeout(s.ctx, timeout(meta.Settings.GenerationTimeout))
 	generationStart := time.Now()
+	rules := "Generate a draft preserving only the actions, values and transitions of the inferred instruction."
+	switch task.Kind {
+	case "climb":
+		rules += " Use gcsactions.ClimbToAltitude with Altitude set to the inferred height above takeoff. Start Wait on climb completion using done, and return home when Wait completes."
+	case "track":
+		rules += " Use actions.Track with the inferred class. Its done transition and events.Battery transition (Comparator=events.LessOrEqual, Threshold=30) both go to actions.ReturnToHome."
+	case "patrol", "survey":
+		rules += " Use enums.AltitudeModeRelative for the inferred height above takeoff. Use a confirmed named polygon, or leave the area unbound."
+	}
 	res, err := s.generator.Generate(ctx, nl2dsl.Options{
 		Messages: []nl2dsl.Message{{Role: "user", Content: instruction}}, Plan: meta.Plan,
-		Rules: "Generate a draft preserving only the actions, values and transitions of the inferred instruction. " +
-			"Use an existing named planning area if confirmed, otherwise mark the area as UNBOUND_AREA. Never invent a camera or detector binding.",
+		Rules:      rules,
 		RequireDSL: true, Check: task.check, RequiredActions: task.actionChain(),
 	})
 	cancel()
@@ -587,10 +619,15 @@ func (s *Service) processSection(r *run, meta session, row section, load func() 
 	}
 	row.CompileStatus = res.Draft.Status
 	if res.Draft.Status == "unsupported_task" {
-		return fail(strings.Join(res.Draft.Errors, " "))
+		row.Error = strings.Join(res.Draft.Errors, " ")
+		row.Status, row.Elapsed = "completed", time.Since(start).Seconds()
+		return r.setSection(row)
 	}
 	if res.Draft.Status != "compiled" && res.Draft.Status != "needs_context" {
-		return fail("No DSL candidate passed the V4 compiler and inferred-task checks.")
+		if len(res.Draft.Errors) > 0 {
+			return fail(strings.Join(res.Draft.Errors, " "))
+		}
+		return fail("No DSL candidate was available from the V4 compiler.")
 	}
 	row.DSL = res.Draft.DSL
 	if res.Draft.Graph != nil {

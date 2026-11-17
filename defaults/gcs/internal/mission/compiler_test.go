@@ -206,6 +206,54 @@ func TestSDKCompilerRealBuild(t *testing.T) {
 		t.Fatalf("Build with plugin: %v", err)
 	}
 
+	t.Run("climb", func(t *testing.T) {
+		scoped, err := c.Registry(ctx, plugin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ix := NewTypeIndex(scoped)
+		if _, ok := ix.Key("actions", climbActionType); !ok {
+			t.Fatal("mock driver registry is missing the bundled climb action")
+		}
+		g := jsonGraph(t, `{
+  "nodes": [
+    {"instance_id": "climb", "type_name": "ClimbToAltitude", "params": {"Altitude": 5}},
+    {"instance_id": "wait", "type_name": "Wait", "params": {"Duration": 30}},
+    {"instance_id": "home", "type_name": "ReturnToHome", "params": {}}
+  ],
+  "edges": [
+    {"source": "climb", "event_id": "done", "target": "wait"},
+    {"source": "wait", "event_id": "done", "target": "home"}
+  ],
+  "start_id": "climb"
+}`)
+		ast, err := GraphToAst(g, ix, cfg.Header(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := BuildRequest{Ast: ast, Plugin: plugin, Arch: "amd64"}
+		bin, err := c.Build(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if arch, err := ElfArch(bin); err != nil || arch != "amd64" {
+			t.Fatalf("climb mission binary architecture = %q: %v", arch, err)
+		}
+
+		const altitudeField = "steeleagle_protocol/v1/messages/telemetry/PositionInfo/relative_position/z"
+		req.Plugin = append(bytes.Clone(plugin), []byte("\nfields = [\""+altitudeField+"\"]\n")...)
+		if _, err := c.Build(ctx, req); err == nil || !strings.Contains(err.Error(), altitudeField) {
+			t.Fatalf("build for a driver without altitude telemetry = %v", err)
+		}
+		withoutAltitude, err := c.Registry(ctx, req.Plugin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := NewTypeIndex(withoutAltitude).Key("actions", climbActionType); ok {
+			t.Error("driver without altitude telemetry still exposes climb")
+		}
+	})
+
 	t.Run("flow", func(t *testing.T) {
 		// A Track node on the flow's local yolo engine, resolved for a
 		// vehicle on 100.64.0.2 with a remote engine on the orchestrator.

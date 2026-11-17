@@ -264,6 +264,23 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	register, inference := registerAI(ctx, engine, a.AI, missions.svc, hub, log)
 	if inference != nil {
 		defer inference.Close()
+		if catalog != nil {
+			inference.SetLiveDetectionSource(func(ctx context.Context, vehicle, producer string) (string, error) {
+				raw, err := flowOf(ctx, vehicle)
+				if err != nil || len(raw) == 0 {
+					return "", err
+				}
+				flow, err := config.ParseFlowConfigFromBytes(raw)
+				if err != nil {
+					return "", err
+				}
+				cat, err := catalog(ctx)
+				if err != nil {
+					return "", err
+				}
+				return liveDetector(cat, flow, gcsIP, vehicle, producer), nil
+			}, results)
+		}
 	}
 	if conn != nil {
 		// Detections of the engines on this machine are placed on the map

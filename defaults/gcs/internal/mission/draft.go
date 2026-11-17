@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
-	"strings"
 
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
 )
@@ -15,12 +15,13 @@ import (
 // PlanningContext is the operator's current V4 planning context. GeoJSON is
 // the serialized Map tab data, in the same format as Graph.GeoJSON.
 type PlanningContext struct {
-	Vehicle string          `json:"vehicle,omitempty"`
-	Flow    *flows.Template `json:"flow,omitempty"`
-	GeoJSON string          `json:"geojson,omitempty"`
+	Vehicle   string          `json:"vehicle,omitempty"`
+	Flow      *flows.Template `json:"flow,omitempty"`
+	FlowIssue string          `json:"flow_issue,omitempty"`
+	GeoJSON   string          `json:"geojson,omitempty"`
 }
 
-func (s *Service) validationTarget(ctx context.Context, plan PlanningContext, g Graph) (BuildTarget, int, error) {
+func (s *Service) planningTarget(ctx context.Context, plan PlanningContext) (BuildTarget, int, error) {
 	target := BuildTarget{Key: "amd64", Arch: "amd64", Engines: map[string]string{}}
 	if plan.Vehicle != "" {
 		plugin, status, err := s.lookupVehiclePlugin(ctx, plan.Vehicle)
@@ -29,45 +30,87 @@ func (s *Service) validationTarget(ctx context.Context, plan PlanningContext, g 
 		}
 		target.Plugin = plugin
 	}
-	if plan.Flow.Empty() {
-		return target, 0, nil
-	}
-	if s.catalog == nil {
-		return target, http.StatusServiceUnavailable, errors.New(noDaemon)
-	}
-	cat, err := s.catalog(ctx)
-	if err != nil {
-		return target, http.StatusServiceUnavailable, fmt.Errorf("Cannot list the flow catalog: %w", err)
-	}
-	res, err := s.resolveForValidate(cat, *plan.Flow, g)
-	if err != nil {
-		return target, http.StatusOK, err
-	}
-	target.Flow, target.Manifest, target.Engines = res.Flow, res.Manifest, res.Engines
 	return target, 0, nil
 }
 
-func (s *Service) draftState(ctx context.Context, vehicle string) (*State, error) {
-	st, err := s.Ready(ctx)
-	if err != nil || vehicle == "" {
-		return st, err
+func (s *Service) resolvePlanningFlow(ctx context.Context, plan PlanningContext, g Graph, target BuildTarget) (BuildTarget, planningBindings, int, error) {
+	bindings := driverBindings(target.Plugin)
+	if plan.Flow.Empty() {
+		return target, bindings, 0, nil
 	}
-	plugin, _, err := s.lookupVehiclePlugin(ctx, vehicle)
+	flow := *plan.Flow
+	if plan.Vehicle != "" {
+		if flow.Vehicle != "" && flow.Vehicle != plan.Vehicle {
+			err := fmt.Errorf("the flow uses vehicle %q but Mission Builder uses %q", flow.Vehicle, plan.Vehicle)
+			return target, bindings, http.StatusOK, err
+		}
+		flow.Vehicle = plan.Vehicle
+	}
+	if s.catalog == nil {
+		return target, bindings, http.StatusServiceUnavailable, errors.New(noDaemon)
+	}
+	cat, err := s.catalog(ctx)
 	if err != nil {
-		return nil, err
+		return target, bindings, http.StatusServiceUnavailable, fmt.Errorf("Cannot list the flow catalog: %w", err)
 	}
-	return s.scopedState(ctx, plugin)
+	res, err := s.resolveForValidate(cat, flow, g)
+	if err != nil {
+		return target, bindings, http.StatusOK, err
+	}
+	target.Flow, target.Manifest, target.Engines = res.Flow, res.Manifest, res.Engines
+	bindings.addFlow(cat, flow, res)
+	return target, bindings, 0, nil
+}
+
+func (s *Service) validationTarget(ctx context.Context, plan PlanningContext, g Graph) (BuildTarget, planningBindings, int, error) {
+	target, status, err := s.planningTarget(ctx, plan)
+	if err != nil {
+		return target, planningBindings{}, status, err
+	}
+	return s.resolvePlanningFlow(ctx, plan, g, target)
+}
+
+func (s *Service) planningState(ctx context.Context, target BuildTarget) (*State, error) {
+	if len(target.Plugin) == 0 {
+		return s.Ready(ctx)
+	}
+	return s.scopedState(ctx, target.Plugin)
 }
 
 // DraftReference exposes the same schema and allowed imports used in Plan.
 func (s *Service) DraftReference(ctx context.Context, plan PlanningContext) (map[string]any, error) {
-	st, err := s.draftState(ctx, plan.Vehicle)
+	target, _, err := s.planningTarget(ctx, plan)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"schema": st.Schema, "imports": s.header["Imports"], "planning_context": map[string]any{
+	st, err := s.planningState(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	_, bindings, _, flowErr := s.resolvePlanningFlow(ctx, plan, Graph{}, target)
+	bindings = bindings.forRegistry(st.Index)
+	context := map[string]any{
 		"vehicle": plan.Vehicle, "flow": plan.Flow, "map_features": featureNames(plan.GeoJSON),
-	}}, nil
+		"cameras": bindings.Cameras, "engines": bindings.Engines,
+	}
+	if flowErr != nil {
+		context["flow_issue"] = flowErr.Error()
+	} else if plan.FlowIssue != "" && plan.Flow.Empty() {
+		context["flow_issue"] = plan.FlowIssue
+	}
+	header := s.header
+	if _, ok := st.Index.Key("actions", climbActionType); ok {
+		header = maps.Clone(header)
+		addClimbImport(header)
+	}
+	ref := map[string]any{"schema": st.Schema, "imports": header["Imports"], "planning_context": context}
+	for _, module := range s.cfg.Modules {
+		if module.Path == sdkModulePath && module.Version != "" {
+			ref["sdk_version"] = module.Version
+			break
+		}
+	}
+	return ref, nil
 }
 
 type Draft struct {
@@ -81,7 +124,11 @@ type Draft struct {
 // the same validation target as the Plan page. The caller can add checks for
 // requirements inferred from video before an otherwise valid graph is built.
 func (s *Service) CheckDraft(ctx context.Context, candidate string, plan PlanningContext, check func(Graph) []string) Draft {
-	st, err := s.draftState(ctx, plan.Vehicle)
+	target, _, err := s.planningTarget(ctx, plan)
+	if err != nil {
+		return failedDraft("compiler_unavailable", err.Error())
+	}
+	st, err := s.planningState(ctx, target)
 	if err != nil {
 		return failedDraft("compiler_unavailable", err.Error())
 	}
@@ -92,8 +139,9 @@ func (s *Service) CheckDraft(ctx context.Context, candidate string, plan Plannin
 	}
 	// Relative aliases require a resolved flow. If the catalog or an engine is
 	// unavailable, the context checks report it after the graph is imported.
-	engines, _, _ := s.flowEngineNames(ctx, plan.Flow)
-	parsed := astToGraph(ast, st.Index, flowEngineAliases(plan.Flow, engines), false)
+	target, bindings, _, flowErr := s.resolvePlanningFlow(ctx, plan, Graph{}, target)
+	bindings = bindings.forRegistry(st.Index)
+	parsed := astToGraph(ast, st.Index, flowEngineAliases(plan.Flow, target.Engines), false)
 	if warnings, ok := parsed["warnings"].([]any); ok && len(warnings) != 0 {
 		result := failedDraft("invalid_graph")
 		for _, warning := range warnings {
@@ -101,20 +149,15 @@ func (s *Service) CheckDraft(ctx context.Context, candidate string, plan Plannin
 		}
 		return result
 	}
-	encoded, err := json.Marshal(parsed)
+	g, err := graphFromParsed(parsed)
 	if err != nil {
-		return failedDraft("invalid_graph", err.Error())
-	}
-	var g Graph
-	dec := json.NewDecoder(bytes.NewReader(encoded))
-	dec.UseNumber()
-	if err := dec.Decode(&g); err != nil {
 		return failedDraft("invalid_graph", err.Error())
 	}
 	g.GeoJSON = plan.GeoJSON
 	if issues := StructuralErrors(g); len(issues) > 0 {
 		return graphIssues("invalid_graph", issues)
 	}
+	bindTrackDraft(g, st.Index, bindings)
 	if check != nil {
 		if issues := check(g); len(issues) > 0 {
 			return failedDraft("task_mismatch", issues...)
@@ -130,12 +173,10 @@ func (s *Service) CheckDraft(ctx context.Context, candidate string, plan Plannin
 		return failedDraft("invalid_graph", err.Error())
 	}
 
-	if missing := missingDraftContext(g, st.Index, plan); len(missing) > 0 {
-		return Draft{DSL: normalized, Graph: &g, Status: "needs_context", Errors: missing}
-	}
-	target, _, err := s.validationTarget(ctx, plan, g)
-	if err != nil {
-		return Draft{DSL: normalized, Graph: &g, Status: "needs_context", Errors: []string{err.Error()}}
+	if issues := draftBindingErrors(g, st.Index, plan, bindings, flowErr); len(issues) > 0 {
+		result := graphIssues("needs_context", issues)
+		result.DSL, result.Graph = normalized, &g
+		return result
 	}
 	_, issues, err := s.CompileGraph(ctx, g, []BuildTarget{target})
 	if err != nil {
@@ -145,6 +186,18 @@ func (s *Service) CheckDraft(ctx context.Context, candidate string, plan Plannin
 		return graphIssues("compile_failed", issues)
 	}
 	return Draft{DSL: normalized, Graph: &g, Status: "compiled", Errors: []string{}}
+}
+
+func graphFromParsed(parsed map[string]any) (Graph, error) {
+	var g Graph
+	encoded, err := json.Marshal(parsed)
+	if err != nil {
+		return g, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(encoded))
+	dec.UseNumber()
+	err = dec.Decode(&g)
+	return g, err
 }
 
 func failedDraft(status string, messages ...string) Draft {
@@ -179,37 +232,4 @@ func featureNames(geojson string) map[string]string {
 		}
 	}
 	return features
-}
-
-func missingDraftContext(g Graph, ix *TypeIndex, plan PlanningContext) []string {
-	var missing []string
-	features := featureNames(plan.GeoJSON)
-	engines := map[string]bool{}
-	if plan.Flow != nil {
-		for _, engine := range plan.Flow.Engines {
-			engines[engine.Name] = true
-		}
-	}
-	check := func(section string, node GraphNode) {
-		qualified, _ := ix.Qualify(section, node.TypeName)
-		for name, raw := range node.Params {
-			goType, _ := ix.FieldType(qualified, name)
-			value, _ := raw.(string)
-			switch {
-			case isFeatureType(goType) && features[value] != Bare(goType):
-				missing = append(missing, fmt.Sprintf("%s: select a %s in the Map tab for %s (%q).", node.InstanceID, Bare(goType), name, value))
-			case isEngineType(goType) && !engines[value]:
-				missing = append(missing, fmt.Sprintf("%s: bind %s (%q) in the Flow Builder.", node.InstanceID, name, value))
-			case goType == "params.Camera" && strings.HasPrefix(value, "UNBOUND_"):
-				missing = append(missing, fmt.Sprintf("%s: select the camera in the Mission Builder.", node.InstanceID))
-			}
-		}
-	}
-	for _, node := range g.Nodes {
-		check("actions", node)
-	}
-	for _, event := range g.Events {
-		check("events", GraphNode(event))
-	}
-	return missing
 }

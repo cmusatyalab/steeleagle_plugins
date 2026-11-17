@@ -353,16 +353,24 @@ func typedDefault(kind, value string) any {
 // is used as written; otherwise it must be a key of engines, and its value (the
 // engine's resolved name) is what the generated constant names.
 func GraphToAst(g Graph, ix *TypeIndex, header map[string]any, engines map[string]string) (map[string]any, error) {
-	return graphToAstWithMode(g, ix, header, engines, false)
+	return graphToAstWithMode(g, ix, header, engines, resolvedEngineNames)
 }
 
 // graphToPortableAst preserves template engine names for a DSL import/export
 // round trip. The compiler path resolves them to SDK constants separately.
 func graphToPortableAst(g Graph, ix *TypeIndex, header map[string]any) (map[string]any, error) {
-	return graphToAstWithMode(g, ix, header, nil, true)
+	return graphToAstWithMode(g, ix, header, nil, portableEngineNames)
 }
 
-func graphToAstWithMode(g Graph, ix *TypeIndex, header map[string]any, engines map[string]string, portable bool) (map[string]any, error) {
+type engineNamesMode int
+
+const (
+	resolvedEngineNames engineNamesMode = iota
+	portableEngineNames
+	previewEngineNames
+)
+
+func graphToAstWithMode(g Graph, ix *TypeIndex, header map[string]any, engines map[string]string, mode engineNamesMode) (map[string]any, error) {
 	type block struct {
 		action string
 		rules  []any
@@ -381,7 +389,7 @@ func graphToAstWithMode(g Graph, ix *TypeIndex, header map[string]any, engines m
 
 	actionDecls := []any{}
 	for _, n := range g.Nodes {
-		d, err := astDecl(ix, "actions", n, engines, portable)
+		d, err := astDecl(ix, "actions", n, engines, mode)
 		if err != nil {
 			return nil, err
 		}
@@ -389,7 +397,7 @@ func graphToAstWithMode(g Graph, ix *TypeIndex, header map[string]any, engines m
 	}
 	eventDecls := []any{}
 	for _, e := range g.Events {
-		d, err := astDecl(ix, "events", GraphNode(e), engines, portable)
+		d, err := astDecl(ix, "events", GraphNode(e), engines, mode)
 		if err != nil {
 			return nil, err
 		}
@@ -400,6 +408,9 @@ func graphToAstWithMode(g Graph, ix *TypeIndex, header map[string]any, engines m
 		"Imports": header["Imports"],
 		"Actions": map[string]any{"Decls": actionDecls},
 		"Events":  map[string]any{"Decls": eventDecls},
+	}
+	if climbDeclaration(ast) != nil {
+		addClimbImport(ast)
 	}
 	if g.StartID != nil && *g.StartID != "" {
 		bs := []any{}
@@ -432,7 +443,7 @@ func orderedParams(ix *TypeIndex, qualified string, params map[string]any) []str
 	return append(keys, rest...)
 }
 
-func astDecl(ix *TypeIndex, sec string, instance GraphNode, engines map[string]string, portable bool) (map[string]any, error) {
+func astDecl(ix *TypeIndex, sec string, instance GraphNode, engines map[string]string, mode engineNamesMode) (map[string]any, error) {
 	qualified, ok := ix.Qualify(sec, instance.TypeName)
 	if !ok {
 		qualified = instance.TypeName
@@ -441,7 +452,7 @@ func astDecl(ix *TypeIndex, sec string, instance GraphNode, engines map[string]s
 	for _, key := range orderedParams(ix, qualified, instance.Params) {
 		goType, _ := ix.FieldType(qualified, key)
 		value, err := astValue(ix, goType, instance.Params[key], &engineCtx{
-			engines: engines, portable: portable, node: instance.InstanceID, field: key,
+			engines: engines, mode: mode, node: instance.InstanceID, field: key,
 		})
 		if err != nil {
 			return nil, err
@@ -480,10 +491,10 @@ func isIntLiteral(s string) bool { return !strings.ContainsAny(s, ".eE") }
 // the flow's engines (nil for none known) and the top-level node and field the
 // value sits in, for the error.
 type engineCtx struct {
-	engines  map[string]string
-	portable bool
-	node     string
-	field    string
+	engines map[string]string
+	mode    engineNamesMode
+	node    string
+	field   string
 }
 
 // astValue converts one plain-JSON param value into an AST Value, shaped by
@@ -501,7 +512,7 @@ func astValue(ix *TypeIndex, goType string, value any, ec *engineCtx) (map[strin
 		return map[string]any{"Ident": fmt.Sprintf("%s_%v", goType, value)}, nil
 	}
 	if s, isStr := value.(string); kind == "engine" && isStr {
-		if ec.portable {
+		if ec.mode == portableEngineNames || ec.mode == previewEngineNames && placeholder(s, goType) {
 			return map[string]any{"String": s}, nil
 		}
 		full := s
@@ -525,7 +536,7 @@ func astValue(ix *TypeIndex, goType string, value any, ec *engineCtx) (map[strin
 			if t == "" {
 				t = "unknown"
 			}
-			return nil, fmt.Errorf("an object was given for a field of type %s", t)
+			return nil, fmt.Errorf("%s.%s: expected %s, got an object", ec.node, ec.field, t)
 		}
 		args := []any{}
 		for _, key := range orderedParams(ix, goType, obj) {

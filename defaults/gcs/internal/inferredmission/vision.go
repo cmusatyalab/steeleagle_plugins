@@ -7,22 +7,24 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
 )
 
-//go:embed prompts/v5.md
+//go:embed prompts/v6.md
 var visionPrompt string
 
-const promptVersion = "v5"
+const promptVersion = "v6"
 
 const (
 	targets       = "person|bicycle|car|motorcycle|bus|truck|train|boat|airplane|bird|dog|cat|horse|sheep|cow|elephant|bear|zebra|giraffe|bench|umbrella|backpack|suitcase|kite|frisbee|skateboard|surfboard|skis|snowboard"
 	positive      = "[1-9][0-9]{0,4}"
 	returnHome    = ", then return home\\."
 	batteryReturn = " If the battery drops to 30 percent, return home\\."
+	climbAction   = "gcsactions.ClimbToAltitude"
 )
 
 var takeoffTemplate = regexp.MustCompile("^Take off to (" + positive + ") meters, then (.+)$")
@@ -48,6 +50,9 @@ type task struct {
 	Altitude int    `json:"alt,omitempty"`
 	Seconds  int    `json:"seconds,omitempty"`
 	Takeoff  int    `json:"takeoff,omitempty"`
+	Area     string `json:"area,omitempty"`
+	Camera   string `json:"camera,omitempty"`
+	Engine   string `json:"engine,omitempty"`
 }
 
 func parseInstruction(text string) (task, string, error) {
@@ -118,20 +123,23 @@ func buildPrompt(base string, row section, mode string) string {
 		"Do not repeat an earlier takeoff.\n" + string(data)
 }
 
-func (t task) actionChain() []string {
-	chain := map[string][]string{
-		"track": {"Track", "ReturnToHome"}, "patrol": {"Patrol", "ReturnToHome"}, "survey": {"Patrol", "ReturnToHome"},
-		"climb": {"ElevateToAltitude", "Wait", "ReturnToHome"}, "wait": {"Wait", "ReturnToHome"},
-		"precision_land": {"PrecisionLand"}, "land": {"Land"},
+func (t task) actionChain() [][]string {
+	chain := map[string][][]string{
+		"track":          {{"actions.Track"}, {"actions.ReturnToHome"}},
+		"patrol":         {{"actions.Patrol"}, {"actions.ReturnToHome"}},
+		"survey":         {{"actions.Patrol"}, {"actions.ReturnToHome"}},
+		"climb":          {{climbAction}, {"actions.Wait"}, {"actions.ReturnToHome"}},
+		"wait":           {{"actions.Wait"}, {"actions.ReturnToHome"}},
+		"precision_land": {{"actions.PrecisionLand"}},
+		"land":           {{"actions.Land"}},
 	}[t.Kind]
 	if t.Takeoff != 0 {
-		chain = append([]string{"TakeOff"}, chain...)
+		chain = append([][]string{{"actions.TakeOff"}}, chain...)
 	}
 	return chain
 }
 
-func (t task) check(g mission.Graph) []string {
-	chain := t.actionChain()
+func (t task) check(g mission.Graph, chain [][]string) []string {
 	batteryAction := map[string]string{"track": "Track", "patrol": "Patrol", "survey": "Patrol", "precision_land": "PrecisionLand"}[t.Kind]
 	wantActions := len(chain)
 	if t.Kind == "precision_land" {
@@ -156,11 +164,12 @@ func (t task) check(g mission.Graph) []string {
 		edges[edge.Source] = append(edges[edge.Source], edge)
 	}
 	id := *g.StartID
-	for _, kind := range chain {
+	for _, choices := range chain {
 		node := byID[id]
-		if shortType(node.TypeName) != kind {
-			return []string{fmt.Sprintf("Expected %s on the normal completion path.", kind)}
+		if !slices.Contains(choices, node.TypeName) {
+			return []string{fmt.Sprintf("Expected %s on the normal completion path.", strings.Join(choices, " or "))}
 		}
+		kind := shortType(node.TypeName)
 		if err := t.checkParams(kind, node.Params); err != "" {
 			return []string{err}
 		}
@@ -174,13 +183,14 @@ func (t task) check(g mission.Graph) []string {
 			}
 			conditional++
 			event := events[edge.EventID]
-			fallback := "ReturnToHome"
+			fallback := chain[len(chain)-1]
 			if t.Kind == "precision_land" {
-				fallback = "Land"
+				fallback = []string{"Land", "actions.Land"}
 			}
 			comparator := shortType(field(event.Params, "Comparator"))
-			if kind != batteryAction || shortType(event.TypeName) != "Battery" || !numericField(event.Params, "Threshold", 30) ||
-				(comparator != "" && comparator != "LessOrEqual") || shortType(byID[edge.Target].TypeName) != fallback {
+			if kind != batteryAction || (event.TypeName != "Battery" && event.TypeName != "events.Battery") ||
+				!numericField(event.Params, "Threshold", 30) || comparator != "LessOrEqual" ||
+				!slices.Contains(fallback, byID[edge.Target].TypeName) {
 				return []string{"The only conditional transition must use the required low-battery event and fallback."}
 			}
 			if t.Kind == "precision_land" {
@@ -212,18 +222,28 @@ func (t task) checkParams(kind string, params map[string]any) string {
 		if field(params, "Class") != t.Target {
 			return "Track class must match the inferred target."
 		}
+		if t.Camera != "" && shortType(field(params, "Camera")) != shortType(t.Camera) ||
+			t.Engine != "" && field(params, "Engine") != t.Engine {
+			return "Track must use the verified camera and detection engine."
+		}
 	case "Patrol":
 		if !numericField(params, "Altitude", t.Altitude) {
 			return "Patrol altitude must match the inferred altitude."
+		}
+		if shortType(field(params, "AltitudeMode")) != "AltitudeModeRelative" {
+			return "Patrol altitude must use enums.AltitudeModeRelative for height above takeoff."
+		}
+		if t.Area != "" && field(params, "Area") != t.Area {
+			return "Patrol area must match the selected map polygon."
 		}
 		pattern := shortType(field(params, "Pattern"))
 		if (t.Kind == "survey" && pattern != "PatrolModeSurvey") ||
 			(t.Kind == "patrol" && pattern != "" && pattern != "PatrolModeCorridor") {
 			return "Use the inferred patrol or survey pattern."
 		}
-	case "ElevateToAltitude":
-		if !numericField(params, "Altitude", t.Altitude) && !numericField(params, "TargetAltitude", t.Altitude) {
-			return "Climb altitude must match the inference."
+	case "ClimbToAltitude":
+		if !numericField(params, "Altitude", t.Altitude) {
+			return "Climb target height above takeoff must match the inference."
 		}
 	case "PrecisionLand":
 		if field(params, "Class") != t.Target {

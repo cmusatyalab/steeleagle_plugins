@@ -18,12 +18,34 @@ import (
 	"github.com/rs/zerolog"
 )
 
-type slidingCompiler struct{ videoCompiler }
+type slidingCompiler struct {
+	videoCompiler
+	generatingFirst chan<- struct{}
+	firstDSL        <-chan struct{}
+}
 
-func (slidingCompiler) CheckDraft(ctx context.Context, dsl string, plan mission.PlanningContext, check func(mission.Graph) []string) mission.Draft {
+func (c slidingCompiler) DraftReference(ctx context.Context, plan mission.PlanningContext) (map[string]any, error) {
+	ref, err := c.videoCompiler.DraftReference(ctx, plan)
+	ref["schema"].(map[string]any)["actions"].(map[string]any)["ClimbToAltitude"] = map[string]any{"type": climbAction}
+	return ref, err
+}
+
+func (c slidingCompiler) CheckDraft(ctx context.Context, dsl string, plan mission.PlanningContext, check func(mission.Graph) []string) mission.Draft {
+	climb := strings.Contains(dsl, "ClimbToAltitude climb(Altitude=10.0)")
+	if climb {
+		c.generatingFirst <- struct{}{}
+		select {
+		case <-c.firstDSL:
+		case <-ctx.Done():
+			return mission.Draft{Status: "compiler_unavailable", Errors: []string{ctx.Err().Error()}}
+		}
+	}
 	return (videoCompiler{}).CheckDraft(ctx, dsl, plan, func(g mission.Graph) []string {
-		if dsl == "wait ten" {
-			g.Nodes[0].Params["Duration"] = 10
+		if climb {
+			start := "climb"
+			g.Nodes = append(g.Nodes, mission.GraphNode{InstanceID: start, TypeName: "ClimbToAltitude", Params: map[string]any{"Altitude": 10}})
+			g.Edges = append(g.Edges, mission.GraphEdge{Source: start, EventID: "done", Target: *g.StartID})
+			g.StartID = &start
 		}
 		return check(g)
 	})
@@ -78,7 +100,8 @@ func TestSlidingMP4WorkersHistoryAndPause(t *testing.T) {
 				w.WriteHeader(400)
 				return
 			}
-			index, wait := vision.Section, 5
+			index := vision.Section
+			instruction := "Wait 30 seconds, then return home."
 			if vision.Mode == "uniform" {
 				index += 100
 			}
@@ -86,7 +109,7 @@ func TestSlidingMP4WorkersHistoryAndPause(t *testing.T) {
 			var gate <-chan struct{}
 			switch index {
 			case 1:
-				wait, gate = 10, firstVision
+				instruction, gate = "Climb to 10 meters, then wait 30 seconds, then return home.", firstVision
 			case 3, 4, 5:
 				gate = middleVision
 			case 6:
@@ -95,18 +118,11 @@ func TestSlidingMP4WorkersHistoryAndPause(t *testing.T) {
 			if gate != nil && !await(r.Context(), gate) {
 				return
 			}
-			fmt.Fprintf(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":"Wait %d seconds, then return home."}]}]}`, wait)
+			fmt.Fprintf(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":%q}]}]}`, instruction)
 			return
 		}
-		dsl := "wait five"
-		if strings.Contains(string(body.Input), "Wait 10 seconds, then return home.") {
-			dsl = "wait ten"
-			generatingFirst <- struct{}{}
-			if !await(r.Context(), firstDSL) {
-				return
-			}
-		}
-		fmt.Fprintf(w, `{"output":[{"type":"function_call","name":"submit_mission_dsl","arguments":"{\"dsl\":\"%s\",\"summary\":\"Wait then return.\"}"}]}`, dsl)
+		t.Error("V6 invoked a second model request to translate its recommendation")
+		w.WriteHeader(http.StatusBadRequest)
 	}))
 	t.Cleanup(model.Close)
 
@@ -114,7 +130,8 @@ func TestSlidingMP4WorkersHistoryAndPause(t *testing.T) {
 	cfg := DefaultSettings()
 	cfg.SectionSeconds, cfg.SectionMode = 5, sectionSliding
 	provider := nl2dsl.Provider{Name: "openai", ModelID: "test", Key: "test", BaseURL: model.URL}
-	svc, err := New(t.Context(), root, cfg, provider, provider, nl2dsl.Generator{Model: provider, Compiler: slidingCompiler{}}, zerolog.Nop())
+	compiler := slidingCompiler{generatingFirst: generatingFirst, firstDSL: firstDSL}
+	svc, err := New(t.Context(), root, cfg, provider, provider, nl2dsl.Generator{Model: provider, Compiler: compiler}, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

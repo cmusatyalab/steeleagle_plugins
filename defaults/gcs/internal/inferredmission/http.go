@@ -44,7 +44,7 @@ func (s *Service) Register(mux *http.ServeMux, sources func() []Source) {
 	mux.HandleFunc("GET "+api+"/sessions", s.sessions)
 	mux.HandleFunc("POST "+api+"/sessions", func(w http.ResponseWriter, r *http.Request) {
 		if !s.configured() || !mediaAvailable() {
-			failHTTP(w, http.StatusServiceUnavailable, "Configure both model providers and install FFmpeg and ffprobe.")
+			failHTTP(w, http.StatusServiceUnavailable, "Configure the vision model and install FFmpeg and ffprobe.")
 			return
 		}
 		var req startRequest
@@ -100,7 +100,7 @@ func (s *Service) Register(mux *http.ServeMux, sources func() []Source) {
 func (s *Service) change(r *run, action string) error {
 	if action == "resume" {
 		if !s.configured() || !mediaAvailable() {
-			return errors.New("Configure the models and media tools before resuming.")
+			return errors.New("Configure the vision model and media tools before resuming.")
 		}
 		return s.resume(r)
 	}

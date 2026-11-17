@@ -258,14 +258,23 @@ func (s *Service) ServeCompile(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &g) {
 		return
 	}
-	plan := PlanningContext{Vehicle: g.Vehicle, Flow: g.Flow}
-	target, status, err := s.validationTarget(r.Context(), plan, g.Graph)
+	plan := PlanningContext{Vehicle: g.Vehicle, Flow: g.Flow, GeoJSON: g.GeoJSON}
+	target, bindings, status, err := s.validationTarget(r.Context(), plan, g.Graph)
 	if err != nil {
 		if status == http.StatusOK {
 			writeJSON(w, status, map[string]any{"errors": []GraphError{{Message: err.Error()}}})
 		} else {
 			writeError(w, status, err.Error())
 		}
+		return
+	}
+	st, err := s.planningState(r.Context(), target)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	if issues := bindingErrors(g.Graph, st.Index, plan, bindings.forRegistry(st.Index), false); len(issues) > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"errors": issues})
 		return
 	}
 	_, errs, err := s.CompileGraph(r.Context(), g.Graph, []BuildTarget{target})
@@ -368,7 +377,11 @@ func (s *Service) ServeRenderDSL(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	ast, err := graphToAstWithMode(g.Graph, st.Index, s.header, engines, g.Flow.Empty())
+	mode := previewEngineNames
+	if g.Flow.Empty() {
+		mode = portableEngineNames
+	}
+	ast, err := graphToAstWithMode(g.Graph, st.Index, s.header, engines, mode)
 	if err == nil {
 		var dsl string
 		if dsl, err = AstToDSL(ast); err == nil {
@@ -387,8 +400,9 @@ func (s *Service) ServeParseDSL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		DSL  string          `json:"dsl"`
-		Flow *flows.Template `json:"flow"`
+		DSL  string           `json:"dsl"`
+		Flow *flows.Template  `json:"flow"`
+		Plan *PlanningContext `json:"planning_context"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -399,18 +413,47 @@ func (s *Service) ServeParseDSL(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	engines, status, err := s.flowEngineNames(r.Context(), req.Flow)
-	if status == http.StatusServiceUnavailable {
-		writeError(w, status, err.Error())
-		return
-	}
-	var idents map[string]string // ident suffix -> template name
-	if err != nil {
-		upgrade = append(upgrade, "Engines are kept as named: the flow doesn't resolve: "+err.Error())
+	var graph map[string]any
+	if req.Plan != nil {
+		plan := *req.Plan
+		if plan.Flow == nil {
+			plan.Flow = req.Flow
+		}
+		target, status, err := s.planningTarget(r.Context(), plan)
+		if err != nil {
+			writeError(w, status, err.Error())
+			return
+		}
+		st, err = s.planningState(r.Context(), target)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		target, bindings, _, flowErr := s.resolvePlanningFlow(r.Context(), plan, Graph{}, target)
+		graph = astToGraph(ast, st.Index, flowEngineAliases(plan.Flow, target.Engines), false)
+		g, err := graphFromParsed(graph)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		bindings = bindings.forRegistry(st.Index)
+		bindTrackDraft(g, st.Index, bindings)
+		graph["nodes"], graph["events"] = g.Nodes, g.Events
+		graph["binding_errors"] = append([]GraphError{}, draftBindingErrors(g, st.Index, plan, bindings, flowErr)...)
 	} else {
-		idents = flowEngineAliases(req.Flow, engines)
+		engines, status, err := s.flowEngineNames(r.Context(), req.Flow)
+		if status == http.StatusServiceUnavailable {
+			writeError(w, status, err.Error())
+			return
+		}
+		var idents map[string]string // ident suffix -> template name
+		if err != nil {
+			upgrade = append(upgrade, "Engines are kept as named: the flow doesn't resolve: "+err.Error())
+		} else {
+			idents = flowEngineAliases(req.Flow, engines)
+		}
+		graph = AstToGraph(ast, st.Index, idents)
 	}
-	graph := AstToGraph(ast, st.Index, idents)
 	warnings := []any{}
 	for _, m := range upgrade {
 		warnings = append(warnings, m)
@@ -419,6 +462,9 @@ func (s *Service) ServeParseDSL(w http.ResponseWriter, r *http.Request) {
 		warnings = append(warnings, more...)
 	}
 	configured := map[string]bool{}
+	if _, ok := st.Index.Key("actions", climbActionType); ok {
+		configured[climbModulePath] = true
+	}
 	for _, i := range s.cfg.Imports {
 		configured[i.Path] = true
 	}
@@ -454,8 +500,8 @@ func (s *Service) ServeBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "arch must be amd64 or arm64")
 		return
 	}
-	plan := PlanningContext{Vehicle: req.Vehicle, Flow: req.Flow}
-	target, status, err := s.validationTarget(r.Context(), plan, req.Graph)
+	plan := PlanningContext{Vehicle: req.Vehicle, Flow: req.Flow, GeoJSON: req.GeoJSON}
+	target, bindings, status, err := s.validationTarget(r.Context(), plan, req.Graph)
 	if err != nil {
 		if status == http.StatusOK {
 			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("Build failed for %s: %s", req.Arch, err))
@@ -465,7 +511,16 @@ func (s *Service) ServeBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target.Key, target.Arch = req.Arch, req.Arch
-	bins, errs, err := s.CompileGraph(r.Context(), req.Graph, []BuildTarget{target})
+	st, err := s.planningState(r.Context(), target)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	errs := bindingErrors(req.Graph, st.Index, plan, bindings.forRegistry(st.Index), false)
+	var bins map[string][]byte
+	if len(errs) == 0 {
+		bins, errs, err = s.CompileGraph(r.Context(), req.Graph, []BuildTarget{target})
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -496,6 +551,7 @@ func (s *Service) CompileGraph(ctx context.Context, g Graph, targets []BuildTarg
 		return nil, nil, err
 	}
 	errs := StructuralErrors(g)
+	errs = append(errs, bindingErrors(g, st.Index, PlanningContext{}, planningBindings{}, false)...)
 	geojson, featureErrs := PrepareGeoJSON(g.GeoJSON)
 	for _, m := range featureErrs {
 		errs = append(errs, GraphError{Message: m})
