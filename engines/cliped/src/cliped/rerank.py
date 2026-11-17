@@ -58,6 +58,7 @@ from cliped.engine import (
 )
 from cliped.send_queue import Tile
 from cliped.sent_log import log_path
+from cliped.verifier import PROMPT_TYPE
 from steeleagle_protocol.v1.messages.result import result_pb2
 
 logger = logging.getLogger("cliped.rerank")
@@ -194,7 +195,8 @@ class Reranker:
     def __init__(self, encoder, selector, queue, *, detector, verifier, class_name, classes=(), confidence=0.5,
                  max_candidates=8, context=1.25, verify_context=2.0, min_verify_side=96, max_verify_side=256,
                  novelty=0.92, cooldown_s=5.0, require_verified=False, prompt_weight=0.0, rank=RANK_PROMPT,
-                 gate=None, timeout_ns=1_000_000_000,
+                 gate=None, prompt=None, has_prompt=True, retarget=None, ignore_new=False,
+                 timeout_ns=1_000_000_000,
                  clock=time.monotonic_ns, tile_log=None, candidate_log=None,
                  summary_interval_ns=SUMMARY_INTERVAL_NS):
         self.encoder = encoder
@@ -219,6 +221,16 @@ class Reranker:
         self.rank = rank
         # An instance_gate.InstanceGate, or None
         self.gate = gate
+        # The text prompt (None for an image or none), whether there is a
+        # prompt at all (without one, boxes are ranked by confidence), and
+        # retarget(text), which gives a new selector and gate for the text
+        # prompt `text`, for the verifier's prompt (on_prompt)
+        self.prompt = prompt
+        self.has_prompt = has_prompt
+        self.retarget = retarget
+        # Whether to keep the configured prompt whatever the verifier's is
+        self.ignore_new = ignore_new
+        self.generation = 0
         self.timeout_ns = timeout_ns
         self.clock = clock
         self.tile_log = tile_log
@@ -287,8 +299,14 @@ class Reranker:
     def on_queue_event(self, event, now=None):
         """Takes an event about a reintegration input, at any engine, and
         learns from the verifier's answer."""
+        if self.on_prompt_event(event):
+            return
         tile = self.queue.on_event(event, self.verifier)
         if tile is None or tile.embedding is None:
+            return
+        if tile.generation != self.generation:
+            logger.info("verifier: an answer about the box of frame %d, sent for an earlier prompt; not learned",
+                        tile.frame_id)
             return
         match = read_verdict(event)
         if match is None:
@@ -307,6 +325,50 @@ class Reranker:
             message += "; dropped %d queued crops it settled (%d left)"
             args += [len(dropped), len(self.queue)]
         logger.info(message, *args)
+
+    def on_prompt_event(self, event):
+        """Takes an event of the verifier: switches to the prompt its
+        heartbeat (a DERIVED event of type PROMPT_TYPE) holds. Returns whether
+        the event was a heartbeat. With ignore_new, a heartbeat changes
+        nothing."""
+        if (event.kind != uriel.EventKind.DERIVED or event.engine != self.verifier
+                or type_name(event.payload_type or "") != PROMPT_TYPE):
+            return False
+        if self.ignore_new:
+            return True
+        try:
+            text = bytes(event.result or b"").decode("utf-8")
+        except UnicodeDecodeError:
+            logger.warning("the verifier's prompt heartbeat isn't UTF-8; ignoring it")
+            return True
+        self.on_prompt(text)
+        return True
+
+    def on_prompt(self, text):
+        """Switches to the text prompt `text`, the verifier's, if it isn't
+        the current one, and starts learning over: what the verifier said
+        about the old prompt says nothing about the new one. The crops
+        waiting for the verifier are dropped; answers about the ones in
+        flight are not learned from. Returns whether it switched."""
+        text = " ".join(text.split())
+        if not text or text == self.prompt:
+            return False
+        if self.retarget is None:
+            logger.warning("the verifier's prompt is %r, but this reranker can't switch prompts", text)
+            self.prompt = text  # warn once
+            return False
+        old = self.prompt
+        self.selector, gate = self.retarget(text)
+        if self.gate is not None or gate is not None:
+            self.gate = gate
+        self.prompt, self.has_prompt = text, True
+        self.generation += 1
+        dropped = self.queue.rescore(lambda tile: (False, tile.score, False))
+        self._answered = []
+        self.answers = Counter()
+        logger.info("prompt: now %r (was %s), the verifier's; learning cleared, %d waiting crops dropped",
+                    text, "none" if old is None else repr(old), len(dropped))
+        return True
 
     @property
     def vetoing(self):
@@ -367,10 +429,11 @@ class Reranker:
                         and (self.gate is None or self.gate.passes(c.margin)))]
         if not eligible:
             return None
-        if self.rank == RANK_PROMPT:
+        if self.rank == RANK_PROMPT and self.has_prompt:
             return max(eligible, key=lambda i: (candidates[i].verdict, candidates[i].s, candidates[i].score))
-        return max(eligible, key=lambda i: (candidates[i].verdict,
-                                            candidates[i].score + self.prompt_weight * candidates[i].s))
+        # Without a prompt (yet), s means nothing: by confidence alone
+        weight = self.prompt_weight if self.has_prompt else 0.0
+        return max(eligible, key=lambda i: (candidates[i].verdict, candidates[i].score + weight * candidates[i].s))
 
     def verify_payload(self, frame, rgb, box):
         """The serialized RawFrame the verifier is asked about: a square around
@@ -408,7 +471,7 @@ class Reranker:
                 continue
             payload, square = self.verify_payload(frame, rgb, c.box)
             tile = Tile(score=c.score, payload=payload, frame_id=frame.id, box=square, index=i,
-                        embedding=c.embedding, must_send=i == chosen)
+                        embedding=c.embedding, must_send=i == chosen, generation=self.generation)
             self.queue.push(tile)
             queued.add(i)
         ms = (time.perf_counter() - started) * 1e3
@@ -481,6 +544,9 @@ def run(name, reranker, *, stop, on_ready=None):
         uriel.Subscription.producer(producer) as events,
     ):
         engine.subscribe(reranker.detector)
+        # For the verifier's prompt heartbeat
+        if not reranker.ignore_new:
+            engine.subscribe(reranker.verifier)
 
         def publish(payload):
             return uriel.InputId(producer, crops.session, crops.send(payload))
@@ -499,7 +565,8 @@ def run(name, reranker, *, stop, on_ready=None):
                 engine.wait(timeout)
             while (event := engine.poll_event()) is not None:
                 try:
-                    reranker.on_detector_event(event)
+                    if not reranker.on_prompt_event(event):
+                        reranker.on_detector_event(event)
                 except Exception:
                     logger.exception("failed to handle a %s event", event.kind)
             while (event := events.poll()) is not None:

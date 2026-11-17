@@ -8,6 +8,14 @@ and every input gets a GenericResult holding the JSON object
 {"match": true|false}, so cliped's send queue sees a RESULT event for each
 tile it sent, and cliped learns from it.
 
+With a live directory (LiveDir), the question and the prompt can change while
+it runs: question.txt, and prompt.txt or prompt.jpg/.jpeg, are read when it
+starts and again whenever they change. Every heartbeat (PromptKeeper), it
+publishes a DERIVED event of type PROMPT_TYPE holding the prompt's
+description as UTF-8 text: the text prompt, or, for an image, the model's
+description of it. box_rerank follows it, so it ranks its boxes by the
+verifier's prompt and starts learning over when it changes.
+
 Nothing here imports torch: the verifier runs on a server without the edge
 filter's models.
 """
@@ -17,6 +25,7 @@ import logging
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import cv2
 import uriel
@@ -32,6 +41,24 @@ DEFAULT_HOST = "http://localhost:11434"
 MAX_OUTPUT_SIZE = 64 << 10
 # How long pulling the model may take, the first time it runs on a server
 PULL_TIMEOUT_S = 3600
+# The type of the heartbeat's DERIVED events: the prompt's description, as
+# UTF-8 text
+PROMPT_TYPE = "cliped/Prompt"
+# Seconds between heartbeats
+HEARTBEAT_S = 1.0
+# The live directory's files: the question, and the prompt, an image (which
+# wins over the text when both are there) or text
+QUESTION_FILE = "question.txt"
+PROMPT_TEXT_FILE = "prompt.txt"
+PROMPT_IMAGE_FILES = ("prompt.jpg", "prompt.jpeg")
+# Asked about an image prompt once, for the heartbeat: a phrase CLIP can rank
+# box_rerank's crops by, which it does far better with text than with an image
+DESCRIBE_QUESTION = (
+    "Describe the person or object in this image as a short phrase for an image search that must find it "
+    "from a drone, e.g. 'a person in a red shirt and green shorts' or 'a quadruped robot dog'. Name only "
+    "what is visible from above at a distance: what it is, and the colors of its clothing, hair or body. "
+    "Answer with the phrase only, under 15 words."
+)
 # Longest side of the reference image sent to the model, in pixels. A phone
 # photo at full size costs a 30 MB PNG and twice the prompt tokens on every
 # frame, for no better answer.
@@ -114,9 +141,9 @@ class Ollama:
         if status.get("status") != "success":
             raise OllamaError(f"pulling {self.model}: {status}")
 
-    def ask(self, question, images):
+    def ask(self, question, images, max_tokens=8):
         """The model's answer to `question` about `images` (encoded image
-        files, e.g. PNG or JPEG bytes)."""
+        files, e.g. PNG or JPEG bytes), of at most `max_tokens` tokens."""
         body = {
             "model": self.model,
             "messages": [{
@@ -126,13 +153,23 @@ class Ollama:
             }],
             "stream": False,
             "keep_alive": -1,  # keep it loaded between frames
-            "options": {"temperature": 0, "num_predict": 8},
+            "options": {"temperature": 0, "num_predict": max_tokens},
         }
         reply = self._post("/api/chat", body, self.timeout_s)
         try:
             return reply["message"]["content"]
         except (KeyError, TypeError):
             raise OllamaError(f"/api/chat: unexpected reply {reply!r}") from None
+
+    def describe(self, image):
+        """A short description of what the encoded image file `image` shows,
+        for a text prompt."""
+        return clean_description(self.ask(DESCRIBE_QUESTION, [image], max_tokens=40))
+
+
+def clean_description(text):
+    """The model's description as one line, without quotes or a full stop."""
+    return " ".join(text.split()).strip("\"'`*. ")
 
 
 def parse_answer(answer):
@@ -183,24 +220,46 @@ class Verifier:
     forwarded. `question`, if given, replaces TEXT_QUESTION or
     IMAGE_QUESTION, with {prompt} in it replaced by `label`: wording for one
     target (e.g. "the same kind of animal" for an animal) can tell it from
-    look-alikes better than the generic questions. Each frame is enlarged to
-    at least `min_side` pixels on its shorter side before the model sees it
-    (0 for as is)."""
+    look-alikes better than the generic questions; "box" is BOX_QUESTION or,
+    with a reference, BOX_IMAGE_QUESTION. Each frame is enlarged to at least
+    `min_side` pixels on its shorter side before the model sees it (0 for as
+    is).
+
+    `description` is the prompt as text, for the heartbeat: the label of a
+    text prompt, or, for an image, its description once PromptKeeper has
+    asked for it (None until then)."""
 
     def __init__(self, ask, *, label, reference=None, tile_log=None, question=None, min_side=0):
         self.ask = ask
-        self.label = label
-        self.reference = reference
-        self.custom_question = question
         self.tile_log = tile_log
         self.min_side = min_side
         self.frames = 0
         self.matched = 0
+        self.set_prompt(label, reference)
+        self.set_question(question)
+
+    @property
+    def has_prompt(self):
+        return self.reference is not None or bool(self.label)
+
+    def set_prompt(self, label, reference=None):
+        """Verifies against the image `reference` (encoded), named `label`,
+        from now on, or the text `label` without one."""
+        self.label = label
+        self.reference = reference
+        self.description = None if reference is not None else (label or None)
+
+    def set_question(self, question):
+        """Asks `question` from now on, or the default one for None or "". """
+        self.custom_question = question or None
 
     def question(self, png):
+        custom = self.custom_question
+        if custom == "box":
+            custom = BOX_IMAGE_QUESTION if self.reference is not None else BOX_QUESTION
         if self.reference is not None:
-            return (self.custom_question or IMAGE_QUESTION).format(prompt=self.label), [self.reference, png]
-        return (self.custom_question or TEXT_QUESTION).format(prompt=self.label), [png]
+            return (custom or IMAGE_QUESTION).format(prompt=self.label), [self.reference, png]
+        return (custom or TEXT_QUESTION).format(prompt=self.label), [png]
 
     def on_input(self, input):
         """Whether to forward `input`, and the serialized GenericResult.
@@ -226,17 +285,173 @@ class Verifier:
         return match, result_pb2.GenericResult(payload=json.dumps({"match": match}).encode()).SerializeToString()
 
 
-def run(name, verifier, *, stop, on_ready=None):
-    """Serves the engine `name` until the threading.Event `stop` is set."""
+def valid_question(question):
+    """Whether `question` is a usable question: only {prompt} in braces."""
+    try:
+        question.format(prompt="")
+    except (KeyError, IndexError, ValueError):
+        return False
+    return True
+
+
+class LiveDir:
+    """The live directory `path`: the question and prompt files, as they
+    change. A file that is removed changes nothing: the verifier keeps what it
+    had."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self._question = None  # the (mtime_ns, size) of question.txt last read
+        self._prompt = None  # (file name, (mtime_ns, size)) of the prompt last read
+
+    def _signature(self, name):
+        try:
+            stat = (self.path / name).stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def poll(self):
+        """What changed since the last poll: (question, prompt). question is
+        question.txt's text if it is new or changed, else None. prompt is the
+        prompt file's if it is new or changed, else None: ("image", path), the
+        newest of prompt.jpg and prompt.jpeg if either is there, or ("text",
+        text) of prompt.txt. A prompt the caller couldn't use can be read
+        again with forget_prompt."""
+        question = None
+        signature = self._signature(QUESTION_FILE)
+        if signature is not None and signature != self._question:
+            try:
+                question = (self.path / QUESTION_FILE).read_text(encoding="utf-8").strip()
+                self._question = signature
+            except (OSError, UnicodeDecodeError) as err:
+                logger.warning("live: can't read %s: %s", QUESTION_FILE, err)
+        images = [(signature, name) for name in PROMPT_IMAGE_FILES
+                  if (signature := self._signature(name)) is not None]
+        if images:
+            signature, name = max(images)
+        elif (signature := self._signature(PROMPT_TEXT_FILE)) is not None:
+            name = PROMPT_TEXT_FILE
+        else:
+            return question, None
+        if (name, signature) == self._prompt:
+            return question, None
+        self._prompt = (name, signature)
+        if name == PROMPT_TEXT_FILE:
+            try:
+                text = (self.path / name).read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError) as err:
+                logger.warning("live: can't read %s: %s", name, err)
+                self._prompt = None
+                return question, None
+            return question, (("text", text) if text else None)
+        return question, ("image", self.path / name)
+
+    def forget_prompt(self):
+        self._prompt = None
+
+
+class PromptKeeper:
+    """Keeps the verifier's prompt and question up to date with the live
+    directory `live` (a LiveDir, or None), and gives the heartbeat's payload
+    every `interval_s` seconds: the prompt's description, as UTF-8. An image
+    prompt is read with `load_image(path)`, which returns it encoded (and
+    raises on a file it can't read), and described with `describe(image)`
+    (Ollama.describe), once; if that fails, it is asked again at the next
+    heartbeat."""
+
+    def __init__(self, verifier, *, live=None, describe=None, load_image=None, interval_s=HEARTBEAT_S):
+        self.verifier = verifier
+        self.live = live
+        self.describe = describe
+        self.load_image = load_image
+        self.interval_s = interval_s
+        self._next = None
+
+    def update(self):
+        """Applies what changed in the live directory, if any; returns
+        whether anything did."""
+        if self.live is None:
+            return False
+        question, prompt = self.live.poll()
+        changed = False
+        if question is not None:
+            if valid_question(question):
+                self.verifier.set_question(question)
+                logger.info("live: question now %r", question or "(the default)")
+                changed = True
+            else:
+                logger.warning("live: ignoring question %r: only {prompt} may be in braces", question)
+        if prompt is not None:
+            kind, value = prompt
+            if kind == "text":
+                self.verifier.set_prompt(value)
+                logger.info("live: prompt now the text %r", value)
+                changed = True
+            else:
+                try:
+                    reference = self.load_image(value)
+                except Exception as err:
+                    logger.warning("live: can't read %s (%s); trying again", value.name, err)
+                    self.live.forget_prompt()
+                else:
+                    self.verifier.set_prompt(value.name, reference)
+                    logger.info("live: prompt now the image %s", value.name)
+                    changed = True
+        return changed
+
+    def _describe(self):
+        v = self.verifier
+        if v.description is not None or v.reference is None or self.describe is None:
+            return
+        try:
+            v.description = clean_description(self.describe(v.reference)) or None
+        except Exception as err:
+            logger.warning("couldn't describe the image %s (%s); asking again at the next heartbeat", v.label, err)
+            return
+        logger.info("the image %s described as %r", v.label, v.description)
+
+    def step(self, now):
+        """The heartbeat's payload if one is due at `now` (seconds,
+        time.monotonic()), else None: before it, the live directory is read
+        and an image described. None too while there is no description."""
+        if self._next is not None and now < self._next:
+            return None
+        self._next = now + self.interval_s
+        self.update()
+        self._describe()
+        description = self.verifier.description
+        return description.encode("utf-8") if description else None
+
+
+def run(name, verifier, *, stop, keeper=None, on_ready=None):
+    """Serves the engine `name` until the threading.Event `stop` is set,
+    publishing `keeper`'s heartbeat (a PromptKeeper; one without a live
+    directory by default). A DERIVED event is about an input in a flow, so the
+    heartbeat starts once the first input has come, and is about the latest;
+    the engine subscribes to its own events to learn the flow."""
+    keeper = keeper or PromptKeeper(verifier)
     with uriel.Engine(name, result_type=GENERIC_RESULT_TYPE, max_output_size=MAX_OUTPUT_SIZE) as engine:
-        logger.info("engine %s ready; verifying %s %r", name,
-                    "image" if verifier.reference is not None else "prompt", verifier.label)
+        engine.subscribe(name)
+        flow, last_id = None, None
+        logger.info("engine %s ready; verifying %s %r; a heartbeat every %gs", name,
+                    "image" if verifier.reference is not None else "prompt", verifier.label, keeper.interval_s)
         if on_ready is not None:
             on_ready()
         while not stop.is_set():
-            input = engine.next(POLL_INTERVAL_S)
+            engine.wait(POLL_INTERVAL_S)
+            while (event := engine.poll_event()) is not None:
+                flow = event.flow or flow
+            payload = keeper.step(time.monotonic())
+            if payload is not None and flow is not None and last_id is not None:
+                try:
+                    engine.publish_derived(last_id, flow, payload, result_type=PROMPT_TYPE)
+                except Exception:
+                    logger.exception("failed to publish the prompt heartbeat")
+            input = engine.poll()
             if input is None:
                 continue
+            last_id = input.id
             if input.payload_type.replace(".", "/") != RAW_FRAME_TYPE:
                 logger.warning("input %d is a %r, not a RawFrame; dropping it", input.id.seq, input.payload_type)
                 engine.drop()

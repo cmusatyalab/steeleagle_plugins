@@ -45,6 +45,18 @@ def resolve(directory, name):
     return path
 
 
+def resolve_dir(directory, name):
+    """The directory `name`, relative to `directory` and inside it, whether or
+    not it exists yet."""
+    if not name or Path(name).is_absolute():
+        raise FilesError(f"{name!r} must be a directory name relative to the files directory")
+    root = Path(directory).resolve()
+    path = (root / name).resolve()
+    if not path.is_relative_to(root) or path == root:
+        raise FilesError(f"{name!r} is outside the files directory")
+    return path
+
+
 def read_rgb(path):
     """The image file at `path` as an (h, w, 3) uint8 RGB array."""
     bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)

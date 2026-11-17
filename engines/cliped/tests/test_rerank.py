@@ -5,7 +5,7 @@ import json
 import numpy as np
 import pytest
 import uriel
-from conftest import VERIFIER, input_id
+from conftest import VERIFIER, input_id, make_frame, make_input
 
 from cliped import main
 from cliped.clip import Selector
@@ -277,8 +277,9 @@ def test_args_are_defaulted_and_checked():
         with pytest.raises(main.ConfigError):
             main.parse_rerank_args(json.dumps({"prompt": "p", "detector": "yolo", "verifier": "v",
                                                "class": "robotic dog", **bad}))
-    with pytest.raises(main.ConfigError):
-        main.parse_rerank_args(json.dumps({"detector": "yolo", "verifier": "v", "class": "c"}))
+    # No prompt is fine: it reports the most confident box until the verifier's prompt arrives
+    args = main.parse_rerank_args(json.dumps({"detector": "yolo", "verifier": "v", "class": "c"}))
+    assert args["prompt"] == "" and args["image"] == ""
 
 
 def test_the_verifier_enlarges_small_frames_only():
@@ -290,13 +291,16 @@ def test_the_verifier_enlarges_small_frames_only():
 
 
 def test_the_box_question_asks_about_the_reference_when_there_is_one():
-    from cliped.verifier import BOX_IMAGE_QUESTION, BOX_QUESTION
+    from cliped.verifier import BOX_IMAGE_QUESTION, BOX_QUESTION, Verifier
 
-    args = main.parse_verifier_args(json.dumps({"image": "person.jpg", "question": "box"}))
-    assert main.box_question(args, b"reference") == BOX_IMAGE_QUESTION
-    assert main.box_question(args, None) == BOX_QUESTION
-    assert main.box_question(main.parse_verifier_args(json.dumps({"prompt": "p"})), b"reference") is None
+    def asked(reference):
+        model = []
+        Verifier(lambda q, images: model.append(q) or "yes", label="person.jpg" if reference else "a person",
+                 reference=reference, question="box").on_input(make_input(1, make_frame()))
+        return model[0]
 
+    assert asked(b"reference") == BOX_IMAGE_QUESTION.format(prompt="person.jpg")
+    assert asked(None) == BOX_QUESTION.format(prompt="a person")
 
 def _candidates(*rows):
     """Stand-ins for Candidates: (verdict, s, score) each."""
@@ -347,3 +351,91 @@ def test_with_a_gate_a_frame_without_the_target_reports_nothing_once_it_has_lear
     assert r.decide(frame(2, only_chair), detections((CHAIR, 0.9)), now=20) == b""
     # The dog still is
     assert reported(r.decide(frame(3), detections((DOG, 0.9), (CHAIR, 0.8)), now=30))[0] == DOG
+
+
+# The verifier's prompt heartbeat
+
+def prompt_event(text, engine=VERIFIER):
+    from cliped.verifier import PROMPT_TYPE
+
+    return uriel.Event(kind=K.DERIVED, lost=0, id=input_id(1), engine=engine, flow="flow", outcome=0,
+                       payload_type=PROMPT_TYPE, result=text.encode(), at_ns=0, offered_at_ns=None,
+                       received_at_ns=None)
+
+
+def retargeting_reranker(**kwargs):
+    """A reranker whose prompt can switch: "a blue chair" points t at blue."""
+    vectors = {"a robot dog": np.array([0.0, 1.0, 0.0]), "a blue chair": np.array([0.0, 0.0, 1.0])}
+    switched = []
+
+    def retarget(text):
+        switched.append(text)
+        return Selector(vectors[text], np.array([[1.0, 0.0, 0.0]]), learn=True, similarity=0.85, confirmations=2,
+                        good_similarity=0.9, good_confirmations=2), None
+
+    r = make_reranker(retarget=retarget, **kwargs)
+    return r, switched
+
+
+def test_without_a_prompt_it_reports_the_most_confident_box():
+    r, _ = retargeting_reranker(prompt=None, has_prompt=False)
+    # The chair is more confident; the dog more like the (absent) prompt
+    assert reported(r.decide(frame(0), detections((DOG, 0.6), (CHAIR, 0.8)), now=0))[0] == CHAIR
+
+
+def test_a_configured_prompt_is_kept_while_the_verifier_has_the_same_one():
+    r, switched = retargeting_reranker(prompt="a robot dog")
+    v = Verifier(r)
+    r.decide(frame(0), detections((DOG, 0.9), (CHAIR, 0.8)), now=0)
+    v.answer_all(is_dog, now=1)
+    learned = len(r.selector.good) + len(r.selector.backgrounds)
+    assert learned
+    assert r.on_prompt_event(prompt_event("a robot dog"))
+    assert not switched and r.generation == 0
+    assert len(r.selector.good) + len(r.selector.backgrounds) == learned
+
+
+def test_a_different_prompt_switches_and_starts_learning_over():
+    r, switched = retargeting_reranker(prompt="a robot dog")
+    v = Verifier(r)
+    r.decide(frame(0), detections((DOG, 0.9), (CHAIR, 0.8)), now=0)
+    v.answer_all(is_dog, now=1)
+    # Crops waiting for the verifier when the prompt changes
+    r.decide(frame(1), detections((DOG, 0.9), (CHAIR, 0.8)), now=20)
+    assert len(r.queue)
+    assert r.on_prompt_event(prompt_event("a blue chair"))
+    assert switched == ["a blue chair"] and r.prompt == "a blue chair" and r.generation == 1
+    assert not r.selector.good and not r.selector.backgrounds
+    assert len(r.queue) == r.queue.in_flight  # the waiting crops were dropped
+    # Ranked by the new prompt: the chair now
+    assert reported(r.decide(frame(2), detections((DOG, 0.9), (CHAIR, 0.8)), now=40))[0] == CHAIR
+
+
+def test_answers_about_crops_sent_for_the_old_prompt_are_not_learned():
+    r, _ = retargeting_reranker(prompt="a robot dog")
+    r.decide(frame(0), detections((DOG, 0.9)), now=0)
+    tile = r.queue.next(input_id(500), 1)  # in flight when the prompt changes
+    assert tile is not None
+    r.on_prompt(" a  blue chair ")
+    event = uriel.Event(kind=K.RESULT, lost=0, id=input_id(500), engine=VERIFIER, flow="flow", outcome=0,
+                        payload_type=GENERIC_RESULT_TYPE,
+                        result=result_pb2.GenericResult(payload=json.dumps({"match": True}).encode())
+                        .SerializeToString(), at_ns=0, offered_at_ns=None, received_at_ns=None)
+    r.on_queue_event(event, now=2)
+    assert not r.selector.good and r.answers["yes"] == 0
+
+
+def test_heartbeats_of_other_engines_or_types_are_ignored():
+    r, switched = retargeting_reranker(prompt="a robot dog")
+    assert not r.on_prompt_event(prompt_event("a blue chair", engine=DETECTOR))
+    assert not switched
+
+
+def test_with_ignore_new_the_configured_prompt_is_kept():
+    r, switched = retargeting_reranker(prompt=None, has_prompt=True, ignore_new=True)  # e.g. an image prompt
+    assert r.on_prompt_event(prompt_event("a blue chair"))
+    assert not switched and r.prompt is None and r.generation == 0
+    assert main.parse_rerank_args(json.dumps({"detector": "d", "verifier": "v", "class": "c", "image": "x.png",
+                                              "ignore_new": True}))["ignore_new"] is True
+    with pytest.raises(main.ConfigError):
+        main.parse_rerank_args(json.dumps({"detector": "d", "verifier": "v", "class": "c", "ignore_new": "yes"}))

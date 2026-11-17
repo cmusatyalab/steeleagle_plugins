@@ -6,7 +6,7 @@ description = "Asks a vision-language model on Ollama (Qwen3-VL 8B Instruct by d
 [[args]]
 name = "prompt"
 type = "string"
-description = "What to look for, as a noun phrase, e.g. \"a red tarp\" or \"person lying down\"; this or image is required"
+description = "What to look for, as a noun phrase, e.g. \"a red tarp\" or \"person lying down\"; this or image is required, unless the live directory holds the prompt"
 default = ""
 
 [[args]]
@@ -50,6 +50,18 @@ name = "log_tiles"
 type = "boolean"
 description = "Write each input frame to STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg and each frame forwarded to STEELEAGLE_FILES/<engine>/out/<frame id>_0.jpeg, as JPEG at quality 75"
 default = false
+
+[[args]]
+name = "live"
+type = "string"
+description = "A live directory, under STEELEAGLE_FILES, to take the question and prompt from while running: question.txt, and prompt.txt or prompt.jpg/prompt.jpeg (an image wins over text). Read at startup, where they win over question, prompt and image, and again whenever they change; a file removed keeps what was last read. Blank for none"
+default = ""
+
+[[args]]
+name = "heartbeat"
+type = "number"
+description = "Seconds between prompt heartbeats: DERIVED events (type cliped/Prompt) holding the prompt's description as UTF-8 text, the text prompt or the model's description of the image, which box_rerank follows. They start once the first input has come"
+default = 1.0
 
 [engine]
 type = "filter"

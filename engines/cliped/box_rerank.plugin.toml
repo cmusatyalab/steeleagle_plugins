@@ -30,7 +30,7 @@ default = []
 [[args]]
 name = "prompt"
 type = "string"
-description = "What the target is, as a noun phrase, for the CLIP prompt score s; this or image is required"
+description = "What the target is, as a noun phrase, for the CLIP prompt score s. Optional: with neither this nor image, the most confident box is reported until the verifier's prompt heartbeat arrives. Replaced by the verifier's prompt when that differs, unless ignore_new"
 default = ""
 
 [[args]]
@@ -116,6 +116,12 @@ name = "class_prompt"
 type = "string"
 description = "With gate: the prompt for any box of the class, against which the prompt's likeness is measured. Default: \"a <first of classes>\" (e.g. \"a person\")"
 default = ""
+
+[[args]]
+name = "ignore_new"
+type = "boolean"
+description = "Keep this engine's prompt (or image) whatever the verifier's prompt heartbeat says. Without it, a different prompt from the verifier replaces this one and all learning starts over"
+default = false
 
 [[args]]
 name = "timeout"

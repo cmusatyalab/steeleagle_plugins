@@ -58,6 +58,9 @@ class Tile:
     embedding: object = None
     # Whether the selector must send it: it goes ahead of every other tile
     must_send: bool = False
+    # The prompt it was cut for (box_rerank counts a prompt switch): an
+    # answer about a tile of an earlier prompt isn't learned from
+    generation: int = 0
 
     @property
     def in_flight(self):

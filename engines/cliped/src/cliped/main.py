@@ -19,7 +19,7 @@ import sys
 import threading
 
 from cliped.clip import BACKGROUNDS, FP32_WEIGHTS, LIBS_DIR, QUANTIZED_MODEL
-from cliped.files import FilesError, TileLog, files_dir, read_rgb, resolve
+from cliped.files import FilesError, TileLog, files_dir, read_rgb, resolve, resolve_dir
 
 CLIPED_PLUGIN = "cliped.plugin.toml"
 VERIFIER_PLUGIN = "verifier.plugin.toml"
@@ -63,6 +63,8 @@ VERIFIER_DEFAULTS = {
     "log_tiles": False,
     "question": "",
     "min_side": 0,
+    "live": "",
+    "heartbeat": 1.0,
 }
 # Defaults of the args of box_rerank.plugin.toml
 RERANK_DEFAULTS = {
@@ -85,6 +87,7 @@ RERANK_DEFAULTS = {
     "rank": "prompt",
     "gate": False,
     "class_prompt": "",
+    "ignore_new": False,
     "timeout": 1000,
     "backgrounds": BACKGROUNDS,
     "quantized": True,
@@ -214,7 +217,11 @@ def parse_rerank_args(content):
     every unset arg defaulted. Raises ConfigError for args that are missing or
     out of range."""
     args = _load(content, RERANK_DEFAULTS)
-    _prompt_or_image(args)
+    # Neither is fine: the most confident box is reported until the
+    # verifier's prompt heartbeat arrives
+    _strings(args, "prompt", "image")
+    if args["image"]:
+        args["prompt"] = ""
     _strings(args, "detector", "verifier", "class", "log_candidates")
     for name in ("detector", "verifier", "class"):
         if not args[name]:
@@ -241,7 +248,7 @@ def parse_rerank_args(content):
     for name in ("novelty", "learn_similarity", "good_similarity"):
         _number(args, name, 0, 1, low_open=True)
     _backgrounds(args)
-    _booleans(args, "require_verified", "quantized", "npu", "log_tiles", "gate")
+    _booleans(args, "require_verified", "quantized", "npu", "log_tiles", "gate", "ignore_new")
     _strings(args, "class_prompt")
     if args["gate"] and args["image"]:
         raise ConfigError("gate needs a text prompt: an image's likeness is on another scale than a text's")
@@ -253,7 +260,14 @@ def parse_verifier_args(content):
     """The args of verifier.plugin.toml in the JSON object `content`, with
     every unset arg defaulted."""
     args = _load(content, VERIFIER_DEFAULTS)
-    _prompt_or_image(args)
+    _strings(args, "live")
+    if args["live"]:
+        # The live directory may hold the prompt instead: checked once it is read
+        _strings(args, "prompt", "image")
+        if args["image"]:
+            args["prompt"] = ""
+    else:
+        _prompt_or_image(args)
     _strings(args, "model", "host", "question")
     if not args["model"]:
         raise ConfigError("the 'model' arg must be set")
@@ -268,6 +282,7 @@ def parse_verifier_args(content):
     if not isinstance(args["log_tiles"], bool):
         raise ConfigError("log_tiles must be true or false")
     _positive_int(args, "min_side", 0)
+    _number(args, "heartbeat", 0, 3600, low_open=True)
     return args
 
 
@@ -308,10 +323,12 @@ def ensure_qnn_on_library_path():
     os.execv(sys.executable, [sys.executable, "-m", "cliped.main", *sys.argv[1:]])
 
 
-def encoders(args, image=None, texts=()):
+def encoders(args, image=None, texts=(), keep_text=False):
     """The image encoder of `args`, the prompt vector t (of the image file
-    `image` if given, of the text prompt if not), the background vectors b,
-    and a vector for each of the prompts `texts`."""
+    `image` if given, of the text prompt if not; None with neither), the
+    background vectors b, a vector for each of the prompts `texts`, and, with
+    `keep_text`, the text encoder, to embed more prompts later (None
+    without)."""
     import torch
 
     from cliped.clip import Encoder, NpuImageEncoder, image_vector, text_vectors
@@ -326,14 +343,16 @@ def encoders(args, image=None, texts=()):
         qnn_dir = LIBS_DIR if args["npu"] else None
         image_encoder = NpuImageEncoder(QUANTIZED_MODEL, qnn_dir, num_threads=args["threads"])
         log.info("INT8 image encoder %s on the %s", QUANTIZED_MODEL.name, "HTP" if args["npu"] else "CPU")
-        del text_encoder  # only its vectors are needed
+        if not keep_text:
+            del text_encoder  # only its vectors are needed
+            text_encoder = None
     else:
         image_encoder = text_encoder
         log.info("FP32 image encoder %s on the CPU", FP32_WEIGHTS.name)
     if image is not None:
         t = image_vector(image_encoder, read_rgb(image))
         log.info("searching for the image %s", image)
-    return image_encoder, t, b, extra
+    return image_encoder, t, b, extra, text_encoder if keep_text else None
 
 
 def build(args, verifier, *, image=None, tile_log=None):
@@ -344,7 +363,7 @@ def build(args, verifier, *, image=None, tile_log=None):
     from cliped.send_queue import SendQueue
 
     log = logging.getLogger("cliped")
-    image_encoder, t, b, _ = encoders(args, image)
+    image_encoder, t, b, _, _ = encoders(args, image)
     if args["learn"]:
         log.info("learning from the verifier's answers (similarity %.2f, %d no's to gate; good similarity %.2f, "
                  "%d yes's to force; at most %d of each)", args["learn_similarity"], args["confirmations"],
@@ -374,19 +393,37 @@ def build(args, verifier, *, image=None, tile_log=None):
 def build_rerank(args, detector, verifier, *, image=None, tile_log=None):
     """The Reranker of `args`, reranking the detections of the engine
     `detector`, verified by the engine `verifier`."""
-    from cliped.clip import Selector
+    import numpy as np
+
+    from cliped.clip import Selector, text_vectors
     from cliped.instance_gate import InstanceGate
     from cliped.rerank import CandidateLog, Reranker
     from cliped.send_queue import SendQueue
 
-    image_encoder, t, b, extra = encoders(args, image, [args["class_prompt"]] if args["gate"] else [])
-    gate = InstanceGate(t, extra[0]) if args["gate"] else None
-    if gate is not None:
-        logging.getLogger("cliped").info("gate: learning a cutoff on likeness to %r over %r",
-                                         args["prompt"], args["class_prompt"])
-    selector = Selector(t, b, learn=True, similarity=args["learn_similarity"],
+    # The text encoder is kept, to embed the verifier's prompt when it changes
+    image_encoder, t, b, extra, text_encoder = encoders(
+        args, image, [args["class_prompt"]] if args["gate"] else [], keep_text=True)
+    has_prompt = t is not None
+    if t is None:
+        t = np.zeros(b.shape[1])  # no prompt yet: s is unused
+
+    def selector_for(t):
+        return Selector(t, b, learn=True, similarity=args["learn_similarity"],
                         confirmations=args["confirmations"], max_learned=args["max_learned"],
                         good_similarity=args["good_similarity"], good_confirmations=args["good_confirmations"])
+
+    def gate_for(t):
+        return InstanceGate(t, extra[0]) if args["gate"] else None
+
+    def retarget(text):
+        t, _ = text_vectors(text_encoder, text, args["backgrounds"])
+        return selector_for(t), gate_for(t)
+
+    gate = gate_for(t) if has_prompt else None
+    if args["gate"]:
+        logging.getLogger("cliped").info("gate: learning a cutoff on likeness to %r over %r",
+                                         args["prompt"] or "the verifier's prompt", args["class_prompt"])
+    selector = selector_for(t)
     return Reranker(
         image_encoder,
         selector,
@@ -407,6 +444,10 @@ def build_rerank(args, detector, verifier, *, image=None, tile_log=None):
         prompt_weight=args["prompt_weight"],
         rank=args["rank"],
         gate=gate,
+        prompt=args["prompt"] or None,
+        has_prompt=has_prompt,
+        retarget=retarget,
+        ignore_new=args["ignore_new"],
         timeout_ns=args["timeout"] * 1_000_000,
         tile_log=tile_log,
         candidate_log=CandidateLog(args["log_candidates"]) if args["log_candidates"] else None,
@@ -459,31 +500,31 @@ def main_box_rerank(name):
     detector = qualify(os.environ.get("STEELEAGLE_LOCAL_QUALIFIER", ""), args["detector"])
     verifier = qualify(os.environ.get("STEELEAGLE_REMOTE_QUALIFIER", ""), args["verifier"])
     reranker = build_rerank(args, detector, verifier, image=image, tile_log=log)
-    logging.getLogger("cliped.rerank").info(
+    rlog = logging.getLogger("cliped.rerank")
+    rlog.info(
         "reporting %r: unverified boxes from confidence %.2f%s; a no vetoes after %d, a yes confirms after %d",
         args["class"], args["confidence"], " (never: require_verified)" if args["require_verified"] else "",
         args["confirmations"], args["good_confirmations"])
+    if reranker.ignore_new:
+        rlog.info("ignore_new: keeping this prompt, whatever the verifier's is")
+    elif not reranker.has_prompt:
+        rlog.info("no prompt: reporting the most confident box until the verifier's prompt heartbeat arrives")
     run(name, reranker, stop=stop_on_signals())
 
 
-def box_question(args, reference):
-    """The question for box_rerank's crops if `question` is "box": about
-    the reference image with one, else about the prompt; None otherwise."""
-    if args["question"] != "box":
-        return None
-    from cliped.verifier import BOX_IMAGE_QUESTION, BOX_QUESTION
-
-    return BOX_IMAGE_QUESTION if reference is not None else BOX_QUESTION
-
-
 def main_verifier(name):
-    from cliped.verifier import DEFAULT_HOST, Ollama, OllamaError, Verifier, encode_png, run, shrink
+    from cliped.verifier import (DEFAULT_HOST, LiveDir, Ollama, OllamaError, PromptKeeper, Verifier, encode_png,
+                                 run, shrink)
+
+    def load_image(path):
+        return encode_png(shrink(read_rgb(path)))
 
     try:
         args = parse_verifier_args(os.environ.get("STEELEAGLE_PLUGIN_ARGS"))
         image = image_path(args)
-        reference = encode_png(shrink(read_rgb(image))) if image is not None else None
+        reference = load_image(image) if image is not None else None
         log = tile_log(args, name)
+        live = LiveDir(resolve_dir(files_dir(), args["live"])) if args["live"] else None
     except (ConfigError, FilesError, ValueError) as err:
         sys.exit(f"Bad args for the verifier engine: {err}")
     host = args["host"] or os.environ.get("OLLAMA_HOST") or DEFAULT_HOST
@@ -492,11 +533,20 @@ def main_verifier(name):
         ollama.ensure_model()
     except OllamaError as err:
         sys.exit(f"Ollama at {ollama.host} can't serve {args['model']}: {err}")
-    logging.getLogger("cliped.verifier").info("asking %s at %s", args["model"], ollama.host)
-    question = box_question(args, reference) or args["question"] or None
+    vlog = logging.getLogger("cliped.verifier")
+    vlog.info("asking %s at %s", args["model"], ollama.host)
     verifier = Verifier(ollama.ask, label=args["image"] or args["prompt"], reference=reference, tile_log=log,
-                        question=question, min_side=args["min_side"])
-    run(name, verifier, stop=stop_on_signals())
+                        question=args["question"] or None, min_side=args["min_side"])
+    keeper = PromptKeeper(verifier, live=live, describe=ollama.describe, load_image=load_image,
+                          interval_s=args["heartbeat"])
+    if live is not None:
+        vlog.info("live: watching %s", live.path)
+        # What the directory holds now wins over the args
+        keeper.update()
+    if not verifier.has_prompt:
+        sys.exit("Bad args for the verifier engine: no prompt: set 'prompt' or 'image', or put "
+                 "prompt.txt or prompt.jpg in the live directory")
+    run(name, verifier, stop=stop_on_signals(), keeper=keeper)
 
 
 def main():

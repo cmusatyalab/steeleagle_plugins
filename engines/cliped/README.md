@@ -89,7 +89,7 @@ It needs an Ollama server (`ollama serve`); at startup it pulls the model if the
 
 | Arg | Default | Description |
 | --- | --- | --- |
-| `prompt` | | What to look for, as a noun phrase; this or `image` is required |
+| `prompt` | | What to look for, as a noun phrase; this or `image` is required, unless `live` holds the prompt |
 | `image` | | An image of what to look for, instead of `prompt`: a file in `STEELEAGLE_FILES`. With both set, `image` is used |
 | `model` | `qwen3-vl:8b-instruct` | Ollama model to ask |
 | `host` | | Ollama server URL; blank uses `OLLAMA_HOST`, or `http://localhost:11434` |
@@ -97,6 +97,12 @@ It needs an Ollama server (`ollama serve`); at startup it pulls the model if the
 | `question` | | The question asked about each frame, instead of the default one; `{prompt}` in it is replaced by `prompt` (or the image's name). With `image`, the model sees the reference first and the frame second. Anything but a yes drops the frame. `box` asks about the object in the red box, for box_rerank's crops: whether it is `prompt`, or, with `image`, the reference's target |
 | `log_tiles` | `false` | Write each input to `STEELEAGLE_FILES/<engine>/in/<frame id>.jpeg` and each frame forwarded to `STEELEAGLE_FILES/<engine>/out/<frame id>_0.jpeg` (JPEG, quality 75) |
 | `min_side` | `0` | Enlarge each frame so its shorter side is at least this many pixels before the model sees it (box_rerank's small crops); 0 for as is |
+| `live` | | A live directory under `STEELEAGLE_FILES` to take the question and prompt from (see below); blank for none |
+| `heartbeat` | `1.0` | Seconds between prompt heartbeats (see below) |
+
+With `live`, the verifier watches `STEELEAGLE_FILES/<live>/`. At startup, `question.txt` and the prompt there win over the `question`, `prompt` and `image` args; afterwards it reads them again whenever they change (checked every heartbeat), so the target can change mid-mission. The prompt is `prompt.jpg` or `prompt.jpeg` (the newer, if both) when there is one, else `prompt.txt`. A file or the whole directory removed changes nothing: the verifier keeps what it last read. A question with anything but `{prompt}` in braces is ignored.
+
+Every `heartbeat` seconds, with or without `live`, the verifier publishes a `DERIVED` event of type `cliped/Prompt` holding its prompt as UTF-8 text: the text prompt itself, or, for an image, the model's one-line description of it (asked once per image, e.g. "a person in a red shirt and green shorts"). A derived event is about an input, so the heartbeats start with the first input the verifier gets, and are about the latest. box_rerank follows it (see below).
 
 Give the edge into the verifier a timeout above the model's time per tile: a tile that times out there is sent again.
 
@@ -136,7 +142,8 @@ Ranking orders a frame's boxes against each other, so it always reports one, eve
 | `verifier` | | Required: the verifier on the remote daemon, qualified with `STEELEAGLE_REMOTE_QUALIFIER` |
 | `class` | | Required: the class reported, as the tracker asks for it |
 | `classes` | `[]` | The detector's classes whose boxes are candidates; empty for `class` alone |
-| `prompt` / `image` | | The target, for the CLIP prompt score `s`; one is required |
+| `prompt` / `image` | | The target, for the CLIP prompt score `s`; optional (see below) |
+| `ignore_new` | `false` | Keep this prompt, whatever the verifier's heartbeat says |
 | `confidence` | `0.5` | Least confidence for an unverified box to be reported |
 | `require_verified` | `false` | Report only confirmed boxes |
 | `max_candidates` | `8` | Most boxes of a frame embedded |
@@ -154,6 +161,12 @@ Ranking orders a frame's boxes against each other, so it always reports one, eve
 | `backgrounds`, `quantized`, `npu`, `threads`, `max_queue` | | As for the edge filter |
 | `log_tiles` | `false` | Write each crop sent to `STEELEAGLE_FILES/<engine>/out/` |
 | `log_candidates` | | CSV of every candidate of every frame |
+
+### Following the verifier's prompt
+
+box_rerank subscribes to the verifier's prompt heartbeat. When its text differs from box_rerank's current prompt, box_rerank embeds it as its new text prompt and starts over: what it learned from the verifier (vetoes, confirmations and the gate's answers) is cleared, the crops waiting for the verifier are dropped, and answers about crops sent before the switch are not learned from. The same text changes nothing. So one prompt, set on the verifier (or in its live directory), steers both, and an image given to the verifier reaches box_rerank as the model's description of it, which CLIP ranks by far better than an image. The CLIP text encoder stays loaded for this.
+
+`prompt` and `image` are optional: with neither, box_rerank reports the most confident box and sends its crops until the first heartbeat arrives, which then sets its prompt. With `ignore_new = true`, it keeps its own `prompt` or `image` and never switches, e.g. to compare an image prompt with the verifier's.
 
 ## On the Tachyon
 
