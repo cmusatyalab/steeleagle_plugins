@@ -10,10 +10,10 @@ HTP; the text encoder stays on the CPU. QNN loads its libraries with dlopen, so
 they must be on LD_LIBRARY_PATH when the process starts:
 
     LD_LIBRARY_PATH=libs pixi run -e tools evaluate video.mp4 "a red tarp" \\
-        --npu models/image_encoder_int8.tflite --labels tools/labels/labels_street.txt
+        --npu ~/.local/share/steeleagle/models/cliped/image_encoder_int8.tflite --labels tools/labels/labels_street.txt
 
 Without --npu the image encoder runs FP32 in PyTorch: the original MobileCLIP
-weights, or --weights models/distill_visual.pt for the distilled ones.
+weights, or --weights ~/.local/share/steeleagle/models/cliped/distill_visual.pt for the distilled ones.
 
 With --npu the margin defaults to 0.25 instead of 1.0: INT8 scores rank tiles
 less exactly than FP32, and the lower margin keeps recall (58/61 on the three
@@ -253,7 +253,7 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--npu", type=Path, help="INT8 .tflite image encoder to run on the HTP")
     p.add_argument("--qnn-dir", type=Path, default=LIBS_DIR, help="QNN libraries for --npu")
-    p.add_argument("--weights", type=Path, help="image encoder state dict for FP32, e.g. models/distill_visual.pt")
+    p.add_argument("--weights", type=Path, help="image encoder state dict for FP32, e.g. ~/.local/share/steeleagle/models/cliped/distill_visual.pt")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
     if args.margin is None:

@@ -174,13 +174,13 @@ default = 64
 [[args]]
 name = "quantized"
 type = "boolean"
-description = "Run the INT8 image encoder (models/image_encoder_int8.tflite); false runs the FP32 one in PyTorch on the CPU"
+description = "Run the INT8 image encoder (image_encoder_int8.tflite in cliped/ in the daemon's models directory); false runs the FP32 one in PyTorch on the CPU"
 default = true
 
 [[args]]
 name = "npu"
 type = "boolean"
-description = "Run the INT8 image encoder on the HTP through QNN (libs/); false runs it on the CPU. Only with quantized"
+description = "Run the INT8 image encoder on the HTP through QNN (cliped/libs/ in the daemon's models directory); false runs it on the CPU. Only with quantized"
 default = true
 
 [[args]]

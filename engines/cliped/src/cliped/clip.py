@@ -9,16 +9,34 @@ s > max(0, thr + margin * std(s)), where thr is an EMA of the k-th best score
 of each frame and std(s) is taken over the frame's tiles: it has to look more
 like the target than like any background, and stand out from its own frame.
 """
+import os
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-# The plugin's folder, which holds models/ and libs/.
+# The plugin's folder (tools/ writes its own runs and models here).
 PLUGIN_DIR = Path(__file__).resolve().parents[2]
-MODELS_DIR = PLUGIN_DIR / "models"
-LIBS_DIR = PLUGIN_DIR / "libs"
+
+
+def _models_dir():
+    """The daemon's models directory: STEELEAGLE_MODELS, which eagled sets;
+    /steeleagle/models, where it is mounted in a sandbox; or, run by hand
+    (tests, tools), the daemon's default, ~/.local/share/steeleagle/models."""
+    configured = os.environ.get("STEELEAGLE_MODELS")
+    if configured and Path(configured).is_dir():
+        return Path(configured)
+    if Path("/steeleagle/models").is_dir():
+        return Path("/steeleagle/models")
+    return Path.home() / ".local/share/steeleagle/models"
+
+
+# The encoders and the QNN libraries are too large for git: they are kept in
+# cliped/ in the daemon's models directory, which holds
+#   image_encoder_int8.tflite, distill_visual.pt, and libs/ (the QNN libraries)
+MODELS_DIR = _models_dir() / "cliped"
+LIBS_DIR = MODELS_DIR / "libs"
 # The INT8 image encoder quantize_clip.py builds from the distilled weights,
 # for the HTP; and the distilled FP32 image encoder it was built from.
 QUANTIZED_MODEL = MODELS_DIR / "image_encoder_int8.tflite"

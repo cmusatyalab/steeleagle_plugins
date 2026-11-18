@@ -18,7 +18,7 @@ import signal
 import sys
 import threading
 
-from cliped.clip import BACKGROUNDS, FP32_WEIGHTS, LIBS_DIR, QUANTIZED_MODEL
+from cliped.clip import BACKGROUNDS, FP32_WEIGHTS, LIBS_DIR, MODELS_DIR, QUANTIZED_MODEL
 from cliped.files import FilesError, TileLog, files_dir, read_rgb, resolve, resolve_dir
 
 CLIPED_PLUGIN = "cliped.plugin.toml"
@@ -312,8 +312,21 @@ def tile_log(args, name):
         raise ConfigError(f"log_tiles: {err}") from None
 
 
+def check_binaries(args):
+    """Raises ConfigError unless the encoder `args` runs, and with npu the QNN
+    libraries, are in cliped/ in the daemon's models directory: they are too
+    large for the repository, so each host keeps its own copy there."""
+    needed = [QUANTIZED_MODEL if args["quantized"] else FP32_WEIGHTS]
+    if args["quantized"] and args["npu"]:
+        needed.append(LIBS_DIR / "libQnnTFLiteDelegate.so")
+    missing = [str(p) for p in needed if not p.is_file()]
+    if missing:
+        raise ConfigError(f"missing {', '.join(missing)}: put image_encoder_int8.tflite, "
+                          f"distill_visual.pt and libs/ (the QNN libraries) in {MODELS_DIR}")
+
+
 def ensure_qnn_on_library_path():
-    """Puts libs/ where QNN looks for its libraries: on LD_LIBRARY_PATH, which
+    """Puts the QNN libraries (LIBS_DIR) where QNN looks for its libraries: on LD_LIBRARY_PATH, which
     dlopen reads only when the process starts, so the process restarts with
     it if it is not there; and on ADSP_LIBRARY_PATH, where the DSP finds the
     HTP skel, ahead of the system's skel directories (';'-separated)."""
@@ -470,6 +483,7 @@ def main_cliped(name):
     try:
         args = parse_args(os.environ.get("STEELEAGLE_PLUGIN_ARGS"))
         image = image_path(args)
+        check_binaries(args)
     except (ConfigError, ValueError) as err:
         sys.exit(f"Bad args for the cliped engine: {err}")
     if args["quantized"] and args["npu"]:
@@ -490,6 +504,7 @@ def main_box_rerank(name):
     try:
         args = parse_rerank_args(os.environ.get("STEELEAGLE_PLUGIN_ARGS"))
         image = image_path(args)
+        check_binaries(args)
     except (ConfigError, ValueError) as err:
         sys.exit(f"Bad args for the box_rerank engine: {err}")
     if args["quantized"] and args["npu"]:

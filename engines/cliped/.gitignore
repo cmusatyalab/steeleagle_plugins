@@ -4,3 +4,7 @@
 tools/hf/
 tools/runs/
 tools/model*/
+
+# The encoders and QNN libraries: in cliped/ in the daemon models directory (see README)
+/models/
+/libs/

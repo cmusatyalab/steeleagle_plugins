@@ -61,7 +61,7 @@ When more than `max_queue` tiles wait, the lowest-priority tile is dropped, in f
 | `prompt` | | What to search for, as a noun phrase, e.g. `person lying down`; this or `image` is required |
 | `image` | | An image of what to search for, instead of `prompt`: a file in the daemon's files directory (`STEELEAGLE_FILES`). With both set, `image` is used |
 | `verifier` | | Required: the verifier's service name on the remote daemon, qualified with `STEELEAGLE_REMOTE_QUALIFIER` |
-| `quantized` | `true` | INT8 image encoder (`models/image_encoder_int8.tflite`); `false` runs the FP32 one (`models/distill_visual.pt`) in PyTorch |
+| `quantized` | `true` | INT8 image encoder (`image_encoder_int8.tflite`); `false` runs the FP32 one (`distill_visual.pt`) in PyTorch. Both are in the models directory: see [Models](#models) |
 | `tile_size` | `200` | Side of the square tiles, in pixels |
 | `stride` | `150` | Distance between neighboring tiles, in pixels |
 | `margin` | `0.25` | How far above the threshold a tile must be, in std(s) |
@@ -70,7 +70,7 @@ When more than `max_queue` tiles wait, the lowest-priority tile is dropped, in f
 | `k` | `2` | The threshold follows each frame's k-th best score |
 | `ema` | `0.9` | Weight of the threshold's old value at each frame |
 | `max_queue` | `64` | Most tiles waiting for the verifier |
-| `npu` | `true` | With `quantized`, run on the HTP through QNN (`libs/`); `false` runs it on the CPU |
+| `npu` | `true` | With `quantized`, run on the HTP through QNN (`cliped/libs/` in the models directory); `false` runs it on the CPU |
 | `threads` | `4` | CPU threads for the text encoder, and for the image encoder off the HTP |
 | `learn` | `true` | Learn from the verifier's answers (see above) |
 | `learn_similarity` | `0.85` | Cosine similarity of tile embeddings at which two tiles count as the same thing, for the background gate and for adding a background tile |
@@ -174,7 +174,7 @@ box_rerank subscribes to the verifier's prompt heartbeat. When its text differs 
 
 ## On the Tachyon
 
-With `quantized` and `npu` (the defaults), the image encoder runs on the HTP through the QNN TFLite delegate and the libraries in `libs/` (QAIRT 2.39). QNN loads them with `dlopen`, so the engine restarts itself with `libs/` on `LD_LIBRARY_PATH`, and puts it on `ADSP_LIBRARY_PATH` too. The text encoder runs FP32 on the CPU, once at startup; it downloads MobileCLIP2-S0 from Hugging Face the first time, into `HF_HOME`.
+With `quantized` and `npu` (the defaults), the image encoder runs on the HTP through the QNN TFLite delegate and the libraries in `cliped/libs/` in the models directory (QAIRT 2.39). QNN loads them with `dlopen`, so the engine restarts itself with that directory on `LD_LIBRARY_PATH`, and puts it on `ADSP_LIBRARY_PATH` too. The text encoder runs FP32 on the CPU, once at startup; it downloads MobileCLIP2-S0 from Hugging Face the first time, into `HF_HOME`.
 
 On a Tachyon (fermi), at 1280x720 with the default tiling (45 tiles a frame):
 
@@ -187,10 +187,22 @@ Streaming `street.mp4` unpaced, it processed about 3.5 frames/s, Uriel skipping 
 
 ## Models
 
+The encoders and the QNN libraries are too large for the repository. Each host keeps them in `cliped/` in the daemon's models directory (`STEELEAGLE_MODELS`, by default `~/.local/share/steeleagle/models/cliped`; `/steeleagle/models` in a sandbox), and the engine exits at startup, naming that directory, if the ones it needs are missing:
+
+```
+~/.local/share/steeleagle/models/cliped/
+  distill_visual.pt
+  image_encoder_int8.tflite
+  libs/   libQnnHtp.so, libQnnHtpPrepare.so, libQnnHtpV68.so, libQnnHtpV68Skel.so,
+          libQnnHtpV68Stub.so, libQnnSystem.so, libQnnTFLiteDelegate.so (QAIRT 2.39)
+```
+
+fermi and heisenberg have them. To set up another host, copy that directory from one of them.
+
 | File | What |
 | --- | --- |
-| `models/distill_visual.pt` | The distilled FP32 image encoder: a state dict of the reparameterized MobileCLIP2-S0's `visual` |
-| `models/image_encoder_int8.tflite` | The INT8 image encoder `tools/quantize_clip.py` built from it: 256x256 RGB int8 in (pixel − 128), unnormalized 512-d int8 embedding out |
+| `distill_visual.pt` | The distilled FP32 image encoder: a state dict of the reparameterized MobileCLIP2-S0's `visual` |
+| `image_encoder_int8.tflite` | The INT8 image encoder `tools/quantize_clip.py` built from it: 256x256 RGB int8 in (pixel − 128), unnormalized 512-d int8 embedding out |
 
 The INT8 model's Gather ops (from the export's depthwise rewrite) have int32 indices, which the HTP runs; with the int64 indices the export leaves, the delegate ran them on the CPU, and the model took 19.7 ms/tile instead of 6.1, with identical outputs. `quantize_clip.py` patches every model it converts.
 
@@ -208,10 +220,10 @@ The INT8 model's Gather ops (from the export's depthwise rewrite) have int32 ind
 | `labels/` | Labels of the three evaluation videos |
 
 ```
-pixi run -e tools quantize --weights models/distill_visual.pt          # build an INT8 model in tools/model
+pixi run -e tools quantize --weights ~/.local/share/steeleagle/models/cliped/distill_visual.pt          # build an INT8 model in tools/model
 pixi run -e tools quantize --steps patch --model some_model.tflite      # patch an existing model
-LD_LIBRARY_PATH=$PWD/libs pixi run -e tools evaluate /home/particle/street.mp4 "person lying down" \
-    --npu models/image_encoder_int8.tflite --labels tools/labels/labels_street.txt
+LD_LIBRARY_PATH=~/.local/share/steeleagle/models/cliped/libs pixi run -e tools evaluate /home/particle/street.mp4 "person lying down" \
+    --npu ~/.local/share/steeleagle/models/cliped/image_encoder_int8.tflite --labels tools/labels/labels_street.txt
 ```
 
 The videos (`street.mp4`, `traintrack.mp4`, `parking_lot.mp4`) are not in the repository; the tools look for them in `/home/particle` (`--video-dir`, `VIDEO_DIR`). The distillation script that produced `distill_visual.pt` is not here yet.
