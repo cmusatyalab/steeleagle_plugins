@@ -72,6 +72,17 @@ primary = true
 encode = true
 
 [driver.supported]
+# ControlService is a stand-in that accepts every command and ignores it
+# (control.py): there for the mission compiler, which generates the SDK's
+# vehicle API from these services, so missions compile for the fake drone
 services = [
+    "steeleagle_protocol/v1/services/driver/ControlService",
     "steeleagle_protocol/v1/services/driver/StreamService",
+]
+
+[driver.unsupported]
+# A copter's commands only
+methods = [
+    "steeleagle_protocol/v1/services/driver/ControlService/Stand",
+    "steeleagle_protocol/v1/services/driver/ControlService/Sit",
 ]

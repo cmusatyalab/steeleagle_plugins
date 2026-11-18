@@ -6,9 +6,11 @@ from pathlib import Path
 
 import grpc
 
+from steeleagle_protocol.v1.services.driver.control_pb2_grpc import add_ControlServiceServicer_to_server
 from steeleagle_protocol.v1.services.driver.stream_pb2_grpc import add_StreamServiceServicer_to_server
 
 from fake_drone.capture import DEFAULT_DECODER
+from fake_drone.control import Control
 from fake_drone.images import ImageCapture
 from fake_drone.stream import Stream
 from fake_drone.vmeta import Telemetry
@@ -113,6 +115,8 @@ def main():
     stream = Stream(video_path, decoder, telemetry, loop=loop, on_end=on_end,
                     pad_after=pad_after, open_capture=open_capture, frame_log=frame_log)
     add_StreamServiceServicer_to_server(stream, server)
+    # Commands are accepted and ignored, so missions compile and run (see control.py)
+    add_ControlServiceServicer_to_server(Control(), server)
     server.add_insecure_port(f'unix://{listen_address}')
     server.start()
     logger.info('all services started')
