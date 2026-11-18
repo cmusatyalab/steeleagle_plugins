@@ -18,9 +18,9 @@ class Model:
         self.answer = answer
         self.asked = []
 
-    def __call__(self, question, images):
+    def __call__(self, question, images, max_tokens=8):
         self.asked.append((question, images))
-        return self.answer
+        return self.answer(question) if callable(self.answer) else self.answer
 
 
 def verdict(result):
@@ -81,8 +81,12 @@ def test_verifier_args():
     assert main.parse_verifier_args(json.dumps({"prompt": "a tarp"}))["question"] == ""
     args = main.parse_verifier_args(json.dumps({"image": "t.jpg", "question": " Same kind of animal? "}))
     assert args["question"] == "Same kind of animal?"
+    assert args["image_mode"] == "image"
+    assert main.parse_verifier_args(json.dumps({"image": "t.jpg", "image_mode": "description"}))["image_mode"] == \
+        "description"
     for bad in [{}, {"prompt": "p", "timeout_ms": 0}, {"prompt": "p", "model": ""}, {"prompt": "p", "log_tiles": 1},
-                {"prompt": "p", "question": "Is {thing} here?"}, {"prompt": "p", "question": 3}]:
+                {"prompt": "p", "question": "Is {thing} here?"}, {"prompt": "p", "question": 3},
+                {"prompt": "p", "image_mode": "photo"}]:
         with pytest.raises(main.ConfigError):
             main.parse_verifier_args(json.dumps(bad))
 
@@ -295,3 +299,87 @@ def test_the_model_is_loaded_with_a_small_context(monkeypatch):
     for bad in (-1, 1.5, "4096"):
         with pytest.raises(main.ConfigError):
             main.parse_verifier_args(json.dumps({"prompt": "p", "num_ctx": bad}))
+
+
+# Description mode: a fake model that names the image's kind and answers each
+# frame question by its prompt
+def described_model(answers):
+    from cliped.verifier import CATEGORY_QUESTION
+
+    def answer(question):
+        if question == CATEGORY_QUESTION:
+            return "'A quadruped robot dog.'"
+        return next(a for prompt, a in answers.items() if prompt in question)
+    return Model(answer)
+
+
+def test_description_mode_asks_about_the_image_s_kind_as_text():
+    from cliped.verifier import BOX_QUESTION, CATEGORY_QUESTION
+    model = described_model({"A quadruped robot dog": "yes"})
+    verifier = Verifier(model, label="dog.jpg", reference=b"reference", question="box", image_mode="description")
+    # Named as soon as it is set, before any frame
+    assert verifier.category == "A quadruped robot dog" and len(model.asked) == 1
+    for _ in range(2):
+        keep, result = verifier.on_input(make_input(1, make_frame()))
+        assert keep and verdict(result) == {"match": True}
+    # Named once, then each frame asked about as text, without the image
+    question = BOX_QUESTION.format(prompt="A quadruped robot dog")
+    assert [q for q, _ in model.asked] == [CATEGORY_QUESTION, question, question]
+    assert model.asked[0][1] == [b"reference"] and all(len(images) == 1 for _, images in model.asked[1:])
+    # The heartbeat's description is still PromptKeeper's
+    assert verifier.description is None
+
+
+def test_description_mode_leaves_a_text_prompt_as_is():
+    from cliped.verifier import BOX_QUESTION
+    model = Model("yes")
+    keep, _ = Verifier(model, label="a dog", question="box", image_mode="description").on_input(
+        make_input(1, make_frame()))
+    assert keep and [q for q, _ in model.asked] == [BOX_QUESTION.format(prompt="a dog")]
+
+
+def test_a_new_image_is_named_when_it_is_set():
+    model = described_model({"A quadruped robot dog": "yes"})
+    verifier = Verifier(model, label="dog.jpg", reference=b"reference", question="box", image_mode="description")
+    verifier.on_input(make_input(1, make_frame()))
+    verifier.set_prompt("other.jpg", b"other")
+    assert model.asked[-1] == (model.asked[0][0], [b"other"]) and verifier.category == "A quadruped robot dog"
+    # A text prompt replaces it as is
+    verifier.set_prompt("a cat")
+    assert verifier.category is None and len(model.asked) == 3
+
+
+def test_an_image_the_model_couldnt_name_is_named_at_the_next_frame():
+    from cliped.verifier import CATEGORY_QUESTION
+    down = [True]
+
+    def answer(question):
+        if question == CATEGORY_QUESTION:
+            if down[0]:
+                raise RuntimeError("Ollama is down")
+            return "a quadruped robot dog"
+        return "yes"
+    model = Model(answer)
+    verifier = Verifier(model, label="dog.jpg", reference=b"reference", question="box", image_mode="description")
+    assert verifier.category is None
+    down[0] = False
+    keep, _ = verifier.on_input(make_input(1, make_frame()))
+    assert keep and verifier.category == "a quadruped robot dog"
+    assert [q for q, _ in model.asked][:2] == [CATEGORY_QUESTION, CATEGORY_QUESTION]
+
+
+def test_a_live_image_is_named_when_it_changes(tmp_path):
+    from cliped.verifier import CATEGORY_QUESTION
+    model = described_model({"A quadruped robot dog": "yes"})
+    verifier = Verifier(model, label="a dog", question="box", image_mode="description")
+    live = tmp_path / "live"
+    live.mkdir()
+    keeper = PromptKeeper(verifier, live=LiveDir(live), load_image=lambda path: path.read_bytes())
+    (live / "prompt.jpg").write_bytes(b"photo")
+    keeper.update()
+    assert model.asked == [(CATEGORY_QUESTION, [b"photo"])] and verifier.category == "A quadruped robot dog"
+
+
+def test_an_unknown_image_mode_is_refused():
+    with pytest.raises(ValueError):
+        Verifier(Model("yes"), label="x", image_mode="photo")

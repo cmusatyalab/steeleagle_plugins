@@ -50,6 +50,9 @@ type section struct {
 	VisionPrompt         string           `json:"vision_prompt,omitempty"`
 	VisionReply          string           `json:"vision_reply,omitempty"`
 	VisionEvidence       string           `json:"vision_evidence,omitempty"`
+	TargetBox            *boxRef          `json:"target_box,omitempty"`
+	Target               *targetCheck     `json:"tracked_target,omitempty"`
+	Deploy               *deployRecord    `json:"deploy,omitempty"`
 	DSLReference         map[string]any   `json:"dsl_reference,omitempty"`
 	Task                 *task            `json:"task,omitempty"`
 	Instruction          string           `json:"instruction,omitempty"`
@@ -71,16 +74,19 @@ type missionArtifact struct {
 }
 
 type startRequest struct {
-	Mode        string                  `json:"mode,omitempty"`
-	Source      string                  `json:"source_type"`
-	Asset       string                  `json:"video_asset_id,omitempty"`
-	Vehicle     string                  `json:"vehicle_id,omitempty"`
-	Producer    string                  `json:"producer,omitempty"`
-	History     string                  `json:"history_mode,omitempty"`
-	SectionMode string                  `json:"section_mode,omitempty"`
-	Flight      *float64                `json:"flight_started_at,omitempty"`
-	Offset      *float64                `json:"video_takeoff_offset,omitempty"`
-	Plan        mission.PlanningContext `json:"planning_context"`
+	Mode        string `json:"mode,omitempty"`
+	Source      string `json:"source_type"`
+	Asset       string `json:"video_asset_id,omitempty"`
+	Vehicle     string `json:"vehicle_id,omitempty"`
+	Producer    string `json:"producer,omitempty"`
+	History     string `json:"history_mode,omitempty"`
+	SectionMode string `json:"section_mode,omitempty"`
+	// The run's detectors, over the configured ones (Settings)
+	Detector      string                  `json:"detector,omitempty"`
+	LocalDetector string                  `json:"local_detector,omitempty"`
+	Flight        *float64                `json:"flight_started_at,omitempty"`
+	Offset        *float64                `json:"video_takeoff_offset,omitempty"`
+	Plan          mission.PlanningContext `json:"planning_context"`
 }
 
 type session struct {
@@ -205,10 +211,14 @@ type Service struct {
 	runs         map[string]*run
 	live         map[string]*liveInput
 	liveDetector liveDetectionSource
-	wg           sync.WaitGroup
-	closed       bool
-	uploads      chan struct{}
-	videoSlots   chan struct{}
+	deployer     Deployer
+	detectors    func(context.Context, string) ([]DetectorOption, error)
+	// The verifier's descriptions of image prompts, by model, file and version
+	described  map[string]string
+	wg         sync.WaitGroup
+	closed     bool
+	uploads    chan struct{}
+	videoSlots chan struct{}
 }
 
 func New(ctx context.Context, root string, settings Settings, vision, generation nl2dsl.Provider, generator nl2dsl.Generator, log zerolog.Logger) (*Service, error) {
@@ -334,6 +344,12 @@ func (s *Service) start(req startRequest) (*run, error) {
 	}
 	if req.SectionMode != "" {
 		cfg.SectionMode = req.SectionMode
+	}
+	if req.Detector != "" {
+		cfg.Detector = req.Detector
+	}
+	if req.LocalDetector != "" {
+		cfg.LocalDetector = req.LocalDetector
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err

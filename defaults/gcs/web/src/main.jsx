@@ -6,7 +6,7 @@ import { PrimeReactProvider } from "primereact/api";
 import mapboxgl from 'mapbox-gl'
 import { getApiUrl } from './urls.js'
 
-// The maps' Mapbox token is the GCS's mapbox plugin arg. It is set before the
+// The maps' Mapbox token is the GCS's, read from .mapbox in its daemon's files directory. It is set before the
 // first render, since the maps are created as they mount; without it they
 // draw a placeholder instead (see mapboxToken.js).
 async function loadMapboxToken() {

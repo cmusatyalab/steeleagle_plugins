@@ -18,9 +18,11 @@ See the [V7 prompt](prompts/v7.md) and [standard GCS setup](../../README.md#ai-c
   detector can be selected, the run can still use images and telemetry. The
   subscription works independently of the Control viewer. [Detector selection](../../cmd/gcs/ai.go)
 - Results join sampled frames by Uriel producer, session, and sequence. The
-  section records up to four distinct native labels for each matched sample.
-  Each label uses its highest confidence in that frame. Missing, late, and
-  empty results contribute no class observation.
+  section records up to eight boxes for each matched sample, best first,
+  numbered, with their native labels, confidences and positions. Frames are
+  numbered alike in the image captions, so the model can name the box it
+  judges the pilot to be following. Missing, late, and empty results
+  contribute no class observation.
   Frame metadata and nearby vehicle telemetry can add relative altitude, motion,
   gimbal pose, or battery when reported. MP4 uploads supply sampled images and
   their timestamps. [Live capture](live.go) · [Evidence cache](evidence.go)

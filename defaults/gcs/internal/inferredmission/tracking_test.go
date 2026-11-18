@@ -1,0 +1,209 @@
+package inferredmission
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/nl2dsl"
+	"github.com/rs/zerolog"
+)
+
+func TestTheModelsTargetBoxIsReadOnlyForTrack(t *testing.T) {
+	var row section
+	reply := `{"recommendation": "Track the dog, then return home. If the battery drops to 30 percent, return home.",
+		"evidence": "The framing follows the dog.", "target_box": {"frame": 3, "box": 2}}`
+	if _, err := row.readVisionRecommendation("v7", reply); err != nil || row.TargetBox == nil || *row.TargetBox != (boxRef{3, 2}) {
+		t.Fatalf("expected box 2 of frame 3, got %+v (%v)", row.TargetBox, err)
+	}
+	row = section{}
+	reply = `{"recommendation": "Wait 30 seconds, then return home.", "evidence": "Unclear.", "target_box": {"frame": 3, "box": 2}}`
+	if _, err := row.readVisionRecommendation("v7", reply); err != nil || row.TargetBox != nil {
+		t.Fatalf("a box is only for tracking, got %+v (%v)", row.TargetBox, err)
+	}
+}
+
+func TestTrackedBoxNamesADetectionOfTheEvidence(t *testing.T) {
+	evidence := &liveEvidence{Frames: []frameEvidence{
+		{Frame: 1, Detections: []detectorLabel{{ID: 1, Class: "person"}}},
+		{Frame: 3, Detections: []detectorLabel{{ID: 1, Class: "person"}, {ID: 2, Class: "robotic dog"}}},
+	}}
+	if got, err := trackedBox(evidence, &boxRef{3, 2}); err != nil || got.Class != "robotic dog" {
+		t.Fatalf("expected the robotic dog, got %+v (%v)", got, err)
+	}
+	for _, ref := range []boxRef{{3, 3}, {2, 1}} {
+		if _, err := trackedBox(evidence, &ref); err == nil {
+			t.Fatalf("%+v names no detection", ref)
+		}
+	}
+}
+
+func TestCropsAreSquareAroundTheBoxAndEnlarged(t *testing.T) {
+	frame := image.NewRGBA(image.Rect(0, 0, 640, 360))
+	// A 32 px box near the right edge: twice its side is under the minimum
+	crop := cropAround(frame, [4]float64{0.95, 0.5, 1, 0.58}, checkContext, true)
+	if crop.Rect.Dx() != cropMinSide || crop.Rect.Dy() != cropMinSide {
+		t.Fatalf("expected a %d px square, got %v", cropMinSide, crop.Rect)
+	}
+	// Shifted into the frame, so the box is at its right edge, drawn in red
+	if c := crop.RGBAAt(cropMinSide-1, cropMinSide/2); c != (color.RGBA{255, 0, 0, 255}) {
+		t.Fatalf("expected the box's right side in red, got %v", c)
+	}
+	big := enlarge(crop, enlargeMinSide)
+	if big.Rect.Dx() != enlargeMinSide || big.Rect.Dy() != enlargeMinSide {
+		t.Fatalf("expected %d px, got %v", enlargeMinSide, big.Rect)
+	}
+}
+
+func TestWritingAPromptSetsAsideTheImagePrompt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "prompt.jpg"), []byte("jpeg"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLivePrompt(dir, "a white quadruped robot"); err != nil {
+		t.Fatal(err)
+	}
+	if text, _ := os.ReadFile(filepath.Join(dir, "prompt.txt")); string(text) != "a white quadruped robot\n" {
+		t.Fatalf("got prompt.txt %q", text)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "prompt.jpg")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the image prompt, which wins over the text, is still there")
+	}
+	if aside, _ := filepath.Glob(filepath.Join(dir, "replaced-*-prompt.jpg")); len(aside) != 1 {
+		t.Fatalf("expected the image prompt kept aside, got %v", aside)
+	}
+}
+
+// fakeOllama answers the box question with answer, and describes with
+// description; it records the questions asked.
+func fakeOllama(t *testing.T, answer, description string) *[]string {
+	var mu sync.Mutex
+	var asked []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model    string
+			Options  map[string]any
+			Messages []struct{ Content string }
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || r.URL.Path != "/api/chat" || body.Model != "qwen" ||
+			body.Options["num_ctx"] != float64(verifierNumCtx) {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		question := body.Messages[0].Content
+		mu.Lock()
+		asked = append(asked, question)
+		mu.Unlock()
+		reply := description
+		if strings.Contains(question, "red box") {
+			reply = answer
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": map[string]string{"content": reply}})
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("OLLAMA_HOST", server.URL)
+	return &asked
+}
+
+func targetFrame(t *testing.T) []nl2dsl.Image {
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 320, 180)), nil); err != nil {
+		t.Fatal(err)
+	}
+	return []nl2dsl.Image{{JPEG: buf.Bytes()}}
+}
+
+func TestATrackedObjectThatIsntThePromptBecomesThePrompt(t *testing.T) {
+	asked := fakeOllama(t, "No.", `"A white quadruped robot."`)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "prompt.txt"), []byte("a person in a red shirt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{ctx: t.Context(), log: zerolog.Nop()}
+	meta := session{Settings: DefaultSettings()}
+	meta.Settings.Verifier, meta.Settings.VerifierLiveDir = "qwen", dir
+	r := &run{dir: t.TempDir()}
+	label := detectorLabel{ID: 2, Class: "robotic dog", Box: &[4]float64{0.4, 0.4, 0.5, 0.6}}
+	check := s.checkTarget(r, meta, section{}, boxRef{1, 2}, label, targetFrame(t))
+	if check.Error != "" || check.Prompt != "a person in a red shirt" || check.Match == nil || *check.Match ||
+		check.NewPrompt != "A white quadruped robot" || !check.PromptWritten {
+		t.Fatalf("expected the prompt replaced, got %+v", check)
+	}
+	if len(*asked) != 2 || !strings.Contains((*asked)[0], "red box a person in a red shirt?") {
+		t.Fatalf("expected the box question with the prompt, then a description, got %q", *asked)
+	}
+	if text, _ := os.ReadFile(filepath.Join(dir, "prompt.txt")); string(text) != "A white quadruped robot\n" {
+		t.Fatalf("got prompt.txt %q", text)
+	}
+}
+
+func TestATrackedObjectThatIsThePromptKeepsIt(t *testing.T) {
+	asked := fakeOllama(t, "Yes", "unused")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "prompt.txt"), []byte("a quadruped robot dog"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{ctx: t.Context(), log: zerolog.Nop()}
+	meta := session{Settings: DefaultSettings()}
+	meta.Settings.Verifier, meta.Settings.VerifierLiveDir = "qwen", dir
+	label := detectorLabel{ID: 1, Class: "robotic dog", Box: &[4]float64{0.4, 0.4, 0.5, 0.6}}
+	check := s.checkTarget(&run{dir: t.TempDir()}, meta, section{}, boxRef{1, 1}, label, targetFrame(t))
+	if check.Error != "" || check.Match == nil || !*check.Match || check.NewPrompt != "" || len(*asked) != 1 {
+		t.Fatalf("expected the prompt kept, got %+v after %q", check, *asked)
+	}
+	if text, _ := os.ReadFile(filepath.Join(dir, "prompt.txt")); string(text) != "a quadruped robot dog" {
+		t.Fatalf("the prompt changed: %q", text)
+	}
+}
+
+type fakeDeployer struct {
+	compileErr error
+	calls      []string
+}
+
+func (d *fakeDeployer) VehicleFlow(context.Context, mission.PlanningContext, mission.Graph) ([]byte, error) {
+	d.calls = append(d.calls, "flow")
+	return []byte("flow"), nil
+}
+
+func (d *fakeDeployer) CompileOnVehicle(_ context.Context, vehicle, name string, flow, _ []byte, dsl string) error {
+	d.calls = append(d.calls, "compile "+vehicle+" "+name+" "+string(flow)+" "+dsl)
+	return d.compileErr
+}
+
+func (d *fakeDeployer) SetDataFailsafeMission(_ context.Context, vehicle string) error {
+	d.calls = append(d.calls, "failsafe "+vehicle)
+	return nil
+}
+
+func TestDeployCompilesOnTheVehicleThenSetsTheFailsafe(t *testing.T) {
+	d := &fakeDeployer{}
+	s := &Service{ctx: t.Context(), log: zerolog.Nop()}
+	s.SetDeployer(d)
+	meta := session{Settings: DefaultSettings(), Plan: mission.PlanningContext{Vehicle: "10.0.0.2.alpha"}}
+	record := s.deploy(meta, meta.Plan, mission.Draft{DSL: "dsl", Graph: &mission.Graph{}, Status: "compiled"})
+	want := []string{"flow", "compile 10.0.0.2.alpha inferred_mission flow dsl", "failsafe 10.0.0.2.alpha"}
+	if record.Status != "deployed" || record.Failsafe != "mission" || strings.Join(d.calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %+v after %q", record, d.calls)
+	}
+
+	// The failsafe isn't set to a mission the vehicle didn't load
+	d = &fakeDeployer{compileErr: errors.New("compile failed: FailedPrecondition - cannot load a mission while one is running")}
+	s.SetDeployer(d)
+	record = s.deploy(meta, meta.Plan, mission.Draft{DSL: "dsl", Status: "compiled"})
+	if record.Status != "failed" || !strings.Contains(record.Error, "running") || len(d.calls) != 1 {
+		t.Fatalf("got %+v after %q", record, d.calls)
+	}
+}

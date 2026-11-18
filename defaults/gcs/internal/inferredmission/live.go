@@ -131,7 +131,14 @@ func (s *Service) runLive(r *run, meta session) (string, string) {
 
 func (s *Service) watchLiveDetection(ctx context.Context, r *run, meta session, source liveDetectionSource) {
 	lookup, cancel := context.WithTimeout(ctx, 5*time.Second)
-	engine, err := source.engine(lookup, meta.Vehicle, meta.Producer)
+	var engine string
+	var err error
+	if meta.Settings.Detector != "" {
+		// A configured detector, on the GCS's daemon unless qualified
+		engine = source.local(meta.Settings.Detector)
+	} else {
+		engine, err = source.engine(lookup, meta.Vehicle, meta.Producer)
+	}
 	cancel()
 	if err != nil {
 		s.log.Debug().Err(err).Str("vehicle", meta.Vehicle).Msg("live inference detector lookup failed")

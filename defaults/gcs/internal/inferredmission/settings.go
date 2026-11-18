@@ -3,6 +3,9 @@ package inferredmission
 import (
 	"errors"
 	"math"
+	"path/filepath"
+	"strings"
+	"unicode"
 )
 
 const (
@@ -24,6 +27,25 @@ type Settings struct {
 	MaxVideoBytes     int64   `json:"max_video_bytes"`
 	MaxVideoSeconds   float64 `json:"max_video_seconds"`
 	MaxActiveRuns     int     `json:"max_active_runs"`
+	// Detector is the engine on the GCS's daemon whose detections live runs
+	// use, e.g. an RF-DETR; empty picks the one detector in the vehicle's
+	// active flow, if there is exactly one.
+	Detector string `json:"detector,omitempty"`
+	// LocalDetector is the detection engine a Track mission follows its
+	// target with, by its name in the planning flow (local.box_rerank, or
+	// remote.<engine> on the GCS's daemon); empty uses the one detector
+	// connected to a camera there.
+	LocalDetector string `json:"local_detector,omitempty"`
+	// Verifier is the Ollama model (at OLLAMA_HOST, else localhost:11434)
+	// that checks the object a live run finds the vehicle tracking against
+	// the cliped verifier's prompt in VerifierLiveDir, and describes it for
+	// a new prompt when it isn't the one; empty skips the check.
+	Verifier        string `json:"verifier,omitempty"`
+	VerifierLiveDir string `json:"verifier_live_dir,omitempty"`
+	// AutoDeploy sends each live section's compiled mission to the vehicle
+	// to compile and load, and sets the vehicle to start it when it loses
+	// its data link.
+	AutoDeploy bool `json:"auto_deploy,omitempty"`
 }
 
 func DefaultSettings() Settings {
@@ -47,6 +69,14 @@ func (s Settings) Validate() error {
 		if math.IsNaN(n) || math.IsInf(n, 0) {
 			return errors.New("Inferred mission settings must use finite numbers.")
 		}
+	}
+	for _, name := range []string{s.Detector, s.LocalDetector, s.Verifier} {
+		if len(name) > 128 || strings.IndexFunc(name, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+			return errors.New("The detector and verifier must be names without spaces.")
+		}
+	}
+	if s.VerifierLiveDir != "" && (!filepath.IsAbs(s.VerifierLiveDir) || len(s.VerifierLiveDir) > 1024) {
+		return errors.New("The verifier's live directory must be an absolute path.")
 	}
 	switch s.SectionMode {
 	case "", sectionNonOverlapping, sectionSliding:

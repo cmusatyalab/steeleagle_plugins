@@ -24,7 +24,7 @@ describe('maps without a Mapbox token', () => {
         mapboxgl.accessToken = '';
         const div = await render(<Mapbox vehicles={[]} tracking={false} mapPanelSize={0} />);
         expect(div.textContent).toContain('Map unavailable');
-        expect(div.textContent).toContain('Orchestrate');
+        expect(div.textContent).toContain('.mapbox');
     });
 
     it('draws a placeholder instead of the Plan map', async () => {

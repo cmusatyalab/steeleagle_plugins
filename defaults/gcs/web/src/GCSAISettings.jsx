@@ -140,6 +140,29 @@ export default function GCSAISettings({ text, onChange, disabled, currentGCS }) 
                         {number('History half-life (sections)', 'half_life_sections', inference, updateInference,
                             { min: 0.01, placeholder: '3', step: 0.5 })}
                     </div>
+                    <span className="text-sm font-semibold mt-2">Live tracking</span>
+                    <div className="flex flex-wrap gap-2">
+                        <label className="flex flex-column gap-1 flex-1">
+                            <span className="text-sm">Verifier (Ollama model)</span>
+                            <InputText value={inference.verifier ?? ''} placeholder="None"
+                                onChange={e => updateInference('verifier', e.target.value.trim())} disabled={disabled} />
+                        </label>
+                    </div>
+                    <label className="flex flex-column gap-1">
+                        <span className="text-sm">Verifier live directory</span>
+                        <InputText value={inference.verifier_live_dir ?? ''} placeholder="Absolute path of the cliped verifier's live directory"
+                            onChange={e => updateInference('verifier_live_dir', e.target.value.trim())} disabled={disabled} />
+                    </label>
+                    <label className="flex align-items-center gap-2">
+                        <input type="checkbox" checked={inference.auto_deploy === true}
+                            onChange={e => updateInference('auto_deploy', e.target.checked || undefined)} disabled={disabled} />
+                        <span className="text-sm">Deploy each live section's mission to the vehicle as its data-link-loss fallback</span>
+                    </label>
+                    <small className="text-color-secondary">
+                        Choose the detector and Track detector when starting a live run. When the model recommends Track, it names the
+                        detection box it judges the pilot to be following; the verifier's model checks that box against the verifier's
+                        prompt and, if it isn't the prompt, describes it as the new one.
+                    </small>
                     <details>
                         <summary className="cursor-pointer text-sm font-semibold">Advanced inference settings</summary>
                         <div className="flex flex-column gap-2 mt-2">

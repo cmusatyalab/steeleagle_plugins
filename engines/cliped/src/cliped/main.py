@@ -66,6 +66,7 @@ VERIFIER_DEFAULTS = {
     "live": "",
     "heartbeat": 1.0,
     "num_ctx": 4096,
+    "image_mode": "image",
 }
 # Defaults of the args of box_rerank.plugin.toml
 RERANK_DEFAULTS = {
@@ -282,6 +283,8 @@ def parse_verifier_args(content):
         raise ConfigError(f"timeout_ms must be a positive number, not {timeout!r}")
     if not isinstance(args["log_tiles"], bool):
         raise ConfigError("log_tiles must be true or false")
+    if args["image_mode"] not in ("image", "description"):
+        raise ConfigError(f"image_mode must be \"image\" or \"description\", not {args['image_mode']!r}")
     _positive_int(args, "min_side", 0)
     _positive_int(args, "num_ctx", 0)
     _number(args, "heartbeat", 0, 3600, low_open=True)
@@ -538,7 +541,8 @@ def main_verifier(name):
     vlog = logging.getLogger("cliped.verifier")
     vlog.info("asking %s at %s", args["model"], ollama.host)
     verifier = Verifier(ollama.ask, label=args["image"] or args["prompt"], reference=reference, tile_log=log,
-                        question=args["question"] or None, min_side=args["min_side"])
+                        question=args["question"] or None, min_side=args["min_side"],
+                        image_mode=args["image_mode"])
     keeper = PromptKeeper(verifier, live=live, describe=ollama.describe, load_image=load_image,
                           interval_s=args["heartbeat"])
     if live is not None:

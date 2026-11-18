@@ -426,7 +426,20 @@ func runChild(o options, args map[string]any, engine string, signals <-chan os.S
 		return 1, err
 	}
 	cmd := exec.Command(o.gcs, "-web", o.web)
+	// The GCS reads its Mapbox token from a file in the daemon's files
+	// directory, never from its args
+	files, err := os.MkdirTemp("", "gcsmock-files-")
+	if err != nil {
+		return 1, err
+	}
+	defer os.RemoveAll(files)
+	if o.mapbox != "" {
+		if err := os.WriteFile(filepath.Join(files, ".mapbox"), []byte(o.mapbox), 0o600); err != nil {
+			return 1, err
+		}
+	}
 	cmd.Env = append(os.Environ(),
+		"STEELEAGLE_FILES="+files,
 		"STEELEAGLE_ENGINE_ENDPOINT="+engine,
 		"STEELEAGLE_CLIENT_SOCKET="+o.socket,
 		"STEELEAGLE_PLUGIN_ARGS="+string(pluginArgs))

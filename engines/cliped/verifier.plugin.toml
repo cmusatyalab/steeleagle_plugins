@@ -40,6 +40,12 @@ description = "The question asked about each frame, instead of the default one; 
 default = ""
 
 [[args]]
+name = "image_mode"
+type = "string"
+description = "How an image prompt is verified: \"image\" shows the model the image with each frame; \"description\" asks the model once what kind of thing the image shows, in a few words (e.g. \"a quadruped robot dog\"), and verifies each frame against that text. Description rejects look-alikes of other kinds (on live crops of a robot dog, it said yes to 4 of 80 others, against 25 with the image); image tells individuals of one kind apart (one person among others, where description is just \"a person\"). No effect on a text prompt"
+default = "image"
+
+[[args]]
 name = "min_side"
 type = "number"
 description = "Enlarge each frame so its shorter side is at least this many pixels before the model sees it, e.g. box_rerank's small crops; 0 for as is"

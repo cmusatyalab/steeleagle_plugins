@@ -162,9 +162,11 @@ func (p Provider) openAIRequest(req Request) map[string]any {
 	}
 	if len(req.Images) > 0 {
 		content := make([]any, 0, 2*len(req.Images))
-		for _, img := range req.Images {
+		for i, img := range req.Images {
+			// Numbered as the live evidence numbers its frames, so a box
+			// in it can be tied to its image
 			content = append(content,
-				map[string]string{"type": "input_text", "text": fmt.Sprintf("Frame at %.3f seconds from section start", img.Time)},
+				map[string]string{"type": "input_text", "text": fmt.Sprintf("Frame %d at %.3f seconds from section start", i+1, img.Time)},
 				map[string]string{"type": "input_image", "image_url": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(img.JPEG)})
 		}
 		input = append(input, map[string]any{"role": "user", "content": content})

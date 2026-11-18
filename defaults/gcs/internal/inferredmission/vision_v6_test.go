@@ -24,15 +24,15 @@ func TestV6PreservesNativeClassFromTheSelectedDetector(t *testing.T) {
 		Detector: "100.0.0.2.det",
 		Frames:   []frameEvidence{{Detections: []detectorLabel{{Class: got.Target}}}},
 	}
-	if err := caps.bind(&got, "100.0.0.2.drone", evidence); err != nil || got.Camera != "params.Camera_rgb" || got.Engine != "test.det" {
+	if err := caps.bind(&got, "100.0.0.2.drone", evidence, ""); err != nil || got.Camera != "params.Camera_rgb" || got.Engine != "test.det" {
 		t.Fatalf("binding = %#v, %v", got, err)
 	}
-	if err := caps.bind(&got, "100.0.0.2.different", evidence); err == nil {
+	if err := caps.bind(&got, "100.0.0.2.different", evidence, ""); err == nil {
 		t.Fatal("another vehicle's detection selected an ambiguous track route")
 	}
 	dogs := []string{"Dog"}
 	caps.Track = []v6TrackRoute{{Camera: "params.Camera_rgb", Engine: "test.det", ClassNames: &dogs}}
-	if err := caps.bind(&got, "100.0.0.2.drone", evidence); err == nil {
+	if err := caps.bind(&got, "100.0.0.2.drone", evidence, ""); err == nil {
 		t.Fatal("admitted a class excluded by the selected detector")
 	}
 }
@@ -72,5 +72,20 @@ func TestV6MissingImageryCompilesPolicyFallbackWithTheSelectedDriver(t *testing.
 		!strings.Contains(compiler.checkedDraft, "actions.Wait waiting(Duration=30.0)") ||
 		!strings.Contains(compiler.checkedDraft, "done -> home") {
 		t.Fatalf("compiler plan = %#v; DSL = %q", compiler.checkedPlan, compiler.checkedDraft)
+	}
+}
+
+func TestTheChosenTrackDetectorBindsWhateverItsClasses(t *testing.T) {
+	people := []string{"person"}
+	caps := v6Capabilities{Events: []string{"events.Battery"}, Track: []v6TrackRoute{
+		{Camera: "params.Camera_front", Engine: "local.yolo", ClassNames: &people, cameraName: "front"},
+		{Camera: "params.Camera_front", Engine: "local.box_rerank", ClassNames: &people, cameraName: "front"},
+	}}
+	got := task{Kind: "track", Target: "robotic dog"}
+	if err := caps.bind(&got, "100.0.0.2.drone", nil, "local.box_rerank"); err != nil || got.Engine != "local.box_rerank" || got.Camera != "params.Camera_front" {
+		t.Fatalf("binding = %#v, %v", got, err)
+	}
+	if err := caps.bind(&got, "100.0.0.2.drone", nil, "remote.box_rerank"); err == nil || !strings.Contains(err.Error(), "remote.box_rerank") {
+		t.Fatalf("a detector the planning flow doesn't connect bound: %v", err)
 	}
 }

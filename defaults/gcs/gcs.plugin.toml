@@ -57,12 +57,6 @@ description = "URL of the Prometheus server (the engines/prometheus plugin) the 
 default = "http://localhost:9090"
 
 [[args]]
-name = "mapbox"
-type = "string"
-description = "Mapbox access token for the web UI's maps; empty shows no basemap"
-default = ""
-
-[[args]]
 name = "ai"
 type = "object"
 description = "Chat and video inference settings. Save API keys separately in the AI panel on the GCS host."

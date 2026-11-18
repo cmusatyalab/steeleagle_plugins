@@ -80,8 +80,6 @@ type args struct {
 	MaxInputSize int      `json:"max_input_size"`
 	// Compiler configures compiling missions; see mission.CompilerConfig.
 	Compiler mission.CompilerConfig `json:"compiler"`
-	// Mapbox is the access token the web UI's maps use; empty for none.
-	Mapbox string `json:"mapbox"`
 	// DumpDir is where the H.264 frames that arrive are recorded, as they
 	// came from Uriel; empty to record none. See package dump.
 	DumpDir string `json:"dump_dir"`
@@ -141,6 +139,13 @@ func main() {
 		log = log.Level(l)
 	} else {
 		log.Fatal().Err(err).Msg("invalid log level")
+	}
+	if isHeadless() {
+		log = log.With().Str("plugin", headlessPlugin).Logger()
+		if err := runHeadless(*engine, *daemon, os.Getenv(argsEnv), log); err != nil {
+			log.Fatal().Err(err).Msg("inferred mission headless failed")
+		}
+		return
 	}
 	if err := run(*engine, *daemon, *web, os.Getenv(argsEnv), log); err != nil {
 		log.Fatal().Err(err).Msg("gcs failed")
@@ -259,28 +264,27 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 	}
 	metricsRoutes["GET /api/metrics/flow"] = metrics.NewFlowHandler(flowOf, daemonConfigs, promv1.NewAPI(prom), gcsIP, log)
 
+	// The keys are files in the daemon's files directory, not args
+	mapbox, path, err := readSecret(mapboxKeyFile)
+	if err != nil {
+		log.Warn().Err(err).Msg("no Mapbox token; the maps have no basemap")
+	} else if mapbox == "" {
+		log.Warn().Str("file", path).Msg("no Mapbox token in this file; the maps have no basemap")
+	}
+	if key, path, err := readSecret(openAIKeyFile); err != nil {
+		log.Warn().Err(err).Msg("no OpenAI key file")
+	} else if key != "" && os.Getenv("OPENAI_API_KEY") == "" {
+		// Under a key saved in the AI panel, as the environment's is
+		os.Setenv("OPENAI_API_KEY", key)
+		log.Info().Str("file", path).Msg("OpenAI key read")
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	register, inference := registerAI(ctx, engine, a.AI, missions.svc, hub, log)
 	if inference != nil {
 		defer inference.Close()
-		if catalog != nil {
-			inference.SetLiveDetectionSource(func(ctx context.Context, vehicle, producer string) (string, error) {
-				raw, err := flowOf(ctx, vehicle)
-				if err != nil || len(raw) == 0 {
-					return "", err
-				}
-				flow, err := config.ParseFlowConfigFromBytes(raw)
-				if err != nil {
-					return "", err
-				}
-				cat, err := catalog(ctx)
-				if err != nil {
-					return "", err
-				}
-				return liveDetector(cat, flow, gcsIP, vehicle, producer), nil
-			}, results)
-		}
+		wireInference(inference, conn, catalog, flowOf, missions.svc, gcsIP, results)
 	}
 	if conn != nil {
 		// Detections of the engines on this machine are placed on the map
@@ -295,7 +299,7 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 		return err
 	}
 	server := &http.Server{
-		Handler:           newHandler(hub, controller, vehicles, missions, daemonsRoutes, metricsRoutes, pinStore, uiConfig{Mapbox: a.Mapbox}, web, log, register),
+		Handler:           newHandler(hub, controller, vehicles, missions, daemonsRoutes, metricsRoutes, pinStore, uiConfig{Mapbox: mapbox}, web, log, register),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errs := make(chan error, 2)

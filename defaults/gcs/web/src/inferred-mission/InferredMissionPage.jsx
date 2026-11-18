@@ -251,6 +251,9 @@ export default function InferredMissionPage({ activeTab, onApplyArtifact, getPla
     const [videoTakeoff, setVideoTakeoff] = useState('');
     const [historyMode, setHistoryMode] = useState('');
     const [sectionMode, setSectionMode] = useState('');
+    const [detectors, setDetectors] = useState([]);
+    const [detector, setDetector] = useState('');
+    const [localDetector, setLocalDetector] = useState('');
     const [asset, setAsset] = useState(null);
     const [progress, setProgress] = useState(null);
     const [busy, setBusy] = useState(false);
@@ -365,6 +368,21 @@ export default function InferredMissionPage({ activeTab, onApplyArtifact, getPla
         }
     }
 
+    const cameraVehicle = source === 'live' ? streams.find(stream => stream.producer === producer)?.vehicle : undefined;
+    useEffect(() => {
+        setDetector('');
+        setLocalDetector('');
+        if (!cameraVehicle) {
+            setDetectors([]);
+            return undefined;
+        }
+        const controller = new AbortController();
+        jsonRequest(`${API}/detectors?vehicle=${encodeURIComponent(cameraVehicle)}`, { signal: controller.signal })
+            .then(rows => { if (!controller.signal.aborted) setDetectors(rows); })
+            .catch(failure => { if (!controller.signal.aborted) { setDetectors([]); setError(failure.message); } });
+        return () => controller.abort();
+    }, [cameraVehicle]);
+
     async function start() {
         setBusy(true);
         setError('');
@@ -380,6 +398,8 @@ export default function InferredMissionPage({ activeTab, onApplyArtifact, getPla
                 if (!selectedCamera) throw new Error('Select a streaming camera.');
                 body.vehicle_id = selectedCamera.vehicle;
                 body.producer = selectedCamera.producer;
+                if (detector) body.detector = detector;
+                if (localDetector) body.local_detector = localDetector;
                 if (takeoff) body.flight_started_at = new Date(takeoff).getTime() / 1000;
             }
             const run = await jsonRequest(`${API}/sessions`, {
@@ -450,6 +470,7 @@ export default function InferredMissionPage({ activeTab, onApplyArtifact, getPla
     const defaultSectionMode = config?.settings.section_mode ?? 'non_overlapping';
     const videoSections = asset && videoSectionCount(asset.duration, sectionSeconds, sectionMode || defaultSectionMode);
     const selectedCamera = streams.find(stream => stream.producer === producer);
+    const evidenceDetectors = detectors.filter(option => option.evidence);
     const sourceReady = config?.media_available && (videoMode ? asset : selectedCamera);
     const canStart = Boolean(!busy && config?.configured && sourceReady);
     const liveTarget = selectedCamera ? `Camera: ${selectedCamera.producer}`
@@ -545,6 +566,17 @@ export default function InferredMissionPage({ activeTab, onApplyArtifact, getPla
                                 <option value="">{streams.length ? 'Select a camera' : 'No cameras streaming'}</option>
                                 {streams.map(stream => <option key={stream.producer} value={stream.producer}>{stream.producer}</option>)}
                             </select></label>
+                            {selectedCamera && <>
+                                <label className="im-vehicle-field">Detector <select value={detector} onChange={event => setDetector(event.target.value)}>
+                                    <option value="">{config?.settings.detector ? `Default (${config.settings.detector})` : 'Automatic (the one in the active flow)'}</option>
+                                    {evidenceDetectors.map(option => <option key={option.engine} value={option.engine}>{option.name}</option>)}
+                                </select></label>
+                                <label className="im-vehicle-field">Track detector <select value={localDetector} onChange={event => setLocalDetector(event.target.value)}>
+                                    <option value="">{config?.settings.local_detector ? `Default (${config.settings.local_detector})` : 'Automatic (the one in the planning flow)'}</option>
+                                    {detectors.map(option => <option key={option.name} value={option.name}>{option.name}</option>)}
+                                </select></label>
+                                <p className="im-note">The detector's boxes go to the model; the Track detector is the engine a Track mission follows its target with, connected to the camera in the planning flow.</p>
+                            </>}
                         </div>
                     )}
                     <details className="im-advanced">

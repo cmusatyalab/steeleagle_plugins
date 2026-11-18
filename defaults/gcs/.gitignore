@@ -3,3 +3,6 @@
 !.pixi/config.toml
 /web/dist/
 /web/node_modules/
+# API keys; the plugins read them from $STEELEAGLE_FILES
+.openai
+.mapbox

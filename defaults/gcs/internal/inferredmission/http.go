@@ -38,6 +38,7 @@ func (s *Service) Register(mux *http.ServeMux, sources func() []Source) {
 			"compiler_available": err == nil, "prompt_version": promptVersion,
 		})
 	})
+	mux.HandleFunc("GET "+api+"/detectors", s.listDetectors)
 	mux.HandleFunc("POST "+api+"/videos", s.upload)
 	mux.HandleFunc("GET "+api+"/videos/{asset}", s.videoMetadata)
 	mux.HandleFunc("GET "+api+"/videos/{asset}/media", s.videoMedia)

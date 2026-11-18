@@ -76,7 +76,7 @@ func TestV6DetectorEvidenceChangesCompiledMission(t *testing.T) {
 					t.Fatalf("expected one vision request, got %d input messages: %v", len(body.Input), err)
 				}
 				content := body.Input[0].Content
-				if len(content) != 2 || content[0].Text != "Frame at 0.000 seconds from section start" || content[1].URL != frameURL {
+				if len(content) != 2 || content[0].Text != "Frame 1 at 0.000 seconds from section start" || content[1].URL != frameURL {
 					t.Fatal("expected the same frame and timestamp in each vision request")
 				}
 				basePrompt, evidenceJSON, ok := strings.Cut(body.Instructions, "\n\n## Current evidence and runtime capabilities\n")
@@ -102,7 +102,7 @@ func TestV6DetectorEvidenceChangesCompiledMission(t *testing.T) {
 				}
 				labels := frame.Detections
 				if tc.wantLabel {
-					if evidence.DetectionFrames != 1 || len(labels) != 1 || labels[0] != (detectorLabel{Class: tc.label, Score: 0.89}) {
+					if evidence.DetectionFrames != 1 || len(labels) != 1 || labels[0] != (detectorLabel{ID: 1, Class: tc.label, Score: 0.89}) {
 						t.Fatalf("expected exact detector label %q, got %v", tc.label, labels)
 					}
 				} else if evidence.DetectionFrames != 0 || len(labels) != 0 {

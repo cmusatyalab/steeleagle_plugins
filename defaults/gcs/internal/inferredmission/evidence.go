@@ -18,22 +18,26 @@ import (
 const (
 	maxEvidenceResults = 4096
 	maxMotionSamples   = 64
-	maxDetectionLabels = 4
+	// The most boxes kept of a frame, best first: enough for the target and
+	// the distractors around it
+	maxDetectionLabels = 8
 	detectionWait      = 200 * time.Millisecond
 	telemetryAge       = 2 * time.Second
 )
 
 type liveDetectionSource struct {
 	engine    func(context.Context, string, string) (string, error)
+	local     func(string) string
 	subscribe func(context.Context, string, func(feed.Result))
 }
 
 // SetLiveDetectionSource configures a detector lookup and subscription for new
-// live runs. The source is independent of viewers on the Control page.
-func (s *Service) SetLiveDetectionSource(engine func(context.Context, string, string) (string, error), subscribe func(context.Context, string, func(feed.Result))) {
+// live runs. The source is independent of viewers on the Control page. local
+// qualifies the name of a configured detector (Settings.Detector).
+func (s *Service) SetLiveDetectionSource(engine func(context.Context, string, string) (string, error), local func(string) string, subscribe func(context.Context, string, func(feed.Result))) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.liveDetector = liveDetectionSource{engine: engine, subscribe: subscribe}
+	s.liveDetector = liveDetectionSource{engine: engine, local: local, subscribe: subscribe}
 }
 
 // MotionEvidence contains only the relative motion useful for inference.
@@ -137,9 +141,16 @@ type frameIdentity struct {
 	seq     uint64
 }
 
+// detectorLabel is one box a detector found in a frame.
 type detectorLabel struct {
+	// ID numbers the frame's boxes from 1, best first, for the model to name
+	// the one it judges the vehicle to be tracking
+	ID    int     `json:"id"`
 	Class string  `json:"class"`
 	Score float64 `json:"score"`
+	// Box is (x_min, y_min, x_max, y_max), as fractions of the frame's width
+	// and height; absent if the detector gave none
+	Box *[4]float64 `json:"box,omitempty"`
 }
 
 type frameEvidence struct {
@@ -202,6 +213,25 @@ func (e *evidenceCache) nearby(at time.Time) *nearbyMotion {
 	return &nearbyMotion{MotionEvidence: chosen.motion, OffsetSec: chosen.at.Sub(at).Seconds(), Source: chosen.source}
 }
 
+// normalizedBox is box as fractions of the frame, rounded to 0.001; nil if
+// there is none or it isn't a box within the frame.
+func normalizedBox(box *resultpb.BoundingBox) *[4]float64 {
+	if box == nil {
+		return nil
+	}
+	b := [4]float64{box.GetXMin(), box.GetYMin(), box.GetXMax(), box.GetYMax()}
+	for i, v := range b {
+		if math.IsNaN(v) || v < 0 || v > 1 {
+			return nil
+		}
+		b[i] = math.Round(v*1000) / 1000
+	}
+	if b[2] <= b[0] || b[3] <= b[1] {
+		return nil
+	}
+	return &b
+}
+
 func (e *evidenceCache) addResult(result feed.Result) {
 	// Empty results may represent errors as well as zero detections. Keep only
 	// positive observations so absence never means a frame was empty.
@@ -212,26 +242,19 @@ func (e *evidenceCache) addResult(result feed.Result) {
 	if err := protojson.Unmarshal(result.JSON, &message); err != nil {
 		return
 	}
-	// Several boxes of one class should not displace other classes from a sample.
-	scores := make(map[string]float64)
+	labels := make([]detectorLabel, 0, len(message.GetDetections()))
 	for _, item := range message.GetDetections() {
 		label, confidence := item.GetClassName(), item.GetScore()
 		if label == "" || len(label) > 96 || strings.IndexFunc(label, unicode.IsControl) >= 0 ||
 			math.IsNaN(confidence) || confidence < 0 || confidence > 1 {
 			continue
 		}
-		if best, ok := scores[label]; !ok || confidence > best {
-			scores[label] = confidence
-		}
+		labels = append(labels, detectorLabel{Class: label, Score: math.Round(confidence*1000) / 1000, Box: normalizedBox(item.GetBbox())})
 	}
-	if len(scores) == 0 {
+	if len(labels) == 0 {
 		return
 	}
-	labels := make([]detectorLabel, 0, len(scores))
-	for label, score := range scores {
-		labels = append(labels, detectorLabel{Class: label, Score: math.Round(score*1000) / 1000})
-	}
-	slices.SortFunc(labels, func(a, b detectorLabel) int {
+	slices.SortStableFunc(labels, func(a, b detectorLabel) int {
 		switch {
 		case a.Score > b.Score:
 			return -1
@@ -243,6 +266,9 @@ func (e *evidenceCache) addResult(result feed.Result) {
 	})
 	if len(labels) > maxDetectionLabels {
 		labels = slices.Clone(labels[:maxDetectionLabels])
+	}
+	for i := range labels {
+		labels[i].ID = i + 1
 	}
 
 	e.mu.Lock()

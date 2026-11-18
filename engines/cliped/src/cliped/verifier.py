@@ -3,7 +3,9 @@
 if it does and drops it if not.
 
 The prompt is text, or a reference image; with an image, the model is shown
-the reference first and the frame second. Either way it answers yes or no,
+the reference first and the frame second, or, with image_mode "description",
+the image's kind in a few words (CATEGORY_QUESTION) as a text prompt.
+Either way it answers yes or no,
 and every input gets a GenericResult holding the JSON object
 {"match": true|false}, so cliped's send queue sees a RESULT event for each
 tile it sent, and cliped learns from it.
@@ -64,6 +66,29 @@ DESCRIBE_QUESTION = (
     "the person or object itself, not the ground, background or what it is doing; only colors and shapes "
     "visible from far above. Answer with the phrase only, under 15 words."
 )
+# Asked about an image prompt once, in description mode: the kind of thing it
+# shows, in a few words, for the verifier's own text question. Asking whether
+# a crop is a kind of thing rejects look-alikes; comparing it with the image,
+# or with a detailed description, asks how alike they are, and a grey chair
+# is alike enough to a grey robot dog. On 147 labeled live crops of a robot
+# dog (Qwen3-VL 30B-A3B), a photo of the dog was described as "a quadruped
+# robot dog", which said yes to 48 of 67 dog crops and to 4 of 80 others;
+# the photo itself, with BOX_IMAGE_QUESTION, to 53 and 25, and the detailed
+# description ("a gray quadruped robot dog with white markings and black
+# feet") to 67 and 43. It suits a target whose look-alikes are other kinds of
+# thing; to tell individuals of one kind apart, show the image: on labeled
+# crops of three people, both photos were described as "a person", while
+# the photos themselves found 71 of 75 crops of their person and said yes to
+# 1 of 115 of the others
+CATEGORY_QUESTION = (
+    "Name what kind of object or person this image shows, in 2 to 5 words, e.g. 'a person' or "
+    "'a quadruped robot dog'. Name only its kind, not its colors, markings or parts. "
+    "Answer with the phrase only."
+)
+# Tokens a description may take
+DESCRIBE_TOKENS = 40
+# How an image prompt is verified: the image itself, or its kind as text
+IMAGE_MODES = ("image", "description")
 # Tokens of context the model is loaded with. A request is one or two small
 # images, a question and an answer of a few words, well under 4096; Ollama's
 # default (the model's full context, 262144 for Qwen3-VL) reserves a KV cache
@@ -181,7 +206,7 @@ class Ollama:
     def describe(self, image):
         """A short description of what the encoded image file `image` shows,
         for a text prompt."""
-        return clean_description(self.ask(DESCRIBE_QUESTION, [image], max_tokens=40))
+        return clean_description(self.ask(DESCRIBE_QUESTION, [image], max_tokens=DESCRIBE_TOKENS))
 
 
 def clean_description(text):
@@ -242,14 +267,25 @@ class Verifier:
     `min_side` pixels on its shorter side before the model sees it (0 for as
     is).
 
+    With `image_mode` "description", an image prompt is verified as the text
+    prompt its kind is (`category`, asked of the model with CATEGORY_QUESTION
+    as soon as the image is set, at startup or from the live directory)
+    rather than by showing the model the image; "image" shows it the image.
+    If the model can't be asked then, the next frame asks again. A text
+    prompt is the same either way.
+
     `description` is the prompt as text, for the heartbeat: the label of a
     text prompt, or, for an image, its description once PromptKeeper has
     asked for it (None until then)."""
 
-    def __init__(self, ask, *, label, reference=None, tile_log=None, question=None, min_side=0):
+    def __init__(self, ask, *, label, reference=None, tile_log=None, question=None, min_side=0,
+                 image_mode="image"):
+        if image_mode not in IMAGE_MODES:
+            raise ValueError(f"image_mode must be one of {IMAGE_MODES}, not {image_mode!r}")
         self.ask = ask
         self.tile_log = tile_log
         self.min_side = min_side
+        self.image_mode = image_mode
         self.frames = 0
         self.matched = 0
         self.set_prompt(label, reference)
@@ -265,18 +301,46 @@ class Verifier:
         self.label = label
         self.reference = reference
         self.description = None if reference is not None else (label or None)
+        self.category = None
+        if reference is not None and self.image_mode == "description":
+            try:
+                self._category()
+            except Exception as err:
+                logger.warning("couldn't name what the image %s shows (%s); asking again at the next frame",
+                               label, err)
 
     def set_question(self, question):
         """Asks `question` from now on, or the default one for None or "". """
         self.custom_question = question or None
 
-    def question(self, png):
+    def _category(self):
+        if self.category is None:
+            answer = self.ask(CATEGORY_QUESTION, [self.reference], max_tokens=DESCRIBE_TOKENS)
+            category = clean_description(answer)
+            if not category:
+                raise OllamaError(f"the model didn't name the kind of thing the image {self.label} shows")
+            self.category = category
+            logger.info("the image %s shows %r: verifying frames against that", self.label, category)
+        return self.category
+
+    def _text_question(self, prompt, png):
         custom = self.custom_question
         if custom == "box":
-            custom = BOX_IMAGE_QUESTION if self.reference is not None else BOX_QUESTION
-        if self.reference is not None:
-            return (custom or IMAGE_QUESTION).format(prompt=self.label), [self.reference, png]
-        return (custom or TEXT_QUESTION).format(prompt=self.label), [png]
+            custom = BOX_QUESTION
+        return (custom or TEXT_QUESTION).format(prompt=prompt), [png]
+
+    def question(self, png):
+        """The first pass's question about the encoded frame `png`, and the
+        images it shows."""
+        if self.reference is None:
+            return self._text_question(self.label, png)
+        if self.image_mode == "description":
+            return self._text_question(self._category(), png)
+        custom = self.custom_question
+        if custom == "box":
+            custom = BOX_IMAGE_QUESTION
+        return (custom or IMAGE_QUESTION).format(prompt=self.label), [self.reference, png]
+
 
     def on_input(self, input):
         """Whether to forward `input`, and the serialized GenericResult.

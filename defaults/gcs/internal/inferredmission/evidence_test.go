@@ -57,29 +57,39 @@ func TestLiveEvidenceUsesExactTransportIdentity(t *testing.T) {
 	}
 }
 
-func TestLiveEvidenceKeepsHighestScoreForEachDetectorClass(t *testing.T) {
+func TestLiveEvidenceNumbersTheBestBoxesWithTheirPositions(t *testing.T) {
 	cache := evidenceCache{engine: "10.0.0.1.detector"}
 	cache.addResult(feed.Result{
 		Engine: cache.engine, Session: 2, Seq: 7, Type: "DetectionResult",
 		JSON: []byte(`{"detections":[
-			{"className":"Person","score":0.90},
-			{"className":"Person","score":0.99},
+			{"className":"Person","score":0.90,"bbox":{"xMin":0.1,"yMin":0.2,"xMax":0.3,"yMax":0.6}},
+			{"className":"Person","score":0.99,"bbox":{"xMin":0.4,"yMin":0.4,"xMax":0.5,"yMax":0.7}},
 			{"className":"Person","score":0.91},
 			{"className":"Person","score":0.95},
 			{"className":"Dog","score":0.87},
 			{"className":"dog","score":0.86},
-			{"className":"Box","score":0.86},
-			{"className":"Cone","score":0.8}
+			{"className":"Box","score":0.86,"bbox":{"xMin":0.5,"yMin":0.5,"xMax":0.4,"yMax":0.6}},
+			{"className":"Cone","score":0.8},
+			{"className":"Cone","score":0.7}
 		]}`),
 	})
+	box := func(b ...float64) *[4]float64 { return (*[4]float64)(b) }
+	// Several boxes of one class are all kept: any may be the one tracked
 	expected := []detectorLabel{
-		{Class: "Person", Score: 0.99},
-		{Class: "Dog", Score: 0.87},
-		{Class: "Box", Score: 0.86},
-		{Class: "dog", Score: 0.86},
+		{ID: 1, Class: "Person", Score: 0.99, Box: box(0.4, 0.4, 0.5, 0.7)},
+		{ID: 2, Class: "Person", Score: 0.95},
+		{ID: 3, Class: "Person", Score: 0.91},
+		{ID: 4, Class: "Person", Score: 0.9, Box: box(0.1, 0.2, 0.3, 0.6)},
+		{ID: 5, Class: "Dog", Score: 0.87},
+		{ID: 6, Class: "Box", Score: 0.86}, // an inverted box is dropped
+		{ID: 7, Class: "dog", Score: 0.86},
+		{ID: 8, Class: "Cone", Score: 0.8},
 	}
-	if labels := cache.results[frameIdentity{2, 7}]; !slices.Equal(labels, expected) {
-		t.Fatalf("expected the highest scoring distinct classes %v, got %v", expected, labels)
+	labels := cache.results[frameIdentity{2, 7}]
+	if !slices.EqualFunc(labels, expected, func(a, b detectorLabel) bool {
+		return a.ID == b.ID && a.Class == b.Class && a.Score == b.Score && (a.Box == nil) == (b.Box == nil) && (a.Box == nil || *a.Box == *b.Box)
+	}) {
+		t.Fatalf("expected the best %d boxes, numbered, got %+v", maxDetectionLabels, labels)
 	}
 }
 

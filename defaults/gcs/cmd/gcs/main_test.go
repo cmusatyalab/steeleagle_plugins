@@ -69,9 +69,6 @@ func TestParseArgs(t *testing.T) {
 	if a.HTTPAddr != ":9000" || !slices.Equal(a.ICEServers, []string{"stun:example.com"}) || a.MaxInputSize != 4<<20 {
 		t.Errorf("parseArgs() = %+v, want the set args over the defaults", a)
 	}
-	if a, err = parseArgs(`{"mapbox": "pk.test"}`); err != nil || a.Mapbox != "pk.test" {
-		t.Errorf("parseArgs() = %+v, %v, want the mapbox token", a, err)
-	}
 	if a, err = parseArgs(`{"dump_dir": "/tmp/frames"}`); err != nil || a.DumpDir != "/tmp/frames" {
 		t.Errorf("parseArgs() = %+v, %v, want the dump directory", a, err)
 	}

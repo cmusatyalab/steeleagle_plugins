@@ -33,7 +33,7 @@ func loadGCSConfig(o options) (mockGCSConfig, error) {
 		return mockGCSConfig{}, errors.New("GCS plugin manifest must declare an engine")
 	}
 
-	settings := mockGCSConfig{manifest: manifest, args: map[string]any{"http_addr": o.http, "mapbox": o.mapbox}}
+	settings := mockGCSConfig{manifest: manifest, args: map[string]any{"http_addr": o.http}}
 	if o.aiConfig != "" {
 		ai, err := loadAIConfig(o.aiConfig)
 		if err != nil {

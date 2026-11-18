@@ -7,4 +7,4 @@ import mapboxgl from 'mapbox-gl'
 export const hasMapboxToken = () => !!mapboxgl.accessToken;
 
 export const MISSING_TOKEN_DETAIL =
-  "No Mapbox access token is configured, so maps are disabled. Set the GCS service's mapbox arg under Orchestrate > Configure..., then restart the GCS.";
+  "No Mapbox access token is configured, so maps are disabled. Put the token in the file .mapbox in the GCS daemon's files directory ($STEELEAGLE_FILES), then restart the GCS.";

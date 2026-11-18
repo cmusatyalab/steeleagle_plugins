@@ -179,7 +179,7 @@ func (c v6Capabilities) actionChain(t task) ([][]string, error) {
 	return chain, nil
 }
 
-func (c v6Capabilities) bind(t *task, vehicle string, evidence *liveEvidence) error {
+func (c v6Capabilities) bind(t *task, vehicle string, evidence *liveEvidence, trackDetector string) error {
 	switch t.Kind {
 	case "track", "patrol", "survey":
 		if !slices.Contains(c.Events, "events.Battery") {
@@ -193,6 +193,18 @@ func (c v6Capabilities) bind(t *task, vehicle string, evidence *liveEvidence) er
 				return fmt.Errorf("the track route is unavailable: %s", c.FlowIssue)
 			}
 			return fmt.Errorf("Track requires a verified camera-to-detector route in Flow Builder")
+		}
+		if trackDetector != "" {
+			// The chosen detector, whatever class it advertises: the class
+			// comes from another detector (the evidence's), and the vehicle's
+			// tracker may follow it by a prompt rather than a class list
+			for _, route := range c.Track {
+				if route.Engine == trackDetector {
+					t.Camera, t.Engine = route.Camera, route.Engine
+					return nil
+				}
+			}
+			return fmt.Errorf("the Track detector %s is not connected to a camera in the planning flow", trackDetector)
 		}
 		var known, unknown []v6TrackRoute
 		var observed *v6TrackRoute
@@ -275,6 +287,8 @@ func (s *Service) processTemplateMission(r *run, meta session, row section, imag
 
 	recommendation := task{Kind: "wait", Seconds: fallbackWait}
 	var fallbackReason string
+	// The detection the model says the pilot is following, if it named one
+	var tracked *detectorLabel
 	switch {
 	case frameErr != nil:
 		fallbackReason = "Could not sample the section imagery: " + frameErr.Error()
@@ -302,7 +316,16 @@ func (s *Service) processTemplateMission(r *run, meta session, row section, imag
 		case refErr != nil:
 			fallbackReason = "The selected vehicle's mission capabilities could not be confirmed."
 		default:
-			if err := caps.bind(&proposed, meta.Plan.Vehicle, row.Evidence); err != nil {
+			if proposed.Kind == "track" && row.TargetBox != nil {
+				// The detector's class of the box, which the vehicle's
+				// tracker reports, rather than the model's wording
+				if label, err := trackedBox(row.Evidence, row.TargetBox); err != nil {
+					row.Target = &targetCheck{Frame: row.TargetBox.Frame, Box: row.TargetBox.Box, Error: err.Error()}
+				} else {
+					proposed.Target, tracked = label.Class, &label
+				}
+			}
+			if err := caps.bind(&proposed, meta.Plan.Vehicle, row.Evidence, meta.Settings.LocalDetector); err != nil {
 				fallbackReason = "The proposed mission could not use the selected resources: " + err.Error()
 			} else {
 				recommendation = proposed
@@ -331,6 +354,12 @@ func (s *Service) processTemplateMission(r *run, meta session, row section, imag
 		return err
 	}
 	publishVision()
+	if tracked != nil && fallbackReason == "" && s.ctx.Err() == nil {
+		row.Target = s.checkTarget(r, meta, row, *row.TargetBox, *tracked, images)
+		if err := r.setSection(row); err != nil {
+			return err
+		}
+	}
 
 	generationStart := time.Now()
 	build := func(t task, plan mission.PlanningContext) mission.Draft {
@@ -339,6 +368,7 @@ func (s *Service) processTemplateMission(r *run, meta session, row section, imag
 		return s.compileV6(ctx, t, plan, caps)
 	}
 	var drafted mission.Draft
+	plan := meta.Plan
 	if fallbackReason == "" {
 		drafted = build(recommendation, meta.Plan)
 		row.Attempts = append(slices.Clone(row.Attempts), drafted)
@@ -351,7 +381,8 @@ func (s *Service) processTemplateMission(r *run, meta session, row section, imag
 		setRecommendation()
 		// Wait and ReturnToHome only need the selected driver. They should not
 		// be blocked by an unrelated broken detector flow or drawing.
-		drafted = build(recommendation, mission.PlanningContext{Vehicle: meta.Plan.Vehicle})
+		plan = mission.PlanningContext{Vehicle: meta.Plan.Vehicle}
+		drafted = build(recommendation, plan)
 		row.Attempts = append(slices.Clone(row.Attempts), drafted)
 	}
 	row.GenerationTime = time.Since(generationStart).Seconds()
@@ -369,7 +400,49 @@ func (s *Service) processTemplateMission(r *run, meta session, row section, imag
 		row.Status = "failed"
 		row.Error = strings.Join(drafted.Errors, " ")
 	}
+	if row.Status == "completed" && meta.Source == "live" && meta.Settings.AutoDeploy {
+		// Shown compiled while the vehicle compiles it
+		if err := r.setSection(row); err != nil {
+			return err
+		}
+		row.Deploy = s.deploy(meta, plan, drafted)
+	}
+	s.logSection(meta, row)
 	return r.setSection(row)
+}
+
+// logSection logs a section's outcome, for runs no one watches in the UI.
+func (s *Service) logSection(meta session, row section) {
+	event := s.log.Info().Str("run", meta.ID).Int("section", row.Index).Str("status", row.Status).
+		Str("mission", row.Instruction).Str("compile", row.CompileStatus)
+	if row.VisionInference != "" && row.VisionInference != row.Instruction {
+		event = event.Str("recommended", row.VisionInference)
+	}
+	if row.Adaptation != "" {
+		event = event.Str("adaptation", row.Adaptation)
+	}
+	if t := row.Target; t != nil {
+		event = event.Int("target_frame", t.Frame).Int("target_box", t.Box).Str("target_class", t.Class)
+		if t.Match != nil {
+			event = event.Bool("verifier_match", *t.Match)
+		}
+		if t.PromptWritten {
+			event = event.Str("new_prompt", t.NewPrompt)
+		}
+		if t.Error != "" {
+			event = event.Str("target_error", t.Error)
+		}
+	}
+	if d := row.Deploy; d != nil {
+		event = event.Str("deploy", d.Status).Str("data_failsafe", d.Failsafe)
+		if d.Error != "" {
+			event = event.Str("deploy_error", d.Error)
+		}
+	}
+	if row.Error != "" {
+		event = event.Str("error", row.Error)
+	}
+	event.Msg("inferred mission section")
 }
 
 func (s *Service) compileV6(ctx context.Context, t task, plan mission.PlanningContext, caps v6Capabilities) mission.Draft {

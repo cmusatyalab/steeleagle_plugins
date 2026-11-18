@@ -23,14 +23,15 @@ import (
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/nl2dsl"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/rtc"
 	"github.com/rs/zerolog"
+	"google.golang.org/grpc"
 )
 
-func aiProvider(args aiconfig.Options, credentials *aicredentials.Store) (nl2dsl.Provider, nl2dsl.Provider) {
+func aiProvider(args aiconfig.Options, key func(provider string) string) (nl2dsl.Provider, nl2dsl.Provider) {
 	openAIBase := os.Getenv("OPENAI_BASE_URL")
 	provider := strings.ToLower(defaultString(args.ChatProvider, "openai"))
 	model := defaultString(args.ChatModel, "gpt-6.1-sol")
 	chat := nl2dsl.Provider{Name: provider, ModelID: model, BaseURL: openAIBase,
-		LookupKey: func() string { return credentials.Key(provider) },
+		LookupKey: func() string { return key(provider) },
 		Reasoning: reasoning(model, args.ChatReasoning), Temperature: args.ChatTemperature}
 	if provider == "anthropic" {
 		chat.ModelID = defaultString(args.ChatModel, "claude-sonnet-4-20250514")
@@ -38,7 +39,7 @@ func aiProvider(args aiconfig.Options, credentials *aicredentials.Store) (nl2dsl
 	}
 	visionModel := defaultString(args.VisionModel, "gpt-6.1-sol")
 	vision := nl2dsl.Provider{Name: "openai", ModelID: visionModel,
-		LookupKey: func() string { return credentials.Key("openai") },
+		LookupKey: func() string { return key("openai") },
 		BaseURL:   defaultString(os.Getenv("STEELEAGLE_VISION_BASE_URL"), openAIBase), Reasoning: reasoning(visionModel, args.VisionReasoning), Temperature: args.VisionTemperature}
 	return chat, vision
 }
@@ -74,7 +75,7 @@ func registerAI(ctx context.Context, engine string, a aiconfig.Options, missions
 		log.Warn().Err(err).Msg("saved AI credentials unavailable; using process environment")
 		credentials, _ = aicredentials.Open("")
 	}
-	provider, vision := aiProvider(a, credentials)
+	provider, vision := aiProvider(a, credentials.Key)
 	generator := nl2dsl.Generator{Model: provider, Compiler: missions}
 	chatAPI := chat.New(provider, generator, func() chat.Credentials {
 		return chat.Credentials{OpenAI: credentials.Key("openai") != "", Anthropic: credentials.Key("anthropic") != ""}
@@ -193,4 +194,90 @@ func liveDetector(cat flows.Catalog, flow *config.FlowConfig, gcsIP, vehicle, pr
 		pending = append(pending, edges[next]...)
 	}
 	return selected
+}
+
+// vehicleDeployer sends Inferred Mission's missions to vehicles to compile.
+type vehicleDeployer struct {
+	sender  *mission.Sender
+	service *mission.Service
+}
+
+func (d vehicleDeployer) VehicleFlow(ctx context.Context, plan mission.PlanningContext, g mission.Graph) ([]byte, error) {
+	return d.service.VehicleFlow(ctx, plan, g)
+}
+
+func (d vehicleDeployer) CompileOnVehicle(ctx context.Context, vehicle, name string, flow, geojson []byte, dsl string) error {
+	return d.sender.CompileOnVehicle(ctx, vehicle, name, flow, geojson, dsl)
+}
+
+func (d vehicleDeployer) SetDataFailsafeMission(ctx context.Context, vehicle string) error {
+	return d.sender.SetDataFailsafeMission(ctx, vehicle)
+}
+
+// detectorOptions lists the detection engines a vehicle's flows can name:
+// those on its own daemon (local.) and on the GCS's (remote.), its own first.
+func detectorOptions(cat flows.Catalog, gcsIP, vehicle string) []inferredmission.DetectorOption {
+	vehicleIP, _ := fleet.SplitName(vehicle)
+	options := []inferredmission.DetectorOption{}
+	for _, daemon := range []struct {
+		ip, prefix string
+	}{{vehicleIP, fleet.LocalPrefix}, {gcsIP, fleet.RemotePrefix}} {
+		if daemon.ip == "" || (daemon.prefix == fleet.RemotePrefix && gcsIP == vehicleIP) {
+			continue
+		}
+		d, ok := cat.Daemon(daemon.ip)
+		if !ok {
+			continue
+		}
+		for _, engine := range d.Engines {
+			kind, _ := feed.ResultType(engine.Result)
+			if !engine.Typed || engine.Category == nil || *engine.Category != "detection" || kind != "DetectionResult" {
+				continue
+			}
+			_, bare := fleet.SplitName(engine.Name)
+			options = append(options, inferredmission.DetectorOption{
+				Name: daemon.prefix + bare, Engine: engine.Name, Evidence: d.IP == gcsIP,
+			})
+		}
+	}
+	return options
+}
+
+// wireInference gives Inferred Mission its detectors, through the daemon at
+// conn (nil without one), and its vehicles to deploy to.
+func wireInference(inference *inferredmission.Service, conn *grpc.ClientConn, catalog mission.CatalogFunc,
+	flowOf func(context.Context, string) ([]byte, error), missions *mission.Service, gcsIP string,
+	results func(context.Context, string, func(feed.Result))) {
+	if catalog != nil {
+		inference.SetLiveDetectionSource(func(ctx context.Context, vehicle, producer string) (string, error) {
+			raw, err := flowOf(ctx, vehicle)
+			if err != nil || len(raw) == 0 {
+				return "", err
+			}
+			flow, err := config.ParseFlowConfigFromBytes(raw)
+			if err != nil {
+				return "", err
+			}
+			cat, err := catalog(ctx)
+			if err != nil {
+				return "", err
+			}
+			return liveDetector(cat, flow, gcsIP, vehicle, producer), nil
+		}, func(name string) string {
+			if ip, _ := fleet.SplitName(name); ip != "" {
+				return name
+			}
+			return gcsIP + "." + name
+		}, results)
+		inference.SetDetectorCatalog(func(ctx context.Context, vehicle string) ([]inferredmission.DetectorOption, error) {
+			cat, err := catalog(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return detectorOptions(cat, gcsIP, vehicle), nil
+		})
+	}
+	if conn != nil {
+		inference.SetDeployer(vehicleDeployer{mission.NewSender(conn, 1<<20, 30*time.Second), missions})
+	}
 }

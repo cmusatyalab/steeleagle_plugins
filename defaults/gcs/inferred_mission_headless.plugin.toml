@@ -1,0 +1,91 @@
+[plugin]
+# Name of the plugin
+name = "SteelEagle Inferred Mission (headless)"
+# Plugin type: (driver, engine, monitor, simulator, extra)
+type = "engine"
+# Description of the plugin (optional)
+description = "The GCS's Inferred Mission without the web UI: observes one vehicle camera from its first frame, infers a mission for each section, and with auto_deploy sends it to the vehicle as its data-link-loss fallback. Reads the OpenAI API key from .openai in the daemon's files directory ($STEELEAGLE_FILES), never from args."
+# Same binary as the GCS, which runs this when started as this plugin
+dependencies = ["gcc", "liburiel"]
+
+[[args]]
+name = "vehicle"
+type = "string"
+description = "Vehicle to observe, by service name (128.2.208.47.drone) or bare name (drone); empty for the first that streams"
+default = ""
+
+[[args]]
+name = "camera"
+type = "string"
+description = "Camera stream of the vehicle to observe (e.g. front); empty for its first that streams"
+default = ""
+
+[[args]]
+name = "flow"
+type = "string"
+description = "Planning flow TOML, names relative to the vehicle (vehicle.front, local.box_rerank, remote.detection), absolute or relative to $STEELEAGLE_FILES. Track needs it to connect local_detector to the camera; it is the flow deployed missions run with"
+default = ""
+
+[[args]]
+name = "geojson"
+type = "string"
+description = "Map GeoJSON for Patrol and Survey, as flow; optional"
+default = ""
+
+[[args]]
+name = "detector"
+type = "string"
+description = "Detection engine on this daemon whose boxes go to the model (e.g. detection, an RF-DETR); empty for the one detector in the vehicle's active flow"
+default = ""
+
+[[args]]
+name = "local_detector"
+type = "string"
+description = "Detection engine Track missions follow their target with, by its name in the flow (e.g. local.box_rerank); empty for the one connected to the camera"
+default = ""
+
+[[args]]
+name = "verifier"
+type = "string"
+description = "Ollama model of the cliped verifier (at $OLLAMA_HOST, else localhost:11434) that checks the tracked box against the verifier's prompt; empty skips the check"
+default = ""
+
+[[args]]
+name = "verifier_live_dir"
+type = "string"
+description = "Absolute path of the cliped verifier's live directory, whose prompt.txt is replaced with a description of the tracked box when the verifier's model says it isn't the prompt"
+default = ""
+
+[[args]]
+name = "auto_deploy"
+type = "boolean"
+description = "Send each section's compiled mission to the vehicle with CompileMission and set its data failsafe to start it"
+default = false
+
+[[args]]
+name = "max_input_size"
+type = "number"
+description = "Largest frame or telemetry message accepted, in bytes"
+default = 4194304
+
+[[args]]
+name = "compiler"
+type = "object"
+description = "How missions are compiled, as the GCS's compiler arg"
+default = {}
+
+[[args]]
+name = "ai"
+type = "object"
+description = "Vision model and inferred_mission settings, as the GCS's ai arg (its data_dir defaults to inferred_mission_headless in $STEELEAGLE_FILES)"
+default = {}
+
+[engine]
+# Engine type: (detection, classification, guidance, position, generic, filter)
+type = "generic"
+# The frames it infers from (H.264, as the GCS takes them) and the telemetry
+inputs = [
+    "steeleagle_protocol/v1/messages/frame/EncodedFrame",
+    "steeleagle_protocol/v1/messages/telemetry/Telemetry",
+]
+# No result type: a sink

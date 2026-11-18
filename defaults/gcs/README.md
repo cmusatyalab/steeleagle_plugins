@@ -24,8 +24,18 @@ http_addr = ":8002"
 The daemon passes the plugin args in `STEELEAGLE_PLUGIN_ARGS`, the service's
 Uriel engine name in `STEELEAGLE_ENGINE_ENDPOINT`, and its socket in `STEELEAGLE_CLIENT_SOCKET`. See
 `config/examples/config.toml` and `gcs.plugin.toml` (args: `http_addr`,
-`ice_servers`, `webrtc_ports`, `max_input_size`, `compiler`, `mapbox`,
-`dump_dir`).
+`ice_servers`, `webrtc_ports`, `max_input_size`, `compiler`, `dump_dir`,
+`prometheus_url`, `ai`).
+
+Keys are never args, which sit in committed configs. The GCS reads them from
+files in the daemon's files directory, `$STEELEAGLE_FILES` (for a root daemon,
+`/root/.local/share/steeleagle/files`): the Mapbox token from `.mapbox`, and
+the OpenAI API key from `.openai` (used unless a key is saved in the AI panel
+or `OPENAI_API_KEY` is set). Without `.mapbox` the maps have no basemap.
+
+```sh
+umask 077; printf '%s' "$MAPBOX_TOKEN" > ~/.local/share/steeleagle/files/.mapbox
+```
 
 To debug the video stream, set `dump_dir` to record every H.264 frame the GCS
 receives, before WebRTC, as `<producer>-<time>.h264` (play it with `ffplay`)
@@ -210,6 +220,75 @@ For local verification, run `pixi run mock` and open the Plan page at
 The mock supplies frames and telemetry. A draft referencing a detector or
 map feature requires the corresponding Flow Builder or Map configuration
 before compilation. Detector behavior requires a real detector.
+
+#### Live tracking with a detector and the cliped verifier
+
+A live run can follow box_rerank's target and keep the vehicle's fallback
+mission current:
+
+```toml
+[services.plugin.args.ai.inferred_mission]
+verifier = "qwen3-vl:30b-a3b-instruct" # the cliped verifier's Ollama model
+verifier_live_dir = "/root/verifier_live"
+auto_deploy = true
+```
+
+- When starting a live run, choose two detection engines from the vehicle's
+  daemon (`local.`) and the GCS's (`remote.`). **Detector** (on the GCS's
+  daemon, e.g. RF-DETR) gives the model each sampled frame's boxes (up to 8,
+  best first), numbered and tied to the frame's image. **Track detector**
+  (e.g. `local.box_rerank`) is the engine the Track mission follows its target
+  with; it must be connected to the camera in the planning flow. Left on
+  automatic, they are the one detector in the vehicle's active flow and the
+  one in the planning flow. `detector` (a full engine name) and
+  `local_detector` (a flow name) in `inferred_mission` set defaults.
+- When the model recommends Track, it names the box of the object the pilot
+  is following (`target_box`); framing is imperfect, so it need not be the
+  centered one. The box's detector class becomes the Track class. The model
+  never names an engine: the GCS binds the Track detector.
+- With `verifier`, the GCS asks that model (at `OLLAMA_HOST`, else
+  `localhost:11434`) the verifier's box question about that box, against the
+  prompt in `verifier_live_dir` (`prompt.txt`, or the description of
+  `prompt.jpg`). If it says no, or there is no prompt, it describes the box and
+  writes the description to `prompt.txt`, setting any image prompt aside. The
+  verifier picks it up and box_rerank follows its heartbeat. The section's
+  History records the check, and `target.png` beside its record is the crop.
+- `auto_deploy` is off by default. When on, each live section's compiled
+  mission (including the wait-and-return fallback) is sent to the vehicle with
+  `CompileMission`, compiled there as `inferred_mission` and loaded, and the
+  vehicle's data failsafe is set to start it (`FAILSAFE_BEHAVIOR_MISSION`). The
+  vehicle needs `eaglec`, and refuses while a mission is running.
+
+#### Headless: `inferred_mission_headless`
+
+The package's second plugin runs the same live inference without the web UI.
+It observes one camera from its first frame, logs each section's mission
+(`inferred mission section`), keeps runs under `inferred_mission_headless` in
+`$STEELEAGLE_FILES`, and with `auto_deploy` sends each mission to the vehicle.
+It exits unless `$STEELEAGLE_FILES/.openai` holds the OpenAI key. The planning
+flow is a TOML file (`flow`), named relative to the vehicle, so Track can bind
+`local_detector` to the camera:
+
+```toml
+[[services]]
+  name = "inferred_mission"
+  type = "engine"
+  [services.plugin]
+    package = "https://github.com/cmusatyalab/steeleagle_plugins//defaults/gcs@v4_backend_rework"
+    plugin = "inferred_mission_headless"
+    [services.plugin.args]
+      vehicle = "drone"
+      camera = "front"
+      flow = "box_rerank_tracking.flow.toml"   # in $STEELEAGLE_FILES
+      detector = "detection"
+      local_detector = "local.box_rerank"
+      verifier = "qwen3-vl:30b-a3b-instruct"
+      verifier_live_dir = "/root/verifier_live"
+      auto_deploy = true
+```
+
+Give it the camera's H.264 frames and the vehicle's telemetry in the active
+flow, as the GCS gets them.
 
 ### Flows in missions
 

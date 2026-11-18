@@ -16,8 +16,9 @@ func (row *section) readVisionRecommendation(version, text string) (task, error)
 		text = strings.TrimSuffix(body, "```")
 	}
 	var reply struct {
-		Recommendation string `json:"recommendation"`
-		Evidence       string `json:"evidence"`
+		Recommendation string  `json:"recommendation"`
+		Evidence       string  `json:"evidence"`
+		TargetBox      *boxRef `json:"target_box"`
 	}
 	if err := json.Unmarshal([]byte(text), &reply); err != nil {
 		return task{}, errors.New("expected a JSON recommendation and observation")
@@ -32,5 +33,8 @@ func (row *section) readVisionRecommendation(version, text string) (task, error)
 	}
 	row.VisionInference = proposed.instructionV6()
 	row.VisionEvidence = evidence
+	if proposed.Kind == "track" {
+		row.TargetBox = reply.TargetBox
+	}
 	return proposed, nil
 }

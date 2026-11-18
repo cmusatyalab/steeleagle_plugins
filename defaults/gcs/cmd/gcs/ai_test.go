@@ -4,12 +4,14 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/cmusatyalab/steeleagle/config"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/aiconfig"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/inferredmission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/nl2dsl"
 )
 
@@ -63,7 +65,7 @@ func TestAIProvidersUseStoredKeyChanges(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	store.Register(mux)
-	chat, vision := aiProvider(aiconfig.Defaults(), store)
+	chat, vision := aiProvider(aiconfig.Defaults(), store.Key)
 	if chat.Configured() || vision.Configured() {
 		t.Fatal("providers started with a key despite an empty store and environment")
 	}
@@ -113,5 +115,30 @@ func TestAIProvidersUseStoredKeyChanges(t *testing.T) {
 	change(http.MethodDelete, "")
 	if chat.Configured() || vision.Configured() {
 		t.Fatal("providers still report a key after it was cleared")
+	}
+}
+
+func TestDetectorOptionsAreTheVehiclesAndTheGCSsDetectors(t *testing.T) {
+	detection, classification := "detection", "classification"
+	result := "steeleagle_protocol/v1/messages/result/DetectionResult"
+	cat := flows.Catalog{Daemons: []flows.Daemon{
+		{IP: "10.0.0.1", Local: true, Engines: []flows.Engine{
+			{Name: "10.0.0.1.detection", Typed: true, Category: &detection, Result: result},
+			{Name: "10.0.0.1.tiles", Typed: true, Category: &classification, Result: result},
+		}},
+		{IP: "10.0.0.2", Engines: []flows.Engine{{Name: "10.0.0.2.box_rerank", Typed: true, Category: &detection, Result: result}}},
+		{IP: "10.0.0.3", Engines: []flows.Engine{{Name: "10.0.0.3.other", Typed: true, Category: &detection, Result: result}}},
+	}}
+	got := detectorOptions(cat, "10.0.0.1", "10.0.0.2.drone")
+	want := []inferredmission.DetectorOption{
+		{Name: "local.box_rerank", Engine: "10.0.0.2.box_rerank"},
+		{Name: "remote.detection", Engine: "10.0.0.1.detection", Evidence: true},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	// A vehicle on the GCS's daemon names its engines local
+	if got := detectorOptions(cat, "10.0.0.1", "10.0.0.1.sim"); len(got) != 1 || got[0].Name != "local.detection" || !got[0].Evidence {
+		t.Fatalf("got %+v", got)
 	}
 }
