@@ -130,7 +130,7 @@ class Cliped:
     has them; Reintegration sends the ones waiting."""
 
     def __init__(self, encoder, selector, queue, *, prompt, verifier, tile_size, stride, log_scores=False,
-                 tile_log=None, sent_log=None, scored_log=None):
+                 tile_log=None, sent_log=None, scored_log=None, similar=None):
         self.encoder = encoder
         self.selector = selector
         self.queue = queue
@@ -145,6 +145,9 @@ class Cliped:
         self.sent_log = sent_log
         # A sent_log.ScoredLog each frame scored is logged to, or None
         self.scored_log = scored_log
+        # A similar.SimilarFilter that tells the tiles like one sent before,
+        # which go behind the new ones, or None (defer_similar off)
+        self.similar = similar
         self._boxes = {}  # (width, height) -> tile boxes
         self.frames = 0
         self.picked = 0
@@ -202,6 +205,9 @@ class Cliped:
             for i, must in zip(picked, must_send)
         ]
         for tile in tiles:
+            if self.similar is not None:
+                x0, y0, x1, y1 = tile.box
+                tile.similar = not self.similar.is_new(rgb[y0:y1, x0:x1], tile.embedding, frame.id)
             self.queue.push(tile)
             if self.sent_log is not None:
                 self.sent_log.write(frame, tile, width, height, self.prompt)
@@ -227,7 +233,8 @@ class Cliped:
                 len(tiles),
                 len(self.queue),
                 self.queue.in_flight,
-                f"; sending its tile {tile.index} (s {tile.score:.3f})" if tile is not None else "",
+                (f"; sending its tile {tile.index} (s {tile.score:.3f}"
+                 f"{', like one sent before' if tile.similar else ''})") if tile is not None else "",
             )
         return tile, result
 

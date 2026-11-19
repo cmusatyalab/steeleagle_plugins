@@ -147,6 +147,18 @@ type = "string"
 description = "CSV file to log each frame scored to, whether or not a tile is picked from it, as frame_id, timestamp_ns (its capture timestamp), tiles (how many it was cut into), best_score, threshold (the adaptive one), picked (tiles queued) and ms (time to score it); the frames missing from it were never scored. A relative path is in the daemon's files directory (STEELEAGLE_FILES). Replaced when the plugin starts. Empty for none"
 default = ""
 
+[[args]]
+name = "defer_similar"
+type = "boolean"
+description = "Send a picked tile that is a near-copy of one queued or sent before (the same view, slid or turned a little as the camera moves) only after every new tile: ORB keypoints matching under one rotation, scale and shift. It is still sent once nothing new waits, unless the full queue drops it first. Checked only on the tiles picked to send, ~5 ms each on the Tachyon"
+default = false
+
+[[args]]
+name = "defer_similar_matches"
+type = "number"
+description = "Keypoints (of 200) of a picked tile that must match a tile sent before for it to count as a near-copy, with defer_similar; lower counts more tiles as copies. Consecutive tiles of one object matched 45-139, unrelated tiles at most ~25, and one person from two angles 30"
+default = 40
+
 [engine]
 type = "classification"
 inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]

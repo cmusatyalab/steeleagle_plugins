@@ -2,8 +2,10 @@
 and the engine's reintegration producer (engine.Reintegration) delivers them,
 best first, until the verifier has each. The tile the engine forwards in
 place of a camera frame is not a send: in a flow where the engine is a dead
-end, it goes nowhere. Tiles the selector must send (like one the verifier
-said yes to) go first, then the rest; each group best score first.
+end, it goes nowhere. New tiles go before ones like a tile sent before
+(defer_similar; see similar.py); within each, tiles the selector must send
+(like one the verifier said yes to) go first, then the rest, best score
+first.
 
 Reintegration has one tile in flight at a time (its producer has one token),
 as an input with an id the flow's events name (its carrier). Every input
@@ -21,7 +23,8 @@ ACCEPTED and SENT leave it in flight: for a remote verifier ACCEPTED means
 only that the remote server received it. A tile put back may reach the
 verifier twice (if its RESULT was among the lost); that is the price of never
 losing one. When the queue is over `max_size`, the tile with the lowest
-priority (not a must-send, lowest score) is dropped, in flight or not.
+priority (a similar one, then not a must-send, lowest score) is dropped, in
+flight or not.
 """
 import itertools
 import logging
@@ -61,6 +64,9 @@ class Tile:
     # The prompt it was cut for (box_rerank counts a prompt switch): an
     # answer about a tile of an earlier prompt isn't learned from
     generation: int = 0
+    # Whether it is like a tile queued or sent before (defer_similar): it
+    # goes behind every new tile
+    similar: bool = False
 
     @property
     def in_flight(self):
@@ -68,8 +74,9 @@ class Tile:
 
     @property
     def priority(self):
-        """Higher goes first: must-sends, then score, then the oldest."""
-        return (self.must_send, self.score, -self.order)
+        """Higher goes first: new tiles, then must-sends, then score, then the
+        oldest."""
+        return (not self.similar, self.must_send, self.score, -self.order)
 
 
 class SendQueue:

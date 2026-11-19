@@ -52,6 +52,8 @@ DEFAULTS = {
     "max_learned": 32,
     "log_sent": "",
     "log_scored": "",
+    "defer_similar": False,
+    "defer_similar_matches": 40,
 }
 # Defaults of the args of verifier.plugin.toml
 VERIFIER_DEFAULTS = {
@@ -105,7 +107,7 @@ RERANK_DEFAULTS = {
     "log_candidates": "",
 }
 POSITIVE_INTS = ("tile_size", "stride", "max_send", "k", "max_queue", "threads", "confirmations",
-                 "good_confirmations", "max_learned")
+                 "good_confirmations", "max_learned", "defer_similar_matches")
 
 LD_LIBRARY_PATH = "LD_LIBRARY_PATH"
 ADSP_LIBRARY_PATH = "ADSP_LIBRARY_PATH"
@@ -172,7 +174,7 @@ def parse_args(content):
             or not all(isinstance(bg, str) and bg.strip() for bg in backgrounds)):
         raise ConfigError("backgrounds must be a non-empty list of prompts")
     args["backgrounds"] = [bg.strip() for bg in backgrounds]
-    for name in ("quantized", "npu", "log_scores", "log_tiles", "learn"):
+    for name in ("quantized", "npu", "log_scores", "log_tiles", "learn", "defer_similar"):
         if not isinstance(args[name], bool):
             raise ConfigError(f"{name} must be true or false")
     for name in ("log_sent", "log_scored"):
@@ -393,6 +395,13 @@ def build(args, verifier, *, image=None, tile_log=None):
     from cliped.sent_log import ScoredLog, SentLog
 
     queue = SendQueue(max_size=args["max_queue"])
+    similar = None
+    if args["defer_similar"]:
+        from cliped.similar import SimilarFilter
+
+        similar = SimilarFilter(args["defer_similar_matches"])
+        log.info("tiles like one sent before (%d keypoints matching) go behind the new ones",
+                 args["defer_similar_matches"])
     return Cliped(
         image_encoder,
         selector,
@@ -405,6 +414,7 @@ def build(args, verifier, *, image=None, tile_log=None):
         tile_log=tile_log,
         sent_log=SentLog(args["log_sent"]) if args.get("log_sent") else None,
         scored_log=ScoredLog(args["log_scored"]) if args.get("log_scored") else None,
+        similar=similar,
     )
 
 
