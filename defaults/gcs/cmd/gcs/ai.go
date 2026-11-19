@@ -202,8 +202,8 @@ type vehicleDeployer struct {
 	service *mission.Service
 }
 
-func (d vehicleDeployer) VehicleFlow(ctx context.Context, plan mission.PlanningContext, g mission.Graph) ([]byte, error) {
-	return d.service.VehicleFlow(ctx, plan, g)
+func (d vehicleDeployer) VehicleMission(ctx context.Context, plan mission.PlanningContext, g mission.Graph) ([]byte, string, error) {
+	return d.service.VehicleMission(ctx, plan, g)
 }
 
 func (d vehicleDeployer) CompileOnVehicle(ctx context.Context, vehicle, name string, flow, geojson []byte, dsl string) error {

@@ -231,3 +231,34 @@ func TestCompileIdentifiesMalformedCameraField(t *testing.T) {
 		t.Fatalf("malformed Camera was not identified before build: status %d: %s", rec.Code, rec.Body)
 	}
 }
+
+// A draft names its engines by host, which the vehicle doesn't know them
+// by; the mission it compiles names them as in its flow
+func TestVehicleMissionNamesEnginesAsTheVehicleFlow(t *testing.T) {
+	c := engineFake(t)
+	s := newFlowService(t, c, flowCatalog("100.64.0.1"))
+	plan := PlanningContext{Flow: localYolo()}
+	draft := s.CheckDraft(t.Context(), "Actions:\n    actions.Track trk(Engine=\"100.64.0.1.yolo\")\nMission:\n    Start trk\n", plan, nil)
+	if draft.Status != "compiled" || draft.Graph == nil {
+		t.Fatalf("CheckDraft = %+v", draft)
+	}
+	flow, dsl, err := s.VehicleMission(t.Context(), plan, *draft.Graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(dsl, "Engine=DetectionEngine_local_yolo") || strings.Contains(dsl, "100.64.0.1") {
+		t.Errorf("the vehicle's DSL names the engine by host:\n%s", dsl)
+	}
+	if !strings.Contains(string(flow), `"local.yolo"`) {
+		t.Errorf("the vehicle's flow has no local.yolo:\n%s", flow)
+	}
+	// It parses as a mission again
+	if _, err := ParseDSL(dsl); err != nil {
+		t.Errorf("the vehicle's DSL doesn't parse: %v\n%s", err, dsl)
+	}
+
+	// Without a flow there is nothing to name the engines by
+	if flow, dsl, err := s.VehicleMission(t.Context(), PlanningContext{}, *draft.Graph); err != nil || flow != nil || dsl != "" {
+		t.Errorf("without a flow: %q, %q, %v", flow, dsl, err)
+	}
+}

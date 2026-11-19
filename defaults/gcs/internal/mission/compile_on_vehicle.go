@@ -39,20 +39,40 @@ func (s *Sender) SetDataFailsafeMission(ctx context.Context, vehicle string) err
 	return nil
 }
 
-// VehicleFlow is the flow TOML a mission graph g planned with plan runs with
-// on its vehicle, names relative to the vehicle as Deploy bundles it; nil
-// when plan has no flow.
-func (s *Service) VehicleFlow(ctx context.Context, plan PlanningContext, g Graph) ([]byte, error) {
+// VehicleMission is a mission graph g planned with plan as its vehicle
+// compiles it (CompileOnVehicle): the flow TOML it runs with and its DSL,
+// both with names relative to the vehicle as Deploy bundles them. The
+// vehicle knows engines only by their names in its flow (local.<engine>,
+// remote.<engine>), so the DSL names each engine by its SDK constant for
+// that name (DetectionEngine_local_box_rerank), never by its host as a
+// portable draft does (heisenberg.box_rerank). Both are empty when plan has
+// no flow, which leaves the engine names nothing to resolve against.
+func (s *Service) VehicleMission(ctx context.Context, plan PlanningContext, g Graph) ([]byte, string, error) {
 	target, _, err := s.planningTarget(ctx, plan)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	target, _, status, err := s.resolvePlanningFlow(ctx, plan, g, target)
 	if err != nil {
 		if status == http.StatusServiceUnavailable {
-			return nil, fmt.Errorf("the flow can't be resolved now: %w", err)
+			return nil, "", fmt.Errorf("the flow can't be resolved now: %w", err)
 		}
-		return nil, err
+		return nil, "", err
 	}
-	return target.Flow, nil
+	if len(target.Flow) == 0 {
+		return nil, "", nil
+	}
+	st, err := s.planningState(ctx, target)
+	if err != nil {
+		return nil, "", err
+	}
+	ast, err := GraphToAst(g, st.Index, s.header, target.Engines)
+	if err != nil {
+		return nil, "", err
+	}
+	dsl, err := AstToDSL(ast)
+	if err != nil {
+		return nil, "", err
+	}
+	return target.Flow, dsl, nil
 }

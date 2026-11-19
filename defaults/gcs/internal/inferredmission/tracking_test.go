@@ -173,9 +173,9 @@ type fakeDeployer struct {
 	calls      []string
 }
 
-func (d *fakeDeployer) VehicleFlow(context.Context, mission.PlanningContext, mission.Graph) ([]byte, error) {
+func (d *fakeDeployer) VehicleMission(context.Context, mission.PlanningContext, mission.Graph) ([]byte, string, error) {
 	d.calls = append(d.calls, "flow")
-	return []byte("flow"), nil
+	return []byte("flow"), "vehicle dsl", nil
 }
 
 func (d *fakeDeployer) CompileOnVehicle(_ context.Context, vehicle, name string, flow, _ []byte, dsl string) error {
@@ -194,7 +194,8 @@ func TestDeployCompilesOnTheVehicleThenSetsTheFailsafe(t *testing.T) {
 	s.SetDeployer(d)
 	meta := session{Settings: DefaultSettings(), Plan: mission.PlanningContext{Vehicle: "10.0.0.2.alpha"}}
 	record := s.deploy(meta, meta.Plan, mission.Draft{DSL: "dsl", Graph: &mission.Graph{}, Status: "compiled"})
-	want := []string{"flow", "compile 10.0.0.2.alpha inferred_mission flow dsl", "failsafe 10.0.0.2.alpha"}
+	// The vehicle's DSL, with its engines named as in its flow, not the draft's
+	want := []string{"flow", "compile 10.0.0.2.alpha inferred_mission flow vehicle dsl", "failsafe 10.0.0.2.alpha"}
 	if record.Status != "deployed" || record.Failsafe != "mission" || strings.Join(d.calls, "|") != strings.Join(want, "|") {
 		t.Fatalf("got %+v after %q", record, d.calls)
 	}
@@ -205,5 +206,17 @@ func TestDeployCompilesOnTheVehicleThenSetsTheFailsafe(t *testing.T) {
 	record = s.deploy(meta, meta.Plan, mission.Draft{DSL: "dsl", Status: "compiled"})
 	if record.Status != "failed" || !strings.Contains(record.Error, "running") || len(d.calls) != 1 {
 		t.Fatalf("got %+v after %q", record, d.calls)
+	}
+}
+
+// The live directory may not exist yet when the first section's prompt is
+// written
+func TestWriteLivePromptMakesTheDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "verifier_live")
+	if err := writeLivePrompt(dir, "a person in a red jacket"); err != nil {
+		t.Fatal(err)
+	}
+	if text, _ := os.ReadFile(filepath.Join(dir, "prompt.txt")); string(text) != "a person in a red jacket\n" {
+		t.Fatalf("prompt.txt is %q", text)
 	}
 }

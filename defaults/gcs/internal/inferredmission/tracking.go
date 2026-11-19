@@ -99,9 +99,11 @@ type deployRecord struct {
 
 // Deployer sends missions to vehicles for auto_deploy.
 type Deployer interface {
-	// VehicleFlow is the flow a mission planned with plan runs with on its
-	// vehicle, nil without one
-	VehicleFlow(ctx context.Context, plan mission.PlanningContext, g mission.Graph) ([]byte, error)
+	// VehicleMission is the flow a mission planned with plan runs with on
+	// its vehicle and the mission's DSL with its engines named as in that
+	// flow (local.<engine>), as the vehicle compiles it; both empty without
+	// a flow
+	VehicleMission(ctx context.Context, plan mission.PlanningContext, g mission.Graph) ([]byte, string, error)
 	// CompileOnVehicle has the vehicle compile the mission and load it
 	CompileOnVehicle(ctx context.Context, vehicle, name string, flow, geojson []byte, dsl string) error
 	// SetDataFailsafeMission has the vehicle start its loaded mission when
@@ -326,7 +328,12 @@ func (s *Service) livePrompt(ctx context.Context, model ollama, dir string) (str
 
 // writeLivePrompt makes text the verifier's prompt: prompt.txt replaced
 // whole, then any image prompt, which would win over it, renamed aside.
+// The directory is made if the verifier hasn't made it yet (it does when it
+// first reads its prompt, which may be after the first section).
 func writeLivePrompt(dir, text string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("could not make the verifier's live directory: %w", err)
+	}
 	temp, err := os.CreateTemp(dir, ".prompt-*.txt")
 	if err != nil {
 		return fmt.Errorf("could not write the verifier's prompt: %w", err)
@@ -372,19 +379,26 @@ func (s *Service) deploy(meta session, plan mission.PlanningContext, drafted mis
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, timeout(meta.Settings.GenerationTimeout))
 	defer cancel()
+	// The drafted DSL names engines by host (heisenberg.box_rerank), which
+	// the vehicle doesn't know them by: it gets the mission with the names
+	// in its flow (local.box_rerank)
 	var flow []byte
+	dsl := drafted.DSL
 	if drafted.Graph != nil {
-		var err error
-		if flow, err = deployer.VehicleFlow(ctx, plan, *drafted.Graph); err != nil {
-			record.Error = "Could not resolve the mission's flow: " + err.Error()
+		vehicleFlow, vehicleDSL, err := deployer.VehicleMission(ctx, plan, *drafted.Graph)
+		if err != nil {
+			record.Error = "Could not resolve the mission for the vehicle: " + err.Error()
 			return record
+		}
+		if vehicleDSL != "" {
+			flow, dsl = vehicleFlow, vehicleDSL
 		}
 	}
 	var geojson []byte
 	if plan.GeoJSON != "" {
 		geojson = []byte(plan.GeoJSON)
 	}
-	if err := deployer.CompileOnVehicle(ctx, vehicle, deployedMission, flow, geojson, drafted.DSL); err != nil {
+	if err := deployer.CompileOnVehicle(ctx, vehicle, deployedMission, flow, geojson, dsl); err != nil {
 		record.Error = err.Error()
 		return record
 	}
