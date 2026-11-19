@@ -4,6 +4,7 @@ import { Button } from 'primereact/button';
 import { InputText } from 'primereact/inputtext';
 import { ConfirmDialog, confirmDialog } from 'primereact/confirmdialog';
 import { createCatalogLoader } from './flowCatalog.js';
+import { defaultFlowLoaded, defaultFlowVehicle, fetchDefaultFlow, markDefaultFlowLoaded } from './defaultFlow.js';
 import { displayName } from './vehicleNames.js';
 import {
     addEdge, addEngine, addEngineProducer, addProducer, availableStreams, canConnect, emptyFlow, fileBaseName,
@@ -39,6 +40,10 @@ function download(filename, text, type) {
 
 // flow and catalog are owned by the Plan page, which also ships the flow with
 // Validate and Deploy; this tab edits them and refreshes the catalog.
+// How often the catalog is listed again while the default flow's vehicle
+// isn't running
+const DEFAULT_FLOW_RETRY_MS = 5000;
+
 function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog, setCatalog }) {
     const { screenToFlowPosition, fitView } = useReactFlow();
     const [importCount, setImportCount] = useState(0);
@@ -60,6 +65,47 @@ function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog,
         loader();
     }, [loader]);
     useEffect(() => { refreshCatalog(); }, [refreshCatalog]);
+
+    // The GCS's default flow (its default_flow arg), loaded once per version
+    // for its vehicle, whose daemon and the orchestrator name its local. and
+    // remote. engines. Until the vehicle is running, the catalog is listed
+    // again every few seconds.
+    const [defaultFlow, setDefaultFlow] = useState(null);
+    const failedDefault = useRef(null);
+    const flowVehicle = useRef(flow.vehicle);
+    flowVehicle.current = flow.vehicle;
+    useEffect(() => {
+        let cancelled = false;
+        fetchDefaultFlow().then((d) => {
+            if (cancelled) return;
+            if (d.error) notify('error', 'Default flow not loaded', d.error);
+            setDefaultFlow(d);
+        });
+        return () => { cancelled = true; };
+    }, [notify]);
+    useEffect(() => {
+        if (!defaultFlow?.configured || !catalog || defaultFlowLoaded(defaultFlow.version) ||
+            failedDefault.current === defaultFlow.version) return undefined;
+        const vehicle = defaultFlowVehicle(catalog, defaultFlow.vehicle, flowVehicle.current);
+        if (!vehicle) {
+            const timer = setTimeout(loader, DEFAULT_FLOW_RETRY_MS);
+            return () => clearTimeout(timer);
+        }
+        let cancelled = false;
+        importFlowToml(defaultFlow.toml, catalog, vehicle).then((imported) => {
+            if (cancelled) return;
+            setFlow({ ...imported, name: defaultFlow.name || imported.name });
+            setSelection(null);
+            setImportCount((n) => n + 1);
+            markDefaultFlowLoaded(defaultFlow.version);
+            notify('info', 'Default flow loaded', `${defaultFlow.name} for ${displayName(vehicle)}`);
+        }).catch((e) => {
+            if (cancelled) return;
+            failedDefault.current = defaultFlow.version;
+            notify('error', 'Default flow not loaded', e.message);
+        });
+        return () => { cancelled = true; };
+    }, [defaultFlow, catalog, loader, setFlow, notify]);
     // Refresh when the tab/page becomes visible again (initial mount is covered above).
     const wasActive = useRef(active);
     useEffect(() => {

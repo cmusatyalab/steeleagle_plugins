@@ -84,8 +84,13 @@ type args struct {
 	// came from Uriel; empty to record none. See package dump.
 	DumpDir string `json:"dump_dir"`
 	// PrometheusURL is where the Metrics page's numbers are queried.
-	PrometheusURL string           `json:"prometheus_url"`
-	AI            aiconfig.Options `json:"ai"`
+	PrometheusURL string `json:"prometheus_url"`
+	// DefaultFlow is the flow TOML the Flow Builder starts with (absolute or
+	// relative to the files directory), names relative to the vehicle;
+	// empty for none. DefaultFlowVehicle is the vehicle it is for.
+	DefaultFlow        string           `json:"default_flow"`
+	DefaultFlowVehicle string           `json:"default_flow_vehicle"`
+	AI                 aiconfig.Options `json:"ai"`
 }
 
 // parseArgs reads the plugin's args from JSON, defaulting the ones it leaves
@@ -233,6 +238,7 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 		}
 	}
 	missions := missionRoutes{svc: mission.NewService(compiler, cfg, gcsIP, catalog, running, log), upload: noDaemonHandler(), deploy: noDaemonHandler(), pushFlow: noDaemonHandler(), catalog: noDaemonHandler()}
+	missions.defaultFlow = flows.DefaultFlow{Path: filesPath(a.DefaultFlow), Vehicle: a.DefaultFlowVehicle}
 	if conn != nil {
 		uploads := mission.NewUploads(list, mission.NewSender(conn, 1<<20, 30*time.Second), missions.svc, log)
 		missions.upload = http.HandlerFunc(uploads.ServeUpload)
@@ -472,6 +478,8 @@ type missionRoutes struct {
 	pushFlow http.Handler
 	// catalog serves the flow catalog.
 	catalog http.Handler
+	// defaultFlow serves the flow the Flow Builder starts with; nil for none.
+	defaultFlow http.Handler
 }
 
 // daemonRoutes are the Orchestrate page's routes.
@@ -545,6 +553,11 @@ func newHandler(hub *rtc.Hub, controller *control.Controller, vehicles http.Hand
 	mux.Handle("GET /api/flows/catalog", missions.catalog)
 	mux.Handle("POST /api/flows/push", missions.pushFlow)
 	mux.HandleFunc("POST /api/flows/from_toml", flows.ServeFromTOML)
+	defaultFlow := missions.defaultFlow
+	if defaultFlow == nil {
+		defaultFlow = flows.DefaultFlow{}
+	}
+	mux.Handle("GET /api/flows/default", defaultFlow)
 	mux.Handle("GET /ws/presence", presence.New(log))
 	for pattern, h := range orchestration {
 		mux.Handle(pattern, h)

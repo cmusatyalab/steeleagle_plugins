@@ -57,6 +57,18 @@ description = "URL of the Prometheus server (the engines/prometheus plugin) the 
 default = "http://localhost:9090"
 
 [[args]]
+name = "default_flow"
+type = "string"
+description = "Flow config TOML the Flow Builder starts with, absolute or relative to $STEELEAGLE_FILES; its names are relative to the vehicle (vehicle.rgb, local.box_rerank, remote.detection), as a vehicle's own flows are and the Flow Builder exports them. It is the planning flow the AI and Inferred Mission plan with, and the flow their missions are deployed with. Each version of the file is loaded once, replacing the Flow Builder's flow; empty for none"
+default = ""
+
+[[args]]
+name = "default_flow_vehicle"
+type = "string"
+description = "Vehicle the default flow is for (bare or full name, e.g. drone); empty for the one the Flow Builder has selected, else the first running"
+default = ""
+
+[[args]]
 name = "ai"
 type = "object"
 description = "Chat and video inference settings. Save API keys separately in the AI panel on the GCS host."
