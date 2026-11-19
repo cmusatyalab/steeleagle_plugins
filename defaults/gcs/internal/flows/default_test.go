@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -74,5 +75,39 @@ func TestDefaultFlow(t *testing.T) {
 	}
 	if code, _ := serveDefault(t, DefaultFlow{Path: filepath.Join(t.TempDir(), "missing.toml")}); code != http.StatusUnprocessableEntity {
 		t.Errorf("a missing file: %d", code)
+	}
+}
+
+func TestDefaultFlowFor(t *testing.T) {
+	c := testCatalog()
+	if _, ok, err := (DefaultFlow{}).For(c, "100.64.0.2.charlie", "100.64.0.1"); ok || err != nil {
+		t.Errorf("without a default flow: %v, %v", ok, err)
+	}
+	path := filepath.Join(t.TempDir(), "planning_flow.toml")
+	flow := strings.ReplaceAll(relativeFlow, "remote.gcs", "local.yolo")
+	flow = strings.ReplaceAll(flow, `"remote"`, `"local"`)
+	if err := os.WriteFile(path, []byte(flow), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, vehicle := range []string{"", "charlie", "100.64.0.2.charlie"} {
+		got, ok, err := DefaultFlow{Path: path, Vehicle: vehicle}.For(c, "100.64.0.2.charlie", "100.64.0.1")
+		if !ok || err != nil {
+			t.Fatalf("for %q: %v, %v", vehicle, ok, err)
+		}
+		if got.Vehicle != "100.64.0.2.charlie" || got.Producers[0].Name != "charlie.rgb" ||
+			got.Engines[0].Name != "swap03.yolo" || got.Edges[0].To != "swap03.yolo" {
+			t.Errorf("for %q: %+v", vehicle, got)
+		}
+	}
+	// For another vehicle it isn't used
+	if _, ok, _ := (DefaultFlow{Path: path, Vehicle: "alpha"}).For(c, "100.64.0.2.charlie", "100.64.0.1"); ok {
+		t.Error("used for another vehicle")
+	}
+	// A file that isn't a flow is an error
+	if err := os.WriteFile(path, []byte("nope = ["), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := (DefaultFlow{Path: path}).For(c, "100.64.0.2.charlie", "100.64.0.1"); !ok || err == nil {
+		t.Errorf("a broken file: %v, %v", ok, err)
 	}
 }

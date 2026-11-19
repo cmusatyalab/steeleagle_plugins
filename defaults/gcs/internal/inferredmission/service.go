@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/flows"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/nl2dsl"
 	"github.com/google/uuid"
@@ -212,6 +213,7 @@ type Service struct {
 	live         map[string]*liveInput
 	liveDetector liveDetectionSource
 	deployer     Deployer
+	planningFlow func(context.Context, string) (flows.Template, bool, error)
 	detectors    func(context.Context, string) ([]DetectorOption, error)
 	// The verifier's descriptions of image prompts, by model, file and version
 	described  map[string]string
@@ -511,6 +513,7 @@ func (s *Service) process(r *run, meta session, row section, load func() ([]samp
 
 func (s *Service) processSection(r *run, meta session, row section, load func() ([]sample, error), historyReady []<-chan struct{}, publishVision func()) error {
 	start := time.Now()
+	meta.Plan = s.planningContext(meta.Plan)
 	r.mu.Lock()
 	archived := r.rows[row.Index]
 	r.mu.Unlock()
@@ -656,4 +659,38 @@ func (s *Service) processSection(r *run, meta session, row section, load func() 
 	}
 	row.Status, row.Elapsed = "completed", time.Since(start).Seconds()
 	return r.setSection(row)
+}
+
+// SetPlanningFlow has sections plan with the flow flowFor gives for their
+// vehicle (the GCS's default flow, translated for it), read again for each
+// section, instead of the flow the run was started with (the Flow
+// Builder's). ok is false to keep the run's own flow.
+func (s *Service) SetPlanningFlow(flowFor func(ctx context.Context, vehicle string) (flow flows.Template, ok bool, err error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.planningFlow = flowFor
+}
+
+// planningContext is plan with the flow SetPlanningFlow gives for its
+// vehicle; one that can't be used is its FlowIssue, so the mission is
+// drafted without a flow and says why.
+func (s *Service) planningContext(plan mission.PlanningContext) mission.PlanningContext {
+	s.mu.RLock()
+	flowFor := s.planningFlow
+	s.mu.RUnlock()
+	if flowFor == nil || plan.Vehicle == "" {
+		return plan
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+	flow, ok, err := flowFor(ctx, plan.Vehicle)
+	switch {
+	case !ok:
+	case err != nil:
+		s.log.Warn().Err(err).Str("vehicle", plan.Vehicle).Msg("default flow unavailable for planning")
+		plan.Flow, plan.FlowIssue = nil, "The GCS's default flow can't be used: "+err.Error()
+	default:
+		plan.Flow, plan.FlowIssue = &flow, ""
+	}
+	return plan
 }

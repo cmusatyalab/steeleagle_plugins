@@ -4,10 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 )
 
 // DefaultFlow is the flow the Flow Builder starts with (the GCS's
@@ -45,13 +48,7 @@ func (d DefaultFlow) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, defaultFlowResponse{})
 		return
 	}
-	data, err := os.ReadFile(d.Path)
-	if err == nil {
-		var t Template
-		if t, err = ParseTemplateTOML(data); err == nil && t.Empty() {
-			err = errors.New("no producers or engines in this flow")
-		}
-	}
+	_, data, err := d.load()
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"detail": "default flow " + d.Path + ": " + err.Error()})
 		return
@@ -64,4 +61,41 @@ func (d DefaultFlow) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		TOML:       string(data),
 		Version:    hex.EncodeToString(sum[:8]) + "-" + d.Started,
 	})
+}
+
+// load reads and parses the default flow's file.
+func (d DefaultFlow) load() (Template, []byte, error) {
+	data, err := os.ReadFile(d.Path)
+	if err != nil {
+		return Template{}, nil, err
+	}
+	t, err := ParseTemplateTOML(data)
+	if err == nil && t.Empty() {
+		err = errors.New("no producers or engines in this flow")
+	}
+	return t, data, err
+}
+
+// For is the default flow for planning vehicle's (full name) missions,
+// translated for it and the orchestrator at orchestratorIP from the file as
+// it is now. ok is false without a default flow or if it is for another
+// vehicle.
+func (d DefaultFlow) For(c Catalog, vehicle, orchestratorIP string) (t Template, ok bool, err error) {
+	if d.Path == "" {
+		return Template{}, false, nil
+	}
+	if d.Vehicle != "" && d.Vehicle != vehicle {
+		if _, bare := fleet.SplitName(vehicle); bare != d.Vehicle {
+			return Template{}, false, nil
+		}
+	}
+	t, _, err = d.load()
+	if err != nil {
+		return Template{}, true, fmt.Errorf("default flow %s: %w", d.Path, err)
+	}
+	t, err = t.ForVehicle(c, vehicle, orchestratorIP)
+	if err != nil {
+		return Template{}, true, fmt.Errorf("default flow %s: %w", d.Path, err)
+	}
+	return t, true, nil
 }

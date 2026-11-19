@@ -48,20 +48,20 @@ func TestCatalog(t *testing.T) {
 		t.Errorf("h264 plugins = %v, want sorted", names)
 	}
 	gcs := pkgs[0].Plugins[0]
-	if gcs.Name != "gcs" || gcs.Type != "engine" || gcs.Error != "" || len(gcs.Args) != 9 {
+	if gcs.Name != "gcs" || gcs.Type != "engine" || gcs.Error != "" || len(gcs.Args) != 10 {
 		t.Fatalf("gcs plugin = %+v", gcs)
 	}
-	var mapbox, ai *Arg
+	var defaultFlow, ai *Arg
 	for i := range gcs.Args {
-		if gcs.Args[i].Name == "mapbox" {
-			mapbox = &gcs.Args[i]
+		if gcs.Args[i].Name == "default_flow" {
+			defaultFlow = &gcs.Args[i]
 		}
 		if gcs.Args[i].Name == "ai" {
 			ai = &gcs.Args[i]
 		}
 	}
-	if mapbox == nil || mapbox.Type != "string" || mapbox.Default != "" || mapbox.Description == "" {
-		t.Errorf("mapbox arg = %+v", mapbox)
+	if defaultFlow == nil || defaultFlow.Type != "string" || defaultFlow.Default != "" || defaultFlow.Description == "" {
+		t.Errorf("default_flow arg = %+v", defaultFlow)
 	}
 	if ai == nil || ai.Type != "object" || ai.Description == "" {
 		t.Errorf("AI args = %+v", ai)
