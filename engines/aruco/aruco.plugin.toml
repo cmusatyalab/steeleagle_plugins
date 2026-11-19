@@ -1,0 +1,34 @@
+[plugin]
+name = "ArUco Markers"
+type = "engine"
+description = "Finds ArUco fiducial markers in camera frames with OpenCV, reporting each as a detection of class aruco_<id>"
+
+[[args]]
+name = "dictionary"
+type = "string"
+description = "OpenCV dictionary the markers are from, e.g. DICT_ARUCO_ORIGINAL, DICT_4X4_50, DICT_6X6_250, DICT_APRILTAG_36h11"
+default = "DICT_ARUCO_ORIGINAL"
+
+[[args]]
+name = "only_ids"
+type = "array"
+description = "Marker ids to report (e.g. [0, 7]); empty to report every marker"
+default = []
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest result sent, in bytes"
+default = 65536
+
+[[args]]
+name = "early_discard"
+type = "boolean"
+description = "Drop frames with no markers instead of forwarding them to the next engines"
+default = false
+
+[engine]
+type = "detection"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# The frame is forwarded unchanged, and its markers are its result
+result = "steeleagle_protocol/v1/messages/result/DetectionResult"
