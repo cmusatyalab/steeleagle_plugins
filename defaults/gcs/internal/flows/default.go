@@ -16,14 +16,18 @@ import (
 // as a vehicle's own flows are and the Flow Builder exports them.
 // Vehicle names that vehicle (bare or full name); empty for the one the Flow
 // Builder has selected, else the first running one. Path is read again for
-// every request, so an edited file is picked up.
+// every request, so an edited file is picked up. Started identifies this run
+// of the GCS (e.g. its start time), so each run's default flow is loaded
+// again, even if the file is the same as the last run's.
 type DefaultFlow struct {
 	Path    string
 	Vehicle string
+	Started string
 }
 
 // defaultFlowResponse is GET /api/flows/default's body. Version changes
-// whenever the file does, so the Flow Builder applies each version once and
+// whenever the file does or the GCS restarts (an experiment's trial restarts
+// it with its config), so the Flow Builder applies each version once and
 // keeps the user's edits to it until it changes.
 type defaultFlowResponse struct {
 	Configured bool   `json:"configured"`
@@ -58,6 +62,6 @@ func (d DefaultFlow) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		Name:       strings.TrimSuffix(filepath.Base(d.Path), filepath.Ext(d.Path)),
 		Vehicle:    d.Vehicle,
 		TOML:       string(data),
-		Version:    hex.EncodeToString(sum[:8]),
+		Version:    hex.EncodeToString(sum[:8]) + "-" + d.Started,
 	})
 }

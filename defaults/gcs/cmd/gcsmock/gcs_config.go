@@ -34,6 +34,10 @@ func loadGCSConfig(o options) (mockGCSConfig, error) {
 	}
 
 	settings := mockGCSConfig{manifest: manifest, args: map[string]any{"http_addr": o.http}}
+	if o.defaultFlow != "" {
+		settings.args["default_flow"] = o.defaultFlow
+		settings.args["default_flow_vehicle"] = o.defaultVehicle
+	}
 	if o.aiConfig != "" {
 		ai, err := loadAIConfig(o.aiConfig)
 		if err != nil {

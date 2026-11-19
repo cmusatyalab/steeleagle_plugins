@@ -40,9 +40,10 @@ function download(filename, text, type) {
 
 // flow and catalog are owned by the Plan page, which also ships the flow with
 // Validate and Deploy; this tab edits them and refreshes the catalog.
-// How often the catalog is listed again while the default flow's vehicle
-// isn't running
-const DEFAULT_FLOW_RETRY_MS = 5000;
+// How often the default flow and the catalog are fetched again: an
+// experiment restarts the GCS with another config (and default flow) under a
+// page that stays open, and its daemons with other engines
+const DEFAULT_FLOW_POLL_MS = 10000;
 
 function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog, setCatalog }) {
     const { screenToFlowPosition, fitView } = useReactFlow();
@@ -67,30 +68,36 @@ function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog,
     useEffect(() => { refreshCatalog(); }, [refreshCatalog]);
 
     // The GCS's default flow (its default_flow arg), loaded once per version
-    // for its vehicle, whose daemon and the orchestrator name its local. and
-    // remote. engines. Until the vehicle is running, the catalog is listed
-    // again every few seconds.
+    // (each file, and each run of the GCS) for its vehicle, whose daemon and
+    // the orchestrator name its local. and remote. engines. It and the
+    // catalog are fetched again every few seconds, so a GCS restarted under
+    // this page has its default flow loaded, and the flow is checked against
+    // the engines running now; an import that fails is tried again with the
+    // next catalog.
     const [defaultFlow, setDefaultFlow] = useState(null);
-    const failedDefault = useRef(null);
+    const reported = useRef(null);
     const flowVehicle = useRef(flow.vehicle);
     flowVehicle.current = flow.vehicle;
     useEffect(() => {
         let cancelled = false;
-        fetchDefaultFlow().then((d) => {
+        const poll = () => fetchDefaultFlow().then((d) => {
             if (cancelled) return;
-            if (d.error) notify('error', 'Default flow not loaded', d.error);
-            setDefaultFlow(d);
+            const key = d.error ?? d.version ?? '';
+            if (d.error && reported.current !== key) {
+                reported.current = key;
+                notify('error', 'Default flow not loaded', d.error);
+            }
+            setDefaultFlow((prev) => (prev && prev.configured === d.configured && prev.version === d.version
+                && prev.error === d.error ? prev : d));
         });
-        return () => { cancelled = true; };
-    }, [notify]);
+        poll();
+        const timer = setInterval(() => { poll(); loader(); }, DEFAULT_FLOW_POLL_MS);
+        return () => { cancelled = true; clearInterval(timer); };
+    }, [notify, loader]);
     useEffect(() => {
-        if (!defaultFlow?.configured || !catalog || defaultFlowLoaded(defaultFlow.version) ||
-            failedDefault.current === defaultFlow.version) return undefined;
+        if (!defaultFlow?.configured || !catalog || defaultFlowLoaded(defaultFlow.version)) return undefined;
         const vehicle = defaultFlowVehicle(catalog, defaultFlow.vehicle, flowVehicle.current);
-        if (!vehicle) {
-            const timer = setTimeout(loader, DEFAULT_FLOW_RETRY_MS);
-            return () => clearTimeout(timer);
-        }
+        if (!vehicle) return undefined; // the next catalog may have it
         let cancelled = false;
         importFlowToml(defaultFlow.toml, catalog, vehicle).then((imported) => {
             if (cancelled) return;
@@ -100,8 +107,8 @@ function FlowBuilderInner({ theme, toast, active = true, flow, setFlow, catalog,
             markDefaultFlowLoaded(defaultFlow.version);
             notify('info', 'Default flow loaded', `${defaultFlow.name} for ${displayName(vehicle)}`);
         }).catch((e) => {
-            if (cancelled) return;
-            failedDefault.current = defaultFlow.version;
+            if (cancelled || reported.current === defaultFlow.version) return;
+            reported.current = defaultFlow.version;
             notify('error', 'Default flow not loaded', e.message);
         });
         return () => { cancelled = true; };

@@ -58,6 +58,7 @@ var cmu = LatLon{Lat: 40.4433, Lon: -79.9436}
 type options struct {
 	gcs, web, http, socket, clips string
 	gcsManifest, aiConfig         string
+	defaultFlow, defaultVehicle   string
 	mapbox                        string
 	gcsIP                         string
 	vehicles                      []string
@@ -100,6 +101,8 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&o.gcs, "gcs", "bin/gcs", "path of the GCS binary")
 	fs.StringVar(&o.gcsManifest, "gcs-manifest", "gcs.plugin.toml", "path of the GCS plugin manifest for Configure")
 	fs.StringVar(&o.aiConfig, "ai-config", "", "path to a JSON object of non-secret GCS AI settings")
+	fs.StringVar(&o.defaultFlow, "default-flow", "", "absolute path of the GCS's default_flow, the flow TOML the Flow Builder starts with")
+	fs.StringVar(&o.defaultVehicle, "default-flow-vehicle", "", "the GCS's default_flow_vehicle")
 	fs.StringVar(&o.web, "web", "web/dist", "directory of the built web UI, passed to the GCS")
 	fs.StringVar(&o.http, "http", ":8002", "address the GCS serves the web UI on")
 	fs.StringVar(&o.socket, "socket", filepath.Join(runtimeDir, fmt.Sprintf("gcsmock-%d.sock", os.Getpid())),

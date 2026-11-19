@@ -50,6 +50,14 @@ func TestDefaultFlow(t *testing.T) {
 	}
 	version := body["version"]
 
+	// The same file is the same version in the same run of the GCS
+	if _, body := serveDefault(t, DefaultFlow{Path: path, Vehicle: "steppeeagle"}); body["version"] != version {
+		t.Error("the version changed without the file")
+	}
+	// ...and a new one after a restart, so each run loads it again
+	if _, body := serveDefault(t, DefaultFlow{Path: path, Started: "later"}); body["version"] == version {
+		t.Error("the version didn't change with the run")
+	}
 	// An edited file is a new version
 	if err := os.WriteFile(path, []byte(relativeFlow+"\n"), 0o644); err != nil {
 		t.Fatal(err)

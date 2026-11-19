@@ -238,7 +238,8 @@ func run(engine, daemon, web, rawArgs string, log zerolog.Logger) error {
 		}
 	}
 	missions := missionRoutes{svc: mission.NewService(compiler, cfg, gcsIP, catalog, running, log), upload: noDaemonHandler(), deploy: noDaemonHandler(), pushFlow: noDaemonHandler(), catalog: noDaemonHandler()}
-	missions.defaultFlow = flows.DefaultFlow{Path: filesPath(a.DefaultFlow), Vehicle: a.DefaultFlowVehicle}
+	missions.defaultFlow = flows.DefaultFlow{Path: filesPath(a.DefaultFlow), Vehicle: a.DefaultFlowVehicle,
+		Started: strconv.FormatInt(time.Now().UnixNano(), 36)}
 	if conn != nil {
 		uploads := mission.NewUploads(list, mission.NewSender(conn, 1<<20, 30*time.Second), missions.svc, log)
 		missions.upload = http.HandlerFunc(uploads.ServeUpload)
