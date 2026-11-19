@@ -301,3 +301,54 @@ func TestEngineNames(t *testing.T) {
 	_, err = tpl.EngineNames(testCatalog())
 	wantErr(t, err, "flow name yolo has no host")
 }
+
+// A planning flow named relative to the vehicle (as the vehicle's own flows
+// are) is translated for each vehicle targeted: local. to its daemon,
+// remote. to the orchestrator; names by host are kept
+func TestTemplateForVehicle(t *testing.T) {
+	relative := Template{
+		Producers: []TemplateProducer{{Name: "vehicle.front", Tokens: intp(2)}},
+		Engines:   []TemplateEngine{{Name: "local.yolo"}, {Name: "remote.h264_encoder"}},
+		Edges: []TemplateEdge{
+			{From: "vehicle.front", To: "local.yolo", Timeout: "2s"},
+			{From: "local.yolo", To: "remote.h264_encoder", Timeout: "1s"},
+		},
+	}
+	c := testCatalog()
+	got, err := relative.ForVehicle(c, "100.64.0.2.charlie", "100.64.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := testTemplate()
+	want.Producers[0].Name = "charlie.front"
+	want.Edges[0].From = "charlie.front"
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v\nwant %+v", got, want)
+	}
+	if err := got.Check(c, ""); err != nil {
+		t.Errorf("the translated flow doesn't check: %v", err)
+	}
+	// Resolved for the vehicle, it is vehicle-relative again
+	r, err := got.Resolve(c, "100.64.0.1", charlie(), []string{"front"}, "m", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Engines["swap03.yolo"] != "local.yolo" || r.Engines["cloudlet033.h264_encoder"] != "remote.h264_encoder" {
+		t.Errorf("resolved engines %v", r.Engines)
+	}
+
+	// Host names are kept
+	if same, err := testTemplate().ForVehicle(c, "100.64.0.2.charlie", "100.64.0.1"); err != nil || !reflect.DeepEqual(same, testTemplate()) {
+		t.Errorf("host names changed: %+v, %v", same, err)
+	}
+	if n, err := c.ForVehicle("local.yolo", "100.64.0.2.charlie", "100.64.0.1"); err != nil || n != "swap03.yolo" {
+		t.Errorf("local.yolo is %q, %v", n, err)
+	}
+	if n, err := c.ForVehicle("", "100.64.0.2.charlie", "100.64.0.1"); err != nil || n != "" {
+		t.Errorf("empty is %q, %v", n, err)
+	}
+	_, err = c.ForVehicle("local.yolo", "100.64.0.7.charlie", "100.64.0.1")
+	wantErr(t, err, "local.yolo: daemon 100.64.0.7 is not running")
+	_, err = c.ForVehicle("local.yolo", "charlie", "100.64.0.1")
+	wantErr(t, err, "local.yolo: vehicle charlie has no daemon IP in its name")
+}

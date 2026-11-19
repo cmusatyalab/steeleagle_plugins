@@ -5,6 +5,8 @@ import (
 	"net"
 	"sort"
 	"strings"
+
+	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/fleet"
 )
 
 // SplitTemplateName splits a template name {host}.{name} at its last dot,
@@ -76,4 +78,47 @@ func (c Catalog) clashesUnavailable(h string) bool {
 func firstLabel(h string) string {
 	l, _, _ := strings.Cut(h, ".")
 	return l
+}
+
+// Prefixes of names relative to a vehicle, as the vehicle's own flows name
+// their nodes: one of its streams, an engine (or engine producer) on its
+// daemon, or one on the orchestrator
+const (
+	relVehicle = "vehicle"
+	relLocal   = "local"
+	relRemote  = "remote"
+)
+
+// ForVehicle translates a name relative to a vehicle into a template name
+// for the vehicle (full name) on the orchestrator at orchestratorIP:
+// vehicle.<stream> to <vehicle>.<stream>, labeled by the vehicle's bare
+// name; local.<rest> to <its daemon>.<rest>; and remote.<rest> to
+// <orchestrator>.<rest>, each daemon named as the Flow Builder names it
+// (HostLabel). Any other name is already a template name, and is returned
+// as is.
+func (c Catalog) ForVehicle(name, vehicle, orchestratorIP string) (string, error) {
+	prefix, rest, ok := strings.Cut(name, ".")
+	if !ok || rest == "" {
+		return name, nil
+	}
+	label := func(ip string) (string, error) {
+		d, ok := c.Daemon(ip)
+		if !ok {
+			return "", fmt.Errorf("%s: daemon %s is not running", name, ip)
+		}
+		return c.HostLabel(d) + "." + rest, nil
+	}
+	vehicleIP, bare := fleet.SplitName(vehicle)
+	switch prefix {
+	case relVehicle:
+		return bare + "." + rest, nil
+	case relLocal:
+		if vehicleIP == "" {
+			return "", fmt.Errorf("%s: vehicle %s has no daemon IP in its name", name, vehicle)
+		}
+		return label(vehicleIP)
+	case relRemote:
+		return label(orchestratorIP)
+	}
+	return name, nil
 }

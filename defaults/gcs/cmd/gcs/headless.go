@@ -54,8 +54,11 @@ type headlessArgs struct {
 	// first that streams
 	Camera string `json:"camera"`
 	// Flow is the planning flow's TOML file, names relative to the vehicle
-	// (vehicle.front, local.box_rerank), absolute or relative to the files
-	// directory; Track needs one connecting the Track detector to the camera
+	// (vehicle.front, local.box_rerank, remote.detection), absolute or
+	// relative to the files directory; Track needs one connecting the Track
+	// detector to the camera. The names are translated for the vehicle
+	// observed: local. is its daemon, remote. this one. Names by host
+	// (heisenberg.box_rerank), as the Flow Builder saves them, are kept
 	Flow string `json:"flow"`
 	// GeoJSON is the map file Patrol and Survey use, as Flow; optional
 	GeoJSON string `json:"geojson"`
@@ -94,6 +97,8 @@ func parseHeadlessArgs(content string) (headlessArgs, error) {
 			*arg.field = arg.value
 		}
 	}
+	// The detector is on this daemon, which is the flow's remote
+	settings.Detector = strings.TrimPrefix(settings.Detector, "remote.")
 	settings.AutoDeploy = settings.AutoDeploy || a.AutoDeploy
 	if err := settings.Validate(); err != nil {
 		return headlessArgs{}, fmt.Errorf("invalid plugin args: %w", err)
@@ -226,12 +231,27 @@ func runHeadless(engine, daemon, rawArgs string, log zerolog.Logger) error {
 		}
 		p := plan
 		p.Vehicle = vehicle
+		localDetector := ""
 		if p.Flow != nil {
-			flow := *p.Flow
-			flow.Vehicle = vehicle
-			p.Flow = &flow
+			// The flow's names relative to the vehicle, and the Track
+			// detector's, for this vehicle
+			ctx, cancel := context.WithTimeout(context.Background(), listTimeout)
+			cat, err := catalog(ctx)
+			cancel()
+			if err == nil {
+				var flow flows.Template
+				if flow, err = p.Flow.ForVehicle(cat, vehicle, gcsIP); err == nil {
+					p.Flow = &flow
+					localDetector, err = cat.ForVehicle(settings.LocalDetector, vehicle, gcsIP)
+				}
+			}
+			if err != nil {
+				nextTry = time.Now().Add(headlessRetry)
+				log.Error().Err(err).Str("vehicle", vehicle).Msg("could not translate the planning flow for the vehicle; trying again")
+				return
+			}
 		}
-		id, err := inference.StartLive(vehicle, producer, p)
+		id, err := inference.StartLive(vehicle, producer, localDetector, p)
 		if err != nil {
 			nextTry = time.Now().Add(headlessRetry)
 			log.Error().Err(err).Str("producer", producer).Msg("could not start observing; trying again")

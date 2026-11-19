@@ -23,7 +23,7 @@ default = ""
 [[args]]
 name = "flow"
 type = "string"
-description = "Planning flow TOML, names relative to the vehicle (vehicle.front, local.box_rerank, remote.detection), absolute or relative to $STEELEAGLE_FILES. Track needs it to connect local_detector to the camera; it is the flow deployed missions run with"
+description = "Planning flow TOML, names relative to the vehicle (vehicle.front, local.box_rerank, remote.detection), absolute or relative to $STEELEAGLE_FILES. Track needs it to connect local_detector to the camera; it is the flow deployed missions run with. local. is translated to the observed vehicle's daemon and remote. to this one; names by host (heisenberg.box_rerank) are kept"
 default = ""
 
 [[args]]
@@ -35,7 +35,7 @@ default = ""
 [[args]]
 name = "detector"
 type = "string"
-description = "Detection engine on this daemon whose boxes go to the model (e.g. detection, an RF-DETR); empty for the one detector in the vehicle's active flow"
+description = "Detection engine on this daemon whose boxes go to the model (e.g. detection or remote.detection, an RF-DETR); empty for the one detector in the vehicle's active flow"
 default = ""
 
 [[args]]

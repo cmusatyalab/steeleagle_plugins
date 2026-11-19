@@ -158,14 +158,17 @@ func (s *Service) SetDeployer(d Deployer) {
 
 // StartLive starts observing producer, a camera of vehicle, as a live run
 // planned with plan, without the Plan page; it returns the run's ID.
-func (s *Service) StartLive(vehicle, producer string, plan mission.PlanningContext) (string, error) {
+//
+// localDetector, if not empty, is the run's Track detector, over the
+// configured one (Settings.LocalDetector), by its name in plan's flow.
+func (s *Service) StartLive(vehicle, producer, localDetector string, plan mission.PlanningContext) (string, error) {
 	if !s.configured() {
 		return "", errors.New("the vision model has no API key")
 	}
 	if !mediaAvailable() {
 		return "", errors.New("FFmpeg and ffprobe are not installed")
 	}
-	r, err := s.start(startRequest{Source: "live", Vehicle: vehicle, Producer: producer, Plan: plan})
+	r, err := s.start(startRequest{Source: "live", Vehicle: vehicle, Producer: producer, LocalDetector: localDetector, Plan: plan})
 	if err != nil {
 		return "", err
 	}

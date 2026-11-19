@@ -332,3 +332,39 @@ func (t Template) Resolve(c Catalog, orchestratorIP string, target fleet.Vehicle
 	}
 	return Resolved{Flow: flow, Manifest: mb, Engines: names}, nil
 }
+
+// ForVehicle is the template with every name relative to a vehicle
+// (vehicle.<stream>, local.<engine>[.<producer>], remote.<engine>)
+// translated for the vehicle (full name) on the orchestrator at
+// orchestratorIP, as Catalog.ForVehicle translates it; names given by host
+// are kept. Its Vehicle is the vehicle.
+func (t Template) ForVehicle(c Catalog, vehicle, orchestratorIP string) (Template, error) {
+	out := Template{Vehicle: vehicle}
+	name := func(n string) (string, error) { return c.ForVehicle(n, vehicle, orchestratorIP) }
+	for _, p := range t.Producers {
+		n, err := name(p.Name)
+		if err != nil {
+			return Template{}, err
+		}
+		out.Producers = append(out.Producers, TemplateProducer{Name: n, Tokens: p.Tokens})
+	}
+	for _, e := range t.Engines {
+		n, err := name(e.Name)
+		if err != nil {
+			return Template{}, err
+		}
+		out.Engines = append(out.Engines, TemplateEngine{Name: n})
+	}
+	for _, e := range t.Edges {
+		from, err := name(e.From)
+		if err != nil {
+			return Template{}, err
+		}
+		to, err := name(e.To)
+		if err != nil {
+			return Template{}, err
+		}
+		out.Edges = append(out.Edges, TemplateEdge{From: from, To: to, Timeout: e.Timeout})
+	}
+	return out, nil
+}
