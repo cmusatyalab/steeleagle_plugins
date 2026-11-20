@@ -5,7 +5,7 @@ go 1.26.5
 require (
 	github.com/cmusatyalab/steeleagle/api/go v0.3.8
 	github.com/cmusatyalab/steeleagle/config v0.0.8
-	github.com/cmusatyalab/steeleagle/sdk v0.1.3
+	github.com/cmusatyalab/steeleagle/sdk v0.1.4
 	github.com/cmusatyalab/uriel/go v0.2.0
 	github.com/pion/rtp v1.10.6
 	github.com/pion/webrtc/v4 v4.2.25

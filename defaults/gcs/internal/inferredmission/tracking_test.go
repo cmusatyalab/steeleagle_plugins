@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/mission"
 	"github.com/cmusatyalab/steeleagle_plugins/gcs/internal/nl2dsl"
@@ -32,6 +33,125 @@ func TestTheModelsTargetBoxIsReadOnlyForTrack(t *testing.T) {
 	reply = `{"recommendation": "Wait 30 seconds, then return home.", "evidence": "Unclear.", "target_box": {"frame": 3, "box": 2}}`
 	if _, err := row.readVisionRecommendation("v7", reply); err != nil || row.TargetBox != nil {
 		t.Fatalf("a box is only for tracking, got %+v (%v)", row.TargetBox, err)
+	}
+}
+
+func TestDistractorBoxesAreReadWithTheTargetBox(t *testing.T) {
+	var row section
+	reply := `{"recommendation": "Track the person, then return home. If the battery drops to 30 percent, return home.",
+		"evidence": "The framing follows one person.", "target_box": {"frame": 3, "box": 2},
+		"distractor_boxes": [{"frame": 3, "box": 1}, {"frame": 1, "box": 4}]}`
+	if _, err := row.readVisionRecommendation("v7", reply); err != nil || len(row.DistractorBoxes) != 2 ||
+		row.DistractorBoxes[1] != (boxRef{1, 4}) {
+		t.Fatalf("expected two distractors, got %+v (%v)", row.DistractorBoxes, err)
+	}
+}
+
+func distractorRow() section {
+	box := func(id int, class string, x float64) detectorLabel {
+		return detectorLabel{ID: id, Class: class, Box: &[4]float64{x, 0.4, x + 0.1, 0.6}}
+	}
+	return section{
+		Evidence: &liveEvidence{Frames: []frameEvidence{{Frame: 1, Detections: []detectorLabel{
+			box(1, "person", 0.1), box(2, "person", 0.4), box(3, "car", 0.7), box(4, "Person", 0.42)}}}},
+		DistractorBoxes: []boxRef{{1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 9}},
+	}
+}
+
+func TestANewTargetsDistractorsReplaceTheOldOnes(t *testing.T) {
+	fakeOllama(t, "No.", "unused")
+	dir := t.TempDir()
+	for _, name := range []string{"prompt.txt", "d1.jpg", "d7.jpg"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := &Service{ctx: t.Context(), log: zerolog.Nop()}
+	meta := session{Settings: DefaultSettings()}
+	meta.Settings.Verifier, meta.Settings.VerifierLiveDir = "qwen", dir
+	r := &run{dir: t.TempDir()}
+	if err := os.MkdirAll(r.sectionDir(0), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	row := distractorRow()
+	label := row.Evidence.Frames[0].Detections[1]
+	check := s.checkTarget(r, meta, row, boxRef{1, 2}, label, targetFrame(t))
+	// Box 1 only: 2 is the target, 3 a car, 4 overlaps the target, 9 isn't there
+	if check.Error != "" || !check.PromptWritten || len(check.DistractorBoxes) != 1 ||
+		check.DistractorBoxes[0] != (boxRef{1, 1}) || len(check.DistractorErrors) != 4 {
+		t.Fatalf("expected box 1 alone as a distractor, got %+v", check)
+	}
+	if got := liveDistractors(dir); len(got) != 1 || got[0] != "d1.jpg" || check.Distractors[0] != "d1.jpg" {
+		t.Fatalf("expected the old distractors set aside and d1.jpg written, got %v", got)
+	}
+	if data, _ := os.ReadFile(filepath.Join(dir, "d1.jpg")); bytes.Equal(data, []byte("old")) {
+		t.Fatal("d1.jpg is still the old distractor")
+	}
+}
+
+func TestAKeptPromptGetsDistractorsOnlyIfItHasNone(t *testing.T) {
+	fakeOllama(t, "Yes", "unused")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "prompt.txt"), []byte("a person"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{ctx: t.Context(), log: zerolog.Nop()}
+	meta := session{Settings: DefaultSettings()}
+	meta.Settings.Verifier, meta.Settings.VerifierLiveDir = "qwen", dir
+	r := &run{dir: t.TempDir()}
+	if err := os.MkdirAll(r.sectionDir(0), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	row := distractorRow()
+	label := row.Evidence.Frames[0].Detections[1]
+	for i := 0; i < 2; i++ {
+		s.checkTarget(r, meta, row, boxRef{1, 2}, label, targetFrame(t))
+	}
+	if got := liveDistractors(dir); len(got) != 1 {
+		t.Fatalf("expected one distractor written once, got %v", got)
+	}
+}
+
+func TestAPromptThatMatchedIsReplacedOnlyAfterTwoMismatchesInARow(t *testing.T) {
+	answer := "Yes"
+	fakeOllamaFunc(t, func() string { return answer }, "unused")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "prompt.txt"), []byte("a person in black"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{ctx: t.Context(), log: zerolog.Nop()}
+	meta := session{Settings: DefaultSettings()}
+	meta.Settings.Verifier, meta.Settings.VerifierLiveDir = "qwen", dir
+	r := &run{dir: t.TempDir()}
+	if err := os.MkdirAll(r.sectionDir(0), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	row := distractorRow()
+	label := row.Evidence.Frames[0].Detections[1]
+	check := func() *targetCheck { return s.checkTarget(r, meta, row, boxRef{1, 2}, label, targetFrame(t)) }
+	if c := check(); c.Match == nil || !*c.Match {
+		t.Fatalf("expected a match, got %+v", c)
+	}
+	answer = "No"
+	if c := check(); !c.Deferred || c.PromptWritten || c.Misses != 1 {
+		t.Fatalf("expected the first mismatch deferred, got %+v", c)
+	}
+	// A match in between starts the count over
+	answer = "Yes"
+	check()
+	answer = "No"
+	if c := check(); !c.Deferred {
+		t.Fatalf("expected the count started over, got %+v", c)
+	}
+	if c := check(); c.Deferred || !c.PromptWritten || c.Misses != 2 {
+		t.Fatalf("expected the second mismatch in a row to replace the prompt, got %+v", c)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "class.txt")); err != nil || string(data) != "person\n" {
+		t.Fatalf("expected class.txt to hold the class, got %q (%v)", data, err)
+	}
+	// The new prompt hasn't matched: a mismatch replaces it at once
+	if c := check(); c.Deferred || !c.PromptWritten {
+		t.Fatalf("expected a prompt that never matched replaced at once, got %+v", c)
 	}
 }
 
@@ -98,6 +218,11 @@ func TestWritingAnImagePromptReplacesPromptJPGAndSetsAsidePromptJPEG(t *testing.
 // fakeOllama answers the box question with answer, and describes with
 // description; it records the questions asked.
 func fakeOllama(t *testing.T, answer, description string) *[]string {
+	return fakeOllamaFunc(t, func() string { return answer }, description)
+}
+
+// fakeOllamaFunc is fakeOllama with the box answer from answer() each time.
+func fakeOllamaFunc(t *testing.T, answer func() string, description string) *[]string {
 	var mu sync.Mutex
 	var asked []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +242,7 @@ func fakeOllama(t *testing.T, answer, description string) *[]string {
 		mu.Unlock()
 		reply := description
 		if strings.Contains(question, "red box") {
-			reply = answer
+			reply = answer()
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"message": map[string]string{"content": reply}})
 	}))
@@ -167,6 +292,35 @@ func TestATrackedObjectThatIsntThePromptBecomesThePrompt(t *testing.T) {
 	}
 	if saved, _ := os.ReadFile(filepath.Join(r.sectionDir(0), "new_prompt.jpg")); !bytes.Equal(saved, data) {
 		t.Fatal("the crop isn't kept beside the section's record")
+	}
+}
+
+func TestTheVerifiersOwnTextIsUsedWhenItIsNewerThanThePrompt(t *testing.T) {
+	asked := fakeOllama(t, "Yes", "a person in a gray shirt")
+	dir := t.TempDir()
+	write := func(name, text string, at time.Time) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(filepath.Join(dir, name), at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	s := &Service{ctx: t.Context(), log: zerolog.Nop()}
+	model := newOllama("qwen")
+	// The verifier's text of an older prompt: the GCS describes the new one
+	write("description.txt", "person in black hoodie and blue jeans\n", now.Add(-time.Minute))
+	write("prompt.jpg", string(targetFrame(t)[0].JPEG), now.Add(-30*time.Second))
+	if text, source, err := s.livePrompt(t.Context(), model, dir); err != nil || source != "prompt.jpg" ||
+		text != "a person in a gray shirt" || len(*asked) != 1 {
+		t.Fatalf("expected the GCS's description of prompt.jpg, got %q from %s (%v)", text, source, err)
+	}
+	// Written since the prompt: the verifier's text, without asking the model
+	write("description.txt", "person in black hoodie and blue jeans\n", now)
+	if text, source, err := s.livePrompt(t.Context(), model, dir); err != nil || source != "description.txt" ||
+		text != "person in black hoodie and blue jeans" || len(*asked) != 1 {
+		t.Fatalf("expected the verifier's text, got %q from %s (%v)", text, source, err)
 	}
 }
 

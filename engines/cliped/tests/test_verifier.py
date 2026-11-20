@@ -7,7 +7,8 @@ from conftest import make_frame, make_input
 
 from cliped import main
 from cliped.files import FilesError, TileLog, resolve
-from cliped.verifier import CATEGORY_QUESTION, DESCRIPTIVE_QUESTION, Verifier, parse_answer
+from cliped.verifier import (CATEGORY_QUESTION, CONTRASTIVE_QUESTION, DESCRIPTIVE_QUESTION, MAX_DISTRACTORS, Verifier,
+                             parse_answer)
 from steeleagle_protocol.v1.messages.result import result_pb2
 
 
@@ -50,7 +51,29 @@ def test_anything_but_yes_is_dropped_with_a_no():
 
 def named(text, answer="yes"):
     """A model that gives `text` for an image and `answer` about a frame."""
-    return Model(lambda q: text if q in (CATEGORY_QUESTION, DESCRIPTIVE_QUESTION) else answer)
+    describe = (CATEGORY_QUESTION, DESCRIPTIVE_QUESTION, *(CONTRASTIVE_QUESTION.format(n=n) for n in range(1, 9)))
+    return Model(lambda q: text if q in describe else answer)
+
+
+def described(model):
+    """What the model was asked about an image, but its kind: the
+    description, asked after the kind in every mode but "class"."""
+    return [asked for asked in model.asked if asked[0] != CATEGORY_QUESTION]
+
+
+def heartbeat(payload):
+    """The heartbeat's payload as (class, description), None for none."""
+    if payload is None:
+        return None
+    data = json.loads(payload)
+    return data["class"], data["description"]
+
+
+def text_of(payload):
+    """The text CLIP ranks by in the heartbeat's payload: its description,
+    else its class."""
+    cls, description = heartbeat(payload)
+    return description or cls
 
 
 def test_an_image_prompt_becomes_its_kind_and_the_model_sees_only_the_frame():
@@ -67,17 +90,62 @@ def test_an_image_prompt_becomes_its_kind_and_the_model_sees_only_the_frame():
     assert all(len(images) == 1 and images[0] != b"reference" for _, images in model.asked[1:])
 
 
-def test_image_descriptive_describes_the_image_instead():
+def test_image_mode_descriptive_describes_the_image_instead():
     model = named("Mannequin in dark green shirt and black pants.")
-    verifier = Verifier(model, label="m.jpg", reference=b"reference", image_descriptive=True)
-    assert model.asked == [(DESCRIPTIVE_QUESTION, [b"reference"])]
+    verifier = Verifier(model, label="m.jpg", reference=b"reference", image_mode="descriptive")
+    assert model.asked == [(CATEGORY_QUESTION, [b"reference"]), (DESCRIPTIVE_QUESTION, [b"reference"])]
     assert verifier.description == "Mannequin in dark green shirt and black pants"
 
 
+def test_contrastive_shows_the_distractors_after_the_image():
+    model = named("Person in black hoodie and blue jeans")
+    verifier = Verifier(model, label="p.jpg", reference=b"target", image_mode="contrastive",
+                        distractors=[("a.jpg", b"gray"), ("b.jpg", b"white")])
+    assert described(model) == [(CONTRASTIVE_QUESTION.format(n=2), [b"target", b"gray", b"white"])]
+    assert verifier.description == "Person in black hoodie and blue jeans"
+
+
+def test_contrastive_without_distractors_describes_then_asks_again_when_they_come():
+    model = named("Person in dark jacket")
+    verifier = Verifier(model, label="p.jpg", reference=b"target", image_mode="contrastive")
+    assert described(model) == [(DESCRIPTIVE_QUESTION, [b"target"])]
+    verifier.set_live_distractors([("d1.jpg", b"gray")])
+    assert verifier.description is None
+    verifier.describe_image()
+    assert model.asked[-1] == (CONTRASTIVE_QUESTION.format(n=1), [b"target", b"gray"])
+    # Its kind is asked once: distractors change only the description
+    assert sum(q == CATEGORY_QUESTION for q, _ in model.asked) == 1
+
+
+def test_the_contrastive_question_has_no_negation_to_pass_on():
+    assert "does not understand negation" in CONTRASTIVE_QUESTION
+    assert CONTRASTIVE_QUESTION.format(n=3).count("3 image") == 1
+
+
+def test_only_the_newest_distractors_are_shown():
+    model = named("x")
+    many = [(f"d{i}.jpg", bytes([i])) for i in range(MAX_DISTRACTORS + 3)]
+    Verifier(model, label="p.jpg", reference=b"t", image_mode="contrastive", distractors=many)
+    assert described(model)[0][1] == [b"t", *[image for _, image in many[-MAX_DISTRACTORS:]]]
+
+
+def test_class_and_descriptive_ignore_distractors():
+    for mode, questions in (("class", [CATEGORY_QUESTION]), ("descriptive", [CATEGORY_QUESTION, DESCRIPTIVE_QUESTION])):
+        model = named("x")
+        verifier = Verifier(model, label="p.jpg", reference=b"t", image_mode=mode, distractors=[("a", b"a")])
+        verifier.set_live_distractors([("d1.jpg", b"b")])
+        assert model.asked == [(q, [b"t"]) for q in questions] and verifier.description == "x"
+
+
+def test_a_bad_image_mode_is_refused():
+    with pytest.raises(ValueError):
+        Verifier(Model("yes"), label="a dog", image_mode="strict")
+
+
 def test_a_text_prompt_is_used_as_is_either_way():
-    for descriptive in (False, True):
+    for mode in ("class", "descriptive", "contrastive"):
         model = Model("yes")
-        verifier = Verifier(model, label="a dog", question="box", image_descriptive=descriptive)
+        verifier = Verifier(model, label="a dog", question="box", image_mode=mode)
         verifier.on_input(make_input(1, make_frame()))
         assert [q for q, _ in model.asked] == [BOX_QUESTION.format(prompt="a dog")]
 
@@ -113,11 +181,16 @@ def test_verifier_args():
     assert main.parse_verifier_args(json.dumps({"prompt": "a tarp"}))["question"] == ""
     args = main.parse_verifier_args(json.dumps({"image": "t.jpg", "question": " Same kind of animal? "}))
     assert args["question"] == "Same kind of animal?"
-    assert args["image_descriptive"] is False and (args["yes_conf"], args["no_conf"]) == (0.7, 0.9)
-    assert main.parse_verifier_args(json.dumps({"image": "t.jpg", "image_descriptive": True}))["image_descriptive"]
+    assert args["image_mode"] == "class" and (args["yes_conf"], args["no_conf"]) == (0.7, 0.9)
+    assert args["distractors"] == []
+    args = main.parse_verifier_args(json.dumps({"image": "t.jpg", "image_mode": "contrastive",
+                                                "distractors": [" a.jpg ", "b.jpg"]}))
+    assert args["image_mode"] == "contrastive" and args["distractors"] == ["a.jpg", "b.jpg"]
     for bad in [{}, {"prompt": "p", "timeout_ms": 0}, {"prompt": "p", "model": ""}, {"prompt": "p", "log_tiles": 1},
                 {"prompt": "p", "question": "Is {thing} here?"}, {"prompt": "p", "question": 3},
-                {"prompt": "p", "image_descriptive": "yes"}, {"prompt": "p", "yes_conf": 0.5},
+                {"prompt": "p", "image_mode": "descriptive_strict"}, {"prompt": "p", "image_mode": True},
+                {"prompt": "p", "distractors": "a.jpg"}, {"prompt": "p", "distractors": [""]},
+                {"prompt": "p", "yes_conf": 0.5},
                 {"prompt": "p", "no_conf": 1.1}, {"prompt": "p", "yes_conf": True}, {"prompt": "p", "no_conf": "0.9"}]:
         with pytest.raises(main.ConfigError):
             main.parse_verifier_args(json.dumps(bad))
@@ -177,15 +250,16 @@ def keeper_for(tmp_path, *, label="a tarp", describe=None, **kwargs):
 
 def test_without_a_live_directory_the_heartbeat_mirrors_a_text_prompt_every_interval():
     keeper = PromptKeeper(Verifier(Model("yes"), label="a red tarp"), interval_s=1.0)
-    assert keeper.step(0.0) == "a red tarp".encode()
+    assert heartbeat(keeper.step(0.0)) == (None, "a red tarp")
     assert keeper.step(0.5) is None
-    assert keeper.step(1.0) == b"a red tarp"
+    assert heartbeat(keeper.step(1.0)) == (None, "a red tarp")
 
 
 def test_an_image_prompt_is_described_once_for_the_heartbeat(tmp_path):
     verifier, keeper, described = keeper_for(tmp_path, label="tarp.jpg", reference=b"reference")
-    assert keeper.step(0.0) == b"A Red Tarp"
-    assert keeper.step(1.0) == b"A Red Tarp"
+    # In "class" mode the kind is its text: no description for CLIP
+    assert heartbeat(keeper.step(0.0)) == ("A Red Tarp", None)
+    assert heartbeat(keeper.step(1.0)) == ("A Red Tarp", None)
     assert described == [b"reference"]
 
 
@@ -201,7 +275,7 @@ def test_a_failed_description_is_asked_again_at_the_next_heartbeat(tmp_path):
     # At startup, then at the first heartbeat, the model is down
     verifier, keeper, _ = keeper_for(tmp_path, label="tarp.jpg", reference=b"reference", describe=describe)
     assert keeper.step(0.0) is None
-    assert keeper.step(1.0) == b"a red tarp"
+    assert text_of(keeper.step(1.0)) == "a red tarp"
 
 
 def test_the_live_directory_wins_over_the_args_when_it_starts(tmp_path):
@@ -211,7 +285,7 @@ def test_the_live_directory_wins_over_the_args_when_it_starts(tmp_path):
     assert keeper.update()
     assert verifier.label == "a blue tent" and verifier.reference is None
     assert verifier.question(b"png")[0] == BOX_QUESTION.format(prompt="a blue tent")
-    assert keeper.step(0.0) == b"a blue tent"
+    assert heartbeat(keeper.step(0.0)) == (None, "a blue tent")
 
 
 def test_an_image_wins_over_text_and_changes_are_followed(tmp_path):
@@ -220,7 +294,7 @@ def test_an_image_wins_over_text_and_changes_are_followed(tmp_path):
     keeper.update()
     assert verifier.label == "a blue tent"
     write(tmp_path / "prompt.jpg", b"jpeg 1", 200)
-    assert keeper.step(0.0) == b"A Red Tarp"
+    assert text_of(keeper.step(0.0)) == "A Red Tarp"
     assert verifier.reference == b"encoded jpeg 1" and verifier.label == "prompt.jpg"
     # Unchanged: nothing is read or described again
     assert not keeper.update() and len(described) == 1
@@ -359,14 +433,77 @@ def test_an_image_the_model_couldnt_name_is_named_at_the_next_frame():
 
 def test_a_live_image_is_described_when_it_changes(tmp_path):
     model = named("A gray robotic dog")
-    verifier = Verifier(model, label="a dog", question="box", image_descriptive=True)
+    verifier = Verifier(model, label="a dog", question="box", image_mode="descriptive")
     live = tmp_path / "live"
     live.mkdir()
     keeper = PromptKeeper(verifier, live=LiveDir(live), load_image=lambda path: path.read_bytes())
     (live / "prompt.jpg").write_bytes(b"photo")
     keeper.update()
-    assert model.asked == [(DESCRIPTIVE_QUESTION, [b"photo"])] and verifier.description == "A gray robotic dog"
-    assert keeper.step(0.0) == b"A gray robotic dog"
+    assert described(model) == [(DESCRIPTIVE_QUESTION, [b"photo"])] and verifier.description == "A gray robotic dog"
+    assert heartbeat(keeper.step(0.0)) == ("A gray robotic dog", "A gray robotic dog")
+
+
+def test_a_class_written_with_the_image_is_its_kind(tmp_path):
+    model = named("Person in black hoodie and blue jeans")
+    verifier = Verifier(model, label="moving", question="box", image_mode="descriptive")
+    keeper = PromptKeeper(verifier, live=LiveDir(tmp_path), load_image=lambda path: path.read_bytes())
+    (tmp_path / "class.txt").write_text("person\n")
+    (tmp_path / "prompt.jpg").write_bytes(b"target")
+    assert heartbeat(keeper.step(0.0)) == ("a person", "Person in black hoodie and blue jeans")
+    # Not asked the kind: only the description
+    assert [q for q, _ in model.asked] == [DESCRIPTIVE_QUESTION]
+
+
+def test_a_stale_class_file_is_not_the_kind(tmp_path):
+    model = named("a person")
+    verifier = Verifier(model, label="moving", question="box", image_mode="descriptive")
+    keeper = PromptKeeper(verifier, live=LiveDir(tmp_path), load_image=lambda path: path.read_bytes())
+    write(tmp_path / "class.txt", "robotic dog", 100)
+    (tmp_path / "prompt.jpg").write_bytes(b"target")
+    keeper.step(0.0)
+    assert verifier.kind == "a person" and model.asked[0][0] == CATEGORY_QUESTION
+
+
+def test_the_heartbeat_holds_the_kind_and_the_description():
+    def answer(question):
+        return "a person" if question == CATEGORY_QUESTION else \
+            "Person in black hoodie and blue jeans" if question == DESCRIPTIVE_QUESTION else "yes"
+    for mode, expected in (("class", ("a person", None)),
+                           ("descriptive", ("a person", "Person in black hoodie and blue jeans")),
+                           ("contrastive", ("a person", "Person in black hoodie and blue jeans"))):
+        keeper = PromptKeeper(Verifier(Model(answer), label="p.jpg", reference=b"t", image_mode=mode))
+        assert heartbeat(keeper.step(0.0)) == expected, mode
+
+
+def test_the_text_prompt_is_written_to_the_live_directory(tmp_path):
+    model = named("Person in black hoodie and blue jeans")
+    verifier = Verifier(model, label="a person", question="box", image_mode="descriptive")
+    keeper = PromptKeeper(verifier, live=LiveDir(tmp_path), load_image=lambda path: path.read_bytes())
+    keeper.step(0.0)
+    assert (tmp_path / "description.txt").read_text() == "a person\n"
+    (tmp_path / "prompt.jpg").write_bytes(b"target")
+    keeper.step(5.0)
+    assert (tmp_path / "description.txt").read_text() == "Person in black hoodie and blue jeans\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["description.txt", "prompt.jpg"]
+
+
+def test_live_distractors_are_read_and_the_image_described_again(tmp_path):
+    model = named("Person in black hoodie and blue jeans")
+    verifier = Verifier(model, label="a person", question="box", image_mode="contrastive")
+    keeper = PromptKeeper(verifier, live=LiveDir(tmp_path), load_image=lambda path: path.read_bytes())
+    (tmp_path / "prompt.jpg").write_bytes(b"target")
+    keeper.update()
+    assert described(model) == [(DESCRIPTIVE_QUESTION, [b"target"])]
+    (tmp_path / "d2.jpg").write_bytes(b"white")
+    (tmp_path / "d1.jpg").write_bytes(b"gray")
+    (tmp_path / "decoy.jpg").write_bytes(b"not a distractor")
+    assert keeper.update()
+    keeper.step(0.0)
+    question, images = model.asked[-1]
+    assert question == CONTRASTIVE_QUESTION.format(n=2) and images[0] == b"target"
+    assert sorted(images[1:]) == [b"gray", b"white"]
+    asked = len(model.asked)
+    assert not keeper.update() and keeper.step(5.0) is not None and len(model.asked) == asked
 
 
 class ScoredModel:

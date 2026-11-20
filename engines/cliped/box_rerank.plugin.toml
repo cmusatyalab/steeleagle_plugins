@@ -114,7 +114,7 @@ default = false
 [[args]]
 name = "class_prompt"
 type = "string"
-description = "With gate: the prompt for any box of the class, against which the prompt's likeness is measured. Default: \"a <first of classes>\" (e.g. \"a person\")"
+description = "With gate: the prompt for any box of the class, against which the prompt's likeness is measured, until the verifier's prompt heartbeat brings its own class (an image prompt's kind), which replaces it, and whenever a heartbeat has none (a text prompt). Default: \"a <first of classes>\" (e.g. \"a person\")"
 default = ""
 
 [[args]]

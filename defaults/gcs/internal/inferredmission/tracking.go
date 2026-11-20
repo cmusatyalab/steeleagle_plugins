@@ -5,9 +5,12 @@ package inferredmission
 // box's detector class becomes the Track class, and the box is checked
 // against the cliped verifier's prompt with the verifier's own model: if the
 // model says it isn't the prompt, a crop of the box becomes the verifier's
-// image prompt (prompt.jpg) through its live directory. The verifier turns
-// it into text (with image_descriptive, a short description of its colors
-// and features), and box_rerank follows that text. With auto_deploy, the section's compiled mission is sent to
+// image prompt (prompt.jpg) through its live directory. The vision model
+// also names distractor_boxes, other objects of the target's class in the
+// section; their crops are written beside the prompt as d1.jpg, d2.jpg, ...
+// (the old ones set aside), so a verifier with image_mode "contrastive"
+// describes the target by what sets it apart from them. The verifier turns
+// the image into text, and box_rerank follows that text. With auto_deploy, the section's compiled mission is sent to
 // the vehicle to compile and load, as its fallback when its data link fails.
 
 import (
@@ -27,6 +30,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,7 +45,8 @@ const (
 	verifierBoxQuestion = "This image is cut from an aerial drone video. Is the object inside the red box {prompt}? " +
 		"Answer with only yes or no."
 	// The verifier's DESCRIPTIVE_QUESTION, with which it turns an image
-	// prompt into text when image_descriptive is set, as it is with the GCS
+	// prompt into text with image_mode "descriptive" (and "contrastive"
+	// without distractors); the GCS checks a box against that text
 	verifierDescribeQuestion = "Describe the main person or object in this image as a short phrase for finding it in a low-resolution photo " +
 		"taken by a drone from far above: what it is, then its most noticeable colors and any distinguishing features " +
 		"large enough to see from far away. Leave out what it is doing, where it is and the background, and small " +
@@ -52,9 +58,24 @@ const (
 	// The verifier's live directory files (cliped/verifier.py LiveDir); an
 	// image prompt wins over the text one
 	livePromptText = "prompt.txt"
+	// The verifier's text prompt, which it writes beside its prompt when the
+	// prompt changes (cliped/verifier.py DESCRIPTION_FILE)
+	liveDescription = "description.txt"
 	// The image prompt the GCS writes, and its JPEG quality
 	livePromptImage = "prompt.jpg"
-	promptQuality   = 95
+	// The tracked box's detector class, written just before prompt.jpg; the
+	// verifier takes it as the image's kind (cliped/verifier.py CLASS_FILE)
+	liveClassFile = "class.txt"
+	// A prompt a tracked box has matched is replaced only after this many
+	// mismatches in a row: one section's pick of another object (a framing
+	// the vision model misread) doesn't undo a prompt that was working
+	replaceAfterMisses = 2
+	promptQuality      = 95
+	// The most distractors written for a section
+	maxDistractors = 3
+	// How much a distractor's box may overlap the target's in its frame
+	// (intersection over union): more, and it is the target, or hides it
+	maxDistractorIoU = 0.3
 	// The crops: the box with this much context around it, at least
 	// cropMinSide pixels, enlarged so the shorter side is enlargeMinSide
 	checkContext   = 2.0
@@ -66,6 +87,9 @@ const (
 )
 
 var livePromptImages = []string{"prompt.jpg", "prompt.jpeg"}
+
+// The verifier's distractor files (cliped/verifier.py DISTRACTOR_PATTERN)
+var distractorFile = regexp.MustCompile(`^d(\d+)\.jpe?g$`)
 
 // boxRef names a detection: its id in a sampled frame (both from 1).
 type boxRef struct {
@@ -89,10 +113,20 @@ type targetCheck struct {
 	// The crop of the box saved as the new image prompt, when it wasn't the
 	// prompt (or there was none): its file beside the section's record, and
 	// whether it was written to the live directory as prompt.jpg
-	NewPromptImage string  `json:"new_prompt_image,omitempty"`
-	PromptWritten  bool    `json:"prompt_written,omitempty"`
-	Error         string  `json:"error,omitempty"`
-	Elapsed       float64 `json:"elapsed,omitempty"`
+	NewPromptImage string `json:"new_prompt_image,omitempty"`
+	PromptWritten  bool   `json:"prompt_written,omitempty"`
+	// A mismatch with a prompt that has matched, not yet acted on: the
+	// mismatches in a row so far (the prompt is replaced at
+	// replaceAfterMisses)
+	Misses   int  `json:"misses,omitempty"`
+	Deferred bool `json:"deferred,omitempty"`
+	// The distractor boxes whose crops were written to the live directory,
+	// their files there, and why any of the model's were skipped
+	DistractorBoxes  []boxRef `json:"distractor_boxes,omitempty"`
+	Distractors      []string `json:"distractors,omitempty"`
+	DistractorErrors []string `json:"distractor_errors,omitempty"`
+	Error            string   `json:"error,omitempty"`
+	Elapsed          float64  `json:"elapsed,omitempty"`
 }
 
 // deployRecord is what auto_deploy did with a section's mission.
@@ -216,6 +250,9 @@ func (s *Service) checkTarget(r *run, meta session, row section, ref boxRef, lab
 	if meta.Settings.Verifier == "" {
 		return check
 	}
+	// One check at a time, so the mismatches in a row are counted in order
+	r.target.mu.Lock()
+	defer r.target.mu.Unlock()
 	if label.Box == nil {
 		return fail(errors.New("the detection has no box"))
 	}
@@ -254,6 +291,23 @@ func (s *Service) checkTarget(r *run, meta session, row section, ref boxRef, lab
 		}
 		check.Match = &match
 		if match {
+			r.target.matched, r.target.misses = true, 0
+			// The prompt stays; its distractors are added only if it has none,
+			// since each change makes the verifier describe it again and
+			// box_rerank start learning over
+			if dir != "" && len(liveDistractors(dir)) == 0 {
+				if err := s.writeDistractors(r, meta, row, ref, label, images, check, false); err != nil {
+					return fail(err)
+				}
+			}
+			return check
+		}
+		r.target.misses++
+		check.Misses = r.target.misses
+		if r.target.matched && r.target.misses < replaceAfterMisses {
+			check.Deferred = true
+			s.log.Info().Str("vehicle", meta.Vehicle).Int("misses", r.target.misses).
+				Msg("inferred mission: the tracked object isn't the verifier's prompt, which has matched; kept for now")
 			return check
 		}
 	}
@@ -267,25 +321,199 @@ func (s *Service) checkTarget(r *run, meta session, row section, ref boxRef, lab
 	check.NewPromptImage = "new_prompt.jpg"
 	_ = os.WriteFile(filepath.Join(r.sectionDir(row.Index), check.NewPromptImage), tight, 0o600)
 	if dir != "" {
+		// The new target's distractors before the prompt, so the verifier
+		// reads both at once; the old target's are set aside
+		if err := s.writeDistractors(r, meta, row, ref, label, images, check, true); err != nil {
+			return fail(err)
+		}
+		// Its class just before it, as the verifier's class prompt
+		if err := writeWhole(dir, liveClassFile, []byte(label.Class+"\n")); err != nil {
+			return fail(fmt.Errorf("could not write %s: %w", liveClassFile, err))
+		}
 		if err := writeLivePromptImage(dir, tight); err != nil {
 			return fail(err)
 		}
 		check.PromptWritten = true
+		r.target.matched, r.target.misses = false, 0
 		s.log.Info().Str("vehicle", meta.Vehicle).Str("class", label.Class).
 			Msg("inferred mission: the tracked object isn't the verifier's prompt; its crop is the new image prompt")
 	}
 	return check
 }
 
-// livePrompt is the verifier's prompt in its live directory dir: the text of
-// prompt.txt, or the model's description of the image prompt (the verifier
-// describes it the same way, with image_descriptive), and the file's name; ""
-// if there is none.
+// writeDistractors writes the crops of the section's distractor boxes (the
+// vision model's, of the target's class, not overlapping the target) to the
+// verifier's live directory as d<N>.jpg, setting aside the ones there first
+// if replace is set, and records them in check. Boxes it can't use are
+// recorded and skipped; an error is for the directory.
+func (s *Service) writeDistractors(r *run, meta session, row section, target boxRef, label detectorLabel,
+	images []nl2dsl.Image, check *targetCheck, replace bool) error {
+	dir := meta.Settings.VerifierLiveDir
+	var crops [][]byte
+	skip := func(ref boxRef, why string) {
+		check.DistractorErrors = append(check.DistractorErrors, fmt.Sprintf("frame %d box %d: %s", ref.Frame, ref.Box, why))
+	}
+	for _, ref := range row.DistractorBoxes {
+		if len(crops) == maxDistractors {
+			skip(ref, "too many distractors")
+			continue
+		}
+		if ref == target {
+			skip(ref, "it is the target")
+			continue
+		}
+		d, err := trackedBox(row.Evidence, &ref)
+		if err != nil {
+			skip(ref, err.Error())
+			continue
+		}
+		if d.Box == nil || !strings.EqualFold(strings.TrimSpace(d.Class), strings.TrimSpace(label.Class)) {
+			skip(ref, fmt.Sprintf("not a %s with a box", label.Class))
+			continue
+		}
+		if ref.Frame == target.Frame && label.Box != nil && iou(*d.Box, *label.Box) > maxDistractorIoU {
+			skip(ref, "it overlaps the target")
+			continue
+		}
+		if ref.Frame < 1 || ref.Frame > len(images) {
+			skip(ref, "no image for its frame")
+			continue
+		}
+		frame, err := jpeg.Decode(bytes.NewReader(images[ref.Frame-1].JPEG))
+		if err != nil {
+			skip(ref, "could not decode its frame")
+			continue
+		}
+		crop, err := encodeJPEG(enlarge(cropAround(frame, *d.Box, describeMargin, false), enlargeMinSide))
+		if err != nil {
+			skip(ref, err.Error())
+			continue
+		}
+		crops = append(crops, crop)
+		check.DistractorBoxes = append(check.DistractorBoxes, ref)
+	}
+	if replace {
+		if err := setAsideDistractors(dir); err != nil {
+			return err
+		}
+	}
+	for i, crop := range crops {
+		// Kept beside the section's record too, for review
+		_ = os.WriteFile(filepath.Join(r.sectionDir(row.Index), fmt.Sprintf("distractor_%d.jpg", i+1)), crop, 0o600)
+		name, err := writeLiveDistractor(dir, crop)
+		if err != nil {
+			return err
+		}
+		check.Distractors = append(check.Distractors, name)
+	}
+	if len(crops) > 0 {
+		s.log.Info().Str("vehicle", meta.Vehicle).Strs("distractors", check.Distractors).
+			Msg("inferred mission: wrote the tracked object's distractors for the verifier")
+	}
+	return nil
+}
+
+// iou is the intersection over union of the boxes a and b.
+func iou(a, b [4]float64) float64 {
+	w := math.Min(a[2], b[2]) - math.Max(a[0], b[0])
+	h := math.Min(a[3], b[3]) - math.Max(a[1], b[1])
+	if w <= 0 || h <= 0 {
+		return 0
+	}
+	inter := w * h
+	union := (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter
+	if union <= 0 {
+		return 0
+	}
+	return inter / union
+}
+
+// liveDistractors is the names of the distractor files in dir.
+func liveDistractors(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && distractorFile.MatchString(e.Name()) {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
+// setAsideDistractors renames dir's distractors to replaced-<stamp>-<name>.
+func setAsideDistractors(dir string) error {
+	stamp := time.Now().UTC().Format("20060102T150405")
+	for _, name := range liveDistractors(dir) {
+		err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, "replaced-"+stamp+"-"+name))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("could not set aside the distractor %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// writeLiveDistractor writes the JPEG image to dir as d<N>.jpg, N one more
+// than the highest there, whole, and returns its name.
+func writeLiveDistractor(dir string, jpegData []byte) (string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("could not make the verifier's live directory: %w", err)
+	}
+	next := 1
+	for _, name := range liveDistractors(dir) {
+		if n, err := strconv.Atoi(distractorFile.FindStringSubmatch(name)[1]); err == nil && n >= next {
+			next = n + 1
+		}
+	}
+	name := fmt.Sprintf("d%d.jpg", next)
+	if err := writeWhole(dir, name, jpegData); err != nil {
+		return "", fmt.Errorf("could not write the distractor %s: %w", name, err)
+	}
+	return name, nil
+}
+
+// writeWhole writes data to dir/name through a temporary file renamed into
+// place, so a reader never sees half of it.
+func writeWhole(dir, name string, data []byte) error {
+	temp, err := os.CreateTemp(dir, ".write-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(temp.Name())
+	_, err = temp.Write(data)
+	if closeErr := temp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(temp.Name(), filepath.Join(dir, name))
+	}
+	return err
+}
+
+// livePrompt is the verifier's prompt in its live directory dir, and the file
+// it was read from: the verifier's own text (description.txt) if it wrote it
+// since the prompt last changed; else the text of prompt.txt, or the model's
+// description of the image prompt (as the verifier describes it with
+// image_mode "descriptive"); "" if there is none.
 func (s *Service) livePrompt(ctx context.Context, model ollama, dir string) (string, string, error) {
 	var newest os.FileInfo
 	for _, name := range livePromptImages {
 		if info, err := os.Stat(filepath.Join(dir, name)); err == nil && (newest == nil || info.ModTime().After(newest.ModTime())) {
 			newest = info
+		}
+	}
+	prompt := newest
+	if prompt == nil {
+		prompt, _ = os.Stat(filepath.Join(dir, livePromptText))
+	}
+	if described, err := os.Stat(filepath.Join(dir, liveDescription)); err == nil && prompt != nil &&
+		!described.ModTime().Before(prompt.ModTime()) {
+		if data, err := os.ReadFile(filepath.Join(dir, liveDescription)); err == nil {
+			if text := strings.TrimSpace(string(data)); text != "" {
+				return text, liveDescription, nil
+			}
 		}
 	}
 	if newest == nil {

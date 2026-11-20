@@ -53,7 +53,7 @@ default = ""
 [[args]]
 name = "verifier_live_dir"
 type = "string"
-description = "Absolute path of the cliped verifier's live directory, whose prompt.jpg is replaced with a crop of the tracked box when the verifier's model says it isn't the prompt; give the verifier image_descriptive = true, so it describes the crop's colors and features"
+description = "Absolute path of the cliped verifier's live directory, whose prompt.jpg is replaced with a crop of the tracked box when the verifier's model says it isn't the prompt; the crops of other objects of its class the vision model names are written beside it as d1.jpg, d2.jpg, ...; give the verifier image_mode = \"contrastive\", so it describes what sets the crop apart from them"
 default = ""
 
 [[args]]

@@ -68,7 +68,8 @@ VERIFIER_DEFAULTS = {
     "live": "",
     "heartbeat": 1.0,
     "num_ctx": 4096,
-    "image_descriptive": False,
+    "image_mode": "class",
+    "distractors": [],
     "yes_conf": 0.7,
     "no_conf": 0.9,
 }
@@ -287,8 +288,13 @@ def parse_verifier_args(content):
         raise ConfigError(f"timeout_ms must be a positive number, not {timeout!r}")
     if not isinstance(args["log_tiles"], bool):
         raise ConfigError("log_tiles must be true or false")
-    if not isinstance(args["image_descriptive"], bool):
-        raise ConfigError("image_descriptive must be true or false")
+    if args["image_mode"] not in ("class", "descriptive", "contrastive"):
+        raise ConfigError(f"image_mode must be \"class\", \"descriptive\" or \"contrastive\", "
+                          f"not {args['image_mode']!r}")
+    distractors = args["distractors"]
+    if not isinstance(distractors, list) or not all(isinstance(d, str) and d.strip() for d in distractors):
+        raise ConfigError(f"distractors must be a list of image files, not {distractors!r}")
+    args["distractors"] = [d.strip() for d in distractors]
     _positive_int(args, "min_side", 0)
     _positive_int(args, "num_ctx", 0)
     _number(args, "heartbeat", 0, 3600, low_open=True)
@@ -446,12 +452,16 @@ def build_rerank(args, detector, verifier, *, image=None, tile_log=None):
                         confirmations=args["confirmations"], max_learned=args["max_learned"],
                         good_similarity=args["good_similarity"], good_confirmations=args["good_confirmations"])
 
-    def gate_for(t):
-        return InstanceGate(t, extra[0]) if args["gate"] else None
+    def gate_for(t, c=None):
+        return InstanceGate(t, extra[0] if c is None else c) if args["gate"] else None
 
-    def retarget(text):
+    def retarget(text, class_prompt=None):
+        # The verifier's class prompt for the gate if it sent one, else class_prompt
         t, _ = text_vectors(text_encoder, text, args["backgrounds"])
-        return selector_for(t), gate_for(t)
+        c = None
+        if args["gate"] and class_prompt:
+            c, _ = text_vectors(text_encoder, class_prompt, args["backgrounds"])
+        return selector_for(t), gate_for(t, c)
 
     gate = gate_for(t) if has_prompt else None
     if args["gate"]:
@@ -559,6 +569,7 @@ def main_verifier(name):
         args = parse_verifier_args(os.environ.get("STEELEAGLE_PLUGIN_ARGS"))
         image = image_path(args)
         reference = load_image(image) if image is not None else None
+        distractors = [(name, load_image(resolve(files_dir(), name))) for name in args["distractors"]]
         log = tile_log(args, name)
         live = LiveDir(resolve_dir(files_dir(), args["live"])) if args["live"] else None
     except (ConfigError, FilesError, ValueError) as err:
@@ -571,12 +582,15 @@ def main_verifier(name):
         sys.exit(f"Ollama at {ollama.host} can't serve {args['model']}: {err}")
     vlog = logging.getLogger("cliped.verifier")
     vlog.info("asking %s at %s", args["model"], ollama.host)
-    if "image_mode" in args:
-        vlog.warning("image_mode is no longer an arg: the prompt is always text, an image's kind or, with "
-                     "image_descriptive, its description; ignoring image_mode = %r", args["image_mode"])
+    if "image_descriptive" in args:
+        vlog.warning("image_descriptive is no longer an arg: image_mode = \"descriptive\" is what true was; "
+                     "ignoring image_descriptive = %r", args["image_descriptive"])
+    if distractors and args["image_mode"] != "contrastive":
+        vlog.warning("distractors are only shown with image_mode = \"contrastive\"; this is %r",
+                     args["image_mode"])
     verifier = Verifier(ollama.ask, label=args["image"] or args["prompt"], reference=reference, tile_log=log,
                         question=args["question"] or None, min_side=args["min_side"],
-                        image_descriptive=args["image_descriptive"], yes_conf=args["yes_conf"],
+                        image_mode=args["image_mode"], distractors=distractors, yes_conf=args["yes_conf"],
                         no_conf=args["no_conf"])
     keeper = PromptKeeper(verifier, live=live, load_image=load_image, interval_s=args["heartbeat"])
     if live is not None:

@@ -12,7 +12,7 @@ default = ""
 [[args]]
 name = "image"
 type = "string"
-description = "An image of what to look for, instead of prompt: a file in the daemon's files directory (STEELEAGLE_FILES), e.g. \"target.jpg\". The model turns it into a text prompt once (see image_descriptive), and is never shown it with a frame. With both set, image is used"
+description = "An image of what to look for, instead of prompt: a file in the daemon's files directory (STEELEAGLE_FILES), e.g. \"target.jpg\". The model turns it into a text prompt once (see image_mode), and is never shown it with a frame. With both set, image is used"
 default = ""
 
 [[args]]
@@ -40,10 +40,16 @@ description = "The question asked about each frame, instead of the default one; 
 default = ""
 
 [[args]]
-name = "image_descriptive"
-type = "boolean"
-description = "How an image prompt becomes the text prompt, of the verifier and of CLIP (box_rerank follows it through the heartbeat): true asks the model for a short description of what it shows, with its noticeable colors and features visible from far above (e.g. \"Mannequin in dark green shirt and black pants\"), to tell an individual from others of its kind; false, just its kind (e.g. \"a quadruped robot dog\", \"a person\"), which rejects look-alikes of other kinds best (on live crops of a robot dog, its kind said yes to 4 of 80 others, a detailed description to 43). No effect on a text prompt"
-default = false
+name = "image_mode"
+type = "string"
+description = "How an image prompt becomes the text prompt, of the verifier and of CLIP (box_rerank follows it through the heartbeat): \"class\", just its kind (e.g. \"a quadruped robot dog\", \"a person\"), which rejects look-alikes of other kinds best (on live crops of a robot dog, its kind said yes to 4 of 80 others, a detailed description to 43); \"descriptive\", a short description of what it shows, with its noticeable colors and features visible from far above (e.g. \"Mannequin in dark green shirt and black pants\"), to tell an individual from others of its kind; \"contrastive\", a description of the colors and features that set it apart from the distractors (see distractors; descriptive's while there are none). No effect on a text prompt"
+default = "class"
+
+[[args]]
+name = "distractors"
+type = "array"
+description = "With image_mode \"contrastive\": images of other things of the target's kind to tell it apart from, files in STEELEAGLE_FILES, e.g. [\"other_person.jpg\"]. The live directory's d1.jpg, d2.jpg, ... join them, and the image is described again when they change; at most the 5 newest are shown"
+default = []
 
 [[args]]
 name = "min_side"

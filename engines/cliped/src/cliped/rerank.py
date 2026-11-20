@@ -31,6 +31,7 @@ a time, as cliped's does, and each RESULT of the verifier is learned. The
 frames themselves never wait on the verifier.
 """
 import csv
+import json
 import logging
 import math
 import time
@@ -187,6 +188,23 @@ class CandidateLog:
         self._file.close()
 
 
+def read_prompt(text):
+    """The text prompt and class prompt of the verifier's heartbeat `text`:
+    JSON {"class", "description"}, the description CLIP ranks by (else the
+    class) and the class for the gate (None if it has none, or the same
+    text); or, from a verifier before the JSON, the text prompt alone."""
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return text, None
+    if not isinstance(payload, dict):
+        return text, None
+    clean = lambda value: " ".join(value.split()) if isinstance(value, str) else ""
+    description, class_prompt = clean(payload.get("description")), clean(payload.get("class"))
+    prompt = description or class_prompt
+    return prompt, (class_prompt if class_prompt and class_prompt.lower() != prompt.lower() else None)
+
+
 class Reranker:
     """Decides each frame from the detector's result and what the verifier
     said. `encoder` embeds crops, `selector` (clip.Selector, with learning)
@@ -224,9 +242,11 @@ class Reranker:
         self.gate = gate
         # The text prompt (None for an image or none), whether there is a
         # prompt at all (without one, boxes are ranked by confidence), and
-        # retarget(text), which gives a new selector and gate for the text
-        # prompt `text`, for the verifier's prompt (on_prompt)
+        # retarget(text, class_prompt), which gives a new selector and gate
+        # for the text prompt `text` (the gate over `class_prompt`, or this
+        # engine's own for None), for the verifier's prompt (on_prompt)
         self.prompt = prompt
+        self.class_prompt = None
         self.has_prompt = has_prompt
         self.retarget = retarget
         # Whether to keep the configured prompt whatever the verifier's is
@@ -349,33 +369,37 @@ class Reranker:
         except UnicodeDecodeError:
             logger.warning("the verifier's prompt heartbeat isn't UTF-8; ignoring it")
             return True
-        self.on_prompt(text)
+        self.on_prompt(*read_prompt(text))
         return True
 
-    def on_prompt(self, text):
-        """Switches to the text prompt `text`, the verifier's, if it isn't
-        the current one, and starts learning over: what the verifier said
-        about the old prompt says nothing about the new one. The crops
-        waiting for the verifier are dropped; answers about the ones in
-        flight are not learned from. Returns whether it switched."""
-        text = " ".join(text.split())
-        if not text or text == self.prompt:
+    def on_prompt(self, text, class_prompt=None):
+        """Switches to the text prompt `text`, the verifier's, with its class
+        prompt `class_prompt` (for the gate; None for this engine's own), if
+        either isn't the current one, and starts learning over: what the
+        verifier said about the old prompt says nothing about the new one.
+        The crops waiting for the verifier are dropped; answers about the
+        ones in flight are not learned from. Returns whether it switched."""
+        text = " ".join((text or "").split())
+        class_prompt = " ".join((class_prompt or "").split()) or None
+        if not text or (text == self.prompt and class_prompt == self.class_prompt):
             return False
         if self.retarget is None:
             logger.warning("the verifier's prompt is %r, but this reranker can't switch prompts", text)
             self.prompt = text  # warn once
             return False
         old = self.prompt
-        self.selector, gate = self.retarget(text)
+        self.selector, gate = self.retarget(text, class_prompt)
         if self.gate is not None or gate is not None:
             self.gate = gate
-        self.prompt, self.has_prompt = text, True
+        self.prompt, self.class_prompt, self.has_prompt = text, class_prompt, True
         self.generation += 1
         dropped = self.queue.rescore(lambda tile: (False, tile.score, False))
         self._answered = []
         self.answers = Counter()
-        logger.info("prompt: now %r (was %s), the verifier's; learning cleared, %d waiting crops dropped",
-                    text, "none" if old is None else repr(old), len(dropped))
+        logger.info("prompt: now %r (was %s), the verifier's%s; learning cleared, %d waiting crops dropped",
+                    text, "none" if old is None else repr(old),
+                    f", over its class {class_prompt!r}" if class_prompt and self.gate is not None else "",
+                    len(dropped))
         return True
 
     @property

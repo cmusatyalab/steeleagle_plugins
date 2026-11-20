@@ -248,14 +248,26 @@ auto_deploy = true
   never names an engine: the GCS binds the Track detector.
 - With `verifier`, the GCS asks that model (at `OLLAMA_HOST`, else
   `localhost:11434`) the verifier's box question about that box, against the
-  prompt in `verifier_live_dir` (`prompt.txt`, or the description of
-  `prompt.jpg`). If it says no, or there is no prompt, it writes a crop of the
+  prompt in `verifier_live_dir`: the verifier's own text of it,
+  `description.txt`, if the verifier has written it since the prompt changed,
+  else `prompt.txt`, or the GCS's description of `prompt.jpg`. If it says no, or there is no prompt, it writes a crop of the
   box to `prompt.jpg` (an image wins over `prompt.txt`), setting any
-  `prompt.jpeg` aside. The verifier turns it into text (give it
-  `image_descriptive = true`, so the text is a short description of the box's
-  colors and features rather than just its kind), and box_rerank follows its
-  heartbeat. The section's History records the check; `target.png` beside its
-  record is the crop checked, and `new_prompt.jpg` the one written.
+  `prompt.jpeg` aside, with the box's detector class just before it as
+  `class.txt`, which the verifier takes as the image's kind (its class prompt
+  for box_rerank's gate). A prompt a tracked box has matched is replaced only
+  after two mismatches in a row, so one section whose framing the vision
+  model misread doesn't undo it; the check records the deferred mismatch. The model also names `distractor_boxes`, up to three
+  other detections of the target's class in the section (e.g. bystanders); the
+  GCS writes their crops beside the prompt as `d1.jpg`, `d2.jpg`, ... after
+  setting the old target's aside (and, while the prompt stays, only if there
+  are none yet, since each change restarts box_rerank's learning). The
+  verifier turns the prompt into text (give it `image_mode = "contrastive"`,
+  so the text names the colors and features that set the box apart from the
+  distractors, or `"descriptive"` for a description of the box alone, rather
+  than just its kind), and box_rerank follows its heartbeat. The section's
+  History records the check; `target.png` beside its record is the crop
+  checked, `new_prompt.jpg` the one written, and `distractor_N.jpg` the
+  distractors.
 - `auto_deploy` is off by default. When on, each live section's compiled
   mission (including the wait-and-return fallback) is sent to the vehicle with
   `CompileMission`, compiled there as `inferred_mission` and loaded, and the

@@ -52,6 +52,7 @@ type section struct {
 	VisionReply          string           `json:"vision_reply,omitempty"`
 	VisionEvidence       string           `json:"vision_evidence,omitempty"`
 	TargetBox            *boxRef          `json:"target_box,omitempty"`
+	DistractorBoxes      []boxRef         `json:"distractor_boxes,omitempty"`
 	Target               *targetCheck     `json:"tracked_target,omitempty"`
 	Deploy               *deployRecord    `json:"deploy,omitempty"`
 	DSLReference         map[string]any   `json:"dsl_reference,omitempty"`
@@ -137,6 +138,17 @@ type run struct {
 	frameCount int
 	notice     string
 	live       *liveInput
+	// The verifier's prompt as the tracked boxes have checked against it
+	// (checkTarget), under its own lock: checks take seconds
+	target targetState
+}
+
+type targetState struct {
+	mu sync.Mutex
+	// Whether a tracked box has matched the prompt since it was written, and
+	// the mismatches in a row since the last match
+	matched bool
+	misses  int
 }
 
 func (r *run) sectionDir(index int) string {

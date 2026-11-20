@@ -375,8 +375,8 @@ def retargeting_reranker(**kwargs):
     vectors = {"a robot dog": np.array([0.0, 1.0, 0.0]), "a blue chair": np.array([0.0, 0.0, 1.0])}
     switched = []
 
-    def retarget(text):
-        switched.append(text)
+    def retarget(text, class_prompt=None):
+        switched.append(text if class_prompt is None else (text, class_prompt))
         return Selector(vectors[text], np.array([[1.0, 0.0, 0.0]]), learn=True, similarity=0.85, confirmations=2,
                         good_similarity=0.9, good_confirmations=2), None
 
@@ -430,6 +430,36 @@ def test_answers_about_crops_sent_for_the_old_prompt_are_not_learned():
                         .SerializeToString(), at_ns=0, offered_at_ns=None, received_at_ns=None)
     r.on_queue_event(event, now=2)
     assert not r.selector.good and r.answers["yes"] == 0
+
+
+def test_a_json_heartbeat_ranks_by_its_description_over_its_class():
+    r, switched = retargeting_reranker(prompt="a robot dog")
+    heartbeat = json.dumps({"class": "a robot dog", "description": "a blue chair"})
+    assert r.on_prompt_event(prompt_event(heartbeat))
+    assert switched == [("a blue chair", "a robot dog")] and r.prompt == "a blue chair"
+    assert r.class_prompt == "a robot dog" and r.generation == 1
+    # The same again changes nothing; a new class alone switches
+    assert r.on_prompt_event(prompt_event(heartbeat)) and r.generation == 1
+    r.on_prompt_event(prompt_event(json.dumps({"class": "a chair", "description": "a blue chair"})))
+    assert switched[-1] == ("a blue chair", "a chair") and r.generation == 2
+
+
+def test_a_json_heartbeat_without_a_description_ranks_by_its_class():
+    r, switched = retargeting_reranker(prompt="a robot dog")
+    assert r.on_prompt_event(prompt_event(json.dumps({"class": "a blue chair", "description": None})))
+    # Its class is its text: no class prompt of its own for the gate
+    assert switched == ["a blue chair"] and r.class_prompt is None
+
+
+def test_read_prompt_takes_json_or_old_plain_text():
+    from cliped.rerank import read_prompt
+
+    assert read_prompt('{"class": "a person", "description": " person in  black hoodie "}') == \
+        ("person in black hoodie", "a person")
+    assert read_prompt('{"class": null, "description": "moving"}') == ("moving", None)
+    assert read_prompt('{"class": "A person", "description": "a person"}') == ("a person", None)
+    assert read_prompt("a robot dog") == ("a robot dog", None)
+    assert read_prompt("42") == ("42", None)
 
 
 def test_heartbeats_of_other_engines_or_types_are_ignored():

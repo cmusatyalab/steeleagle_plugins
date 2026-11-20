@@ -3,11 +3,14 @@
 if it does and drops it if not.
 
 The prompt is always text. A reference image is turned into text once, when
-it is set: with image_descriptive, a short description of what it shows with
-its noticeable colors and distinguishing features visible from far above
-(DESCRIPTIVE_QUESTION, e.g. "Mannequin in dark green shirt and black pants");
-without, just what kind of thing it is (CATEGORY_QUESTION, e.g. "a quadruped
-robot dog"). The model is never shown the image with a frame.
+it is set, by image_mode: "class", just what kind of thing it is
+(CATEGORY_QUESTION, e.g. "a quadruped robot dog"); "descriptive", a short
+description of what it shows with its noticeable colors and distinguishing
+features visible from far above (DESCRIPTIVE_QUESTION, e.g. "Mannequin in dark
+green shirt and black pants"); or "contrastive", a description that tells it
+apart from distractors, images of other things of its kind to avoid
+(CONTRASTIVE_QUESTION; descriptive's while there are none). The model is never
+shown the image with a frame.
 
 The answer is read from the model's probabilities of yes and no for its
 first token: a yes at least yes_conf likely, a no at least no_conf likely,
@@ -22,10 +25,19 @@ decides.
 
 With a live directory (LiveDir), the question and the prompt can change while
 it runs: question.txt, and prompt.txt or prompt.jpg/.jpeg, are read when it
-starts and again whenever they change. Every heartbeat (PromptKeeper), it
-publishes a DERIVED event of type PROMPT_TYPE holding the text prompt as
-UTF-8, the image's text for an image. box_rerank follows it, so CLIP ranks
-its boxes by the verifier's prompt and starts learning over when it changes.
+starts and again whenever they change, and so are the distractors d<N>.jpg,
+which join the distractors arg's. class.txt, written with an image (the GCS
+writes the tracked box's detector class there just before prompt.jpg), is
+that image's kind, so the model isn't asked it. The text prompt it verifies against (the
+image's text for an image) is written there as description.txt whenever it
+changes, so the GCS checks a tracked box against the same text. Every heartbeat (PromptKeeper), it
+publishes a DERIVED event of type PROMPT_TYPE holding, as UTF-8 JSON, the
+prompt's class (an image's kind, from CATEGORY_QUESTION; null for a text
+prompt) and its description (the text prompt, or an image's description with
+image_mode "descriptive" or "contrastive"; null with "class"). box_rerank
+follows it: CLIP ranks its boxes by the description, else the class, its gate
+measures likeness to that over the class, and it starts learning over when
+either changes.
 
 Nothing here imports torch: the verifier runs on a server without the edge
 filter's models.
@@ -34,6 +46,7 @@ import base64
 import json
 import logging
 import math
+import re
 import time
 import urllib.error
 import urllib.request
@@ -58,8 +71,8 @@ DEFAULT_HOST = "http://localhost:11434"
 MAX_OUTPUT_SIZE = 64 << 10
 # How long pulling the model may take, the first time it runs on a server
 PULL_TIMEOUT_S = 3600
-# The type of the heartbeat's DERIVED events: the prompt's description, as
-# UTF-8 text
+# The type of the heartbeat's DERIVED events: UTF-8 JSON {"class": ...,
+# "description": ...} (heartbeat_payload)
 PROMPT_TYPE = "cliped/Prompt"
 # Seconds between heartbeats
 HEARTBEAT_S = 1.0
@@ -68,7 +81,20 @@ HEARTBEAT_S = 1.0
 QUESTION_FILE = "question.txt"
 PROMPT_TEXT_FILE = "prompt.txt"
 PROMPT_IMAGE_FILES = ("prompt.jpg", "prompt.jpeg")
-# Asked about an image prompt once, with image_descriptive: what it shows, with
+# An image prompt's class (e.g. "person"), written with it; taken as its kind
+# when it is at most CLASS_FILE_MAX_AGE_S older than the image
+CLASS_FILE = "class.txt"
+CLASS_FILE_MAX_AGE_S = 10.0
+# The verifier's text prompt, which it writes to the live directory
+DESCRIPTION_FILE = "description.txt"
+# The live directory's distractors: d1.jpg, d2.jpg, ...
+DISTRACTOR_PATTERN = re.compile(r"d(\d+)\.jpe?g")
+# The modes of turning an image prompt into text
+IMAGE_MODES = ("class", "descriptive", "contrastive")
+# The most distractors shown with the prompt image, the newest: each costs
+# the model an image's tokens, and NUM_CTX holds a few at REFERENCE_MAX_SIDE
+MAX_DISTRACTORS = 5
+# Asked about an image prompt once, with image_mode "descriptive": what it shows, with
 # its noticeable colors and the features visible from far above, as the text
 # prompt of both the verifier and CLIP (box_rerank, through the heartbeat).
 # What it is doing, where it is and small details are left out: a drone
@@ -86,7 +112,7 @@ DESCRIPTIVE_QUESTION = (
     "details such as logos, brands, text, small patterns, shoes and accessories. Answer with the phrase only, "
     "under 12 words."
 )
-# Asked about an image prompt once, without image_descriptive: the kind of
+# Asked about an image prompt once, with image_mode "class": the kind of
 # thing it shows, in a few words. Asking whether a crop is a kind of thing
 # rejects look-alikes of other kinds: on 147 labeled live crops of a robot dog
 # (Qwen3-VL 30B-A3B), a photo of the dog was named "a quadruped robot dog",
@@ -94,11 +120,27 @@ DESCRIPTIVE_QUESTION = (
 # itself, shown with each crop, to 53 and 25, and a detailed description
 # ("a gray quadruped robot dog with white markings and black feet") to 67 and
 # 43. It can't tell individuals of one kind apart (two people are both "a
-# person"): image_descriptive is for that.
+# person"): "descriptive" and "contrastive" are for that.
 CATEGORY_QUESTION = (
     "Name what kind of object or person this image shows, in 2 to 5 words, e.g. 'a person' or "
     "'a quadruped robot dog'. Name only its kind, not its colors, markings or parts. "
     "Answer with the phrase only."
+)
+# Asked about an image prompt once, with image_mode "contrastive" and
+# distractors: the first image is the target, the rest ({n} of them) other
+# things of its kind the drone must not confuse with it. The description is
+# CLIP's prompt too, and CLIP can't read negation ("not in a gray shirt" ranks
+# gray shirts up), so it names what sets the target apart, never what it isn't.
+CONTRASTIVE_QUESTION = (
+    "The first image shows the target: a person or object to find in low-resolution photos taken by a drone from "
+    "far above. The other {n} image(s) show distractors: other people or objects of the same kind nearby, which "
+    "must not be confused with the target. Write a short phrase describing the target for CLIP, an image-text "
+    "model that finds images matching a phrase. CLIP does not understand negation, so never say what the target "
+    "is not and never mention the distractors. Instead, say what the target is, then name the colors and "
+    "features of the target that differ from the distractors, as specifically as you can (for example 'blue "
+    "jeans' rather than 'light pants'), only ones large enough to see from far away. Leave out what it is doing, "
+    "where it is and the background, and small details such as logos, brands, text, shoes and accessories. "
+    "Answer with the phrase only, under 12 words."
 )
 # Tokens a description may take
 DESCRIBE_TOKENS = 40
@@ -247,6 +289,15 @@ def clean_description(text):
     return " ".join(text.split()).strip("\"'`*. ")
 
 
+def class_phrase(name):
+    """A class name as a prompt phrase, as box_rerank's class_prompt is
+    made: "person" -> "a person"; one with an article already as is."""
+    name = " ".join(str(name).split())
+    if not name or name.lower().split()[0] in ("a", "an", "the"):
+        return name
+    return f"a {name}"
+
+
 def parse_answer(answer):
     """True for a yes, False for a no, None for anything else."""
     word = answer.strip().lstrip("*\"'`").lower()
@@ -291,11 +342,16 @@ class Verifier:
     """Decides whether inputs match the prompt. `ask(question, images,
     max_tokens=..., scores=...)` is the model (Ollama.ask). With `reference`,
     an encoded image file named `label`, the prompt is the model's text for
-    the image: with `image_descriptive`, a short description of it
-    (DESCRIPTIVE_QUESTION), else its kind (CATEGORY_QUESTION), asked as soon
-    as the image is set, at startup or from the live directory; if the model
-    can't be asked then, the next frame or heartbeat asks again. Without one,
-    the prompt is the text `label`.
+    the image, by `image_mode` (IMAGE_MODES): its kind (CATEGORY_QUESTION),
+    a short description (DESCRIPTIVE_QUESTION), or a description that tells it
+    apart from the distractors (CONTRASTIVE_QUESTION; descriptive's while there
+    are none), asked as soon as the image is set, at startup or from the live
+    directory, and with "contrastive" again when the distractors change; if
+    the model can't be asked then, the next frame or heartbeat asks again.
+    Without one, the prompt is the text `label`.
+
+    `distractors` is a list of (name, encoded image) always shown with a
+    contrastive question; set_live_distractors adds the live directory's.
 
     `tile_log` (files.TileLog), if given, gets each input and each frame
     forwarded. `question`, if given, replaces TEXT_QUESTION, with {prompt} in
@@ -310,19 +366,24 @@ class Verifier:
     learned from. Both are over 0.5 and at most 1. If the model gives no
     probabilities, its word decides.
 
-    `description` is the text prompt, for the heartbeat and the question: the
-    label of a text prompt, or the image's text once the model has given it
-    (None until then)."""
+    `description` is the text prompt, for the question and CLIP: the label of
+    a text prompt, or the image's text once the model has given it (None
+    until then). `kind` is an image's kind (CATEGORY_QUESTION), CLIP's class
+    prompt, asked in every image_mode; None for a text prompt."""
 
     def __init__(self, ask, *, label, reference=None, tile_log=None, question=None, min_side=0,
-                 image_descriptive=False, yes_conf=YES_CONF, no_conf=NO_CONF):
+                 image_mode="class", distractors=(), yes_conf=YES_CONF, no_conf=NO_CONF):
         for name, value in (("yes_conf", yes_conf), ("no_conf", no_conf)):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.5 < value <= 1:
                 raise ValueError(f"{name} must be over 0.5 and at most 1, not {value!r}")
+        if image_mode not in IMAGE_MODES:
+            raise ValueError(f"image_mode must be one of {', '.join(IMAGE_MODES)}, not {image_mode!r}")
         self.ask = ask
         self.tile_log = tile_log
         self.min_side = min_side
-        self.image_descriptive = image_descriptive
+        self.image_mode = image_mode
+        self.distractors = list(distractors)
+        self.live_distractors = []
         self.yes_conf = yes_conf
         self.no_conf = no_conf
         self.frames = 0
@@ -336,11 +397,16 @@ class Verifier:
     def has_prompt(self):
         return self.reference is not None or bool(self.label)
 
-    def set_prompt(self, label, reference=None):
+    def set_prompt(self, label, reference=None, kind=None):
         """Verifies against the text of the image `reference` (encoded), named
-        `label`, from now on, or the text `label` without one."""
+        `label`, from now on, or the text `label` without one. `kind` is the
+        image's kind if known (e.g. "person", from the GCS's class.txt), so
+        the model isn't asked it."""
         self.label = label
         self.reference = reference
+        self.kind = class_phrase(kind) if reference is not None and kind else None
+        if self.kind:
+            logger.info("the image %s is %r: CLIP's class prompt (given)", label, self.kind)
         self.description = None if reference is not None else (label or None)
         if reference is not None:
             try:
@@ -352,18 +418,61 @@ class Verifier:
         """Asks `question` from now on, or the default one for None or "". """
         self.custom_question = question or None
 
+    def set_live_distractors(self, distractors):
+        """The live directory's distractors from now on, a list of (name,
+        encoded image); with "contrastive", the image is described again."""
+        self.live_distractors = list(distractors)
+        if self.image_mode == "contrastive" and self.reference is not None:
+            self.description = None
+
+    def shown_distractors(self):
+        """The distractors a contrastive question shows: the arg's, then the
+        live directory's, the newest MAX_DISTRACTORS of them."""
+        return (self.distractors + self.live_distractors)[-MAX_DISTRACTORS:]
+
     def describe_image(self):
         """The text prompt, asking the model for the image's if it has not
         given it yet. Raises OllamaError if it gives none."""
         if self.description is None and self.reference is not None:
-            question = DESCRIPTIVE_QUESTION if self.image_descriptive else CATEGORY_QUESTION
-            text = clean_description(self.ask(question, [self.reference], max_tokens=DESCRIBE_TOKENS))
+            if self.kind is None:
+                # Its kind first, in every mode: CLIP's class prompt
+                kind = clean_description(self.ask(CATEGORY_QUESTION, [self.reference], max_tokens=DESCRIBE_TOKENS))
+                if not kind:
+                    raise OllamaError(f"the model gave no kind for the image {self.label}")
+                self.kind = kind
+                if self.image_mode != "class":
+                    logger.info("the image %s is %r: CLIP's class prompt", self.label, kind)
+            if self.image_mode == "class":
+                self.description = self.kind
+                logger.info("the image %s is %r: verifying frames against that (its kind)", self.label, self.kind)
+                return self.description
+            images, how = [self.reference], ""
+            if self.image_mode == "contrastive" and (shown := self.shown_distractors()):
+                question = CONTRASTIVE_QUESTION.format(n=len(shown))
+                images += [image for _, image in shown]
+                how = f" (told apart from {', '.join(name for name, _ in shown)})"
+            else:
+                question = DESCRIPTIVE_QUESTION
+                if self.image_mode == "contrastive":
+                    how = " (no distractors yet: described alone)"
+            text = clean_description(self.ask(question, images, max_tokens=DESCRIBE_TOKENS))
             if not text:
                 raise OllamaError(f"the model gave no text for the image {self.label}")
             self.description = text
-            logger.info("the image %s is %r: verifying frames against that%s", self.label, text,
-                        "" if self.image_descriptive else " (its kind; image_descriptive describes it)")
+            logger.info("the image %s is %r: verifying frames against that%s", self.label, text, how)
         return self.description
+
+    def heartbeat_payload(self):
+        """The heartbeat's payload, UTF-8 JSON: "class", an image's kind (null
+        for a text prompt), and "description", the text CLIP ranks by when
+        set (null for an image with image_mode "class", whose kind is its
+        text); None while there is no text prompt."""
+        if not self.description:
+            return None
+        image = self.reference is not None
+        payload = {"class": self.kind if image else None,
+                   "description": None if image and self.image_mode == "class" else self.description}
+        return json.dumps(payload).encode("utf-8")
 
     def question(self, png):
         """The question about the encoded frame `png`, and the images it
@@ -482,11 +591,48 @@ class LiveDir:
     def forget_prompt(self):
         self._prompt = None
 
+    def poll_distractors(self):
+        """The distractor files (d<N>.jpg), oldest first, if the set of them
+        or any of them changed since the last poll; else None."""
+        try:
+            names = [p.name for p in self.path.iterdir() if DISTRACTOR_PATTERN.fullmatch(p.name)]
+        except OSError:
+            names = []
+        found = sorted((self._signature(name), name) for name in names)
+        found = [(signature, name) for signature, name in found if signature is not None]
+        if found == getattr(self, "_distractors", []):
+            return None
+        self._distractors = found
+        return [self.path / name for _, name in found]
+
+    def forget_distractors(self):
+        self._distractors = None
+
+    def read_class(self, image):
+        """The class written with the image prompt `image` (a path in the
+        directory): class.txt's text if it is no more than
+        CLASS_FILE_MAX_AGE_S older than the image, else None."""
+        try:
+            written = (self.path / CLASS_FILE).stat().st_mtime
+            if written < Path(image).stat().st_mtime - CLASS_FILE_MAX_AGE_S:
+                return None
+            return " ".join((self.path / CLASS_FILE).read_text(encoding="utf-8").split()) or None
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def write_description(self, text):
+        """Writes `text` to description.txt, whole (through a temporary file
+        renamed into place), so a reader never sees half of it."""
+        self.path.mkdir(parents=True, exist_ok=True)
+        temp = self.path / f".{DESCRIPTION_FILE}.tmp"
+        temp.write_text(text + "\n", encoding="utf-8")
+        temp.replace(self.path / DESCRIPTION_FILE)
+
 
 class PromptKeeper:
     """Keeps the verifier's prompt and question up to date with the live
     directory `live` (a LiveDir, or None), and gives the heartbeat's payload
-    every `interval_s` seconds: the text prompt, as UTF-8. An image prompt is
+    every `interval_s` seconds (Verifier.heartbeat_payload). An image prompt is
     read with `load_image(path)`, which returns it encoded (and raises on a
     file it can't read); the verifier turns it into text, and if that fails,
     it is asked again at the next heartbeat."""
@@ -497,6 +643,7 @@ class PromptKeeper:
         self.load_image = load_image
         self.interval_s = interval_s
         self._next = None
+        self._written = None  # the description last written to the live directory
 
     def update(self):
         """Applies what changed in the live directory, if any; returns
@@ -505,6 +652,17 @@ class PromptKeeper:
             return False
         question, prompt = self.live.poll()
         changed = False
+        distractors = self.live.poll_distractors()
+        if distractors is not None:
+            try:
+                loaded = [(path.name, self.load_image(path)) for path in distractors]
+            except Exception as err:
+                logger.warning("live: can't read a distractor (%s); trying again", err)
+                self.live.forget_distractors()
+            else:
+                self.verifier.set_live_distractors(loaded)
+                logger.info("live: distractors now %s", ", ".join(name for name, _ in loaded) or "none")
+                changed = True
         if question is not None:
             if valid_question(question):
                 self.verifier.set_question(question)
@@ -525,8 +683,10 @@ class PromptKeeper:
                     logger.warning("live: can't read %s (%s); trying again", value.name, err)
                     self.live.forget_prompt()
                 else:
-                    self.verifier.set_prompt(value.name, reference)
-                    logger.info("live: prompt now the image %s", value.name)
+                    kind = self.live.read_class(value)
+                    self.verifier.set_prompt(value.name, reference, kind=kind)
+                    logger.info("live: prompt now the image %s%s", value.name,
+                                f", of class {kind!r}" if kind else "")
                     changed = True
         return changed
 
@@ -547,7 +707,13 @@ class PromptKeeper:
         self.update()
         self._describe()
         description = self.verifier.description
-        return description.encode("utf-8") if description else None
+        if description and self.live is not None and description != self._written:
+            try:
+                self.live.write_description(description)
+                self._written = description
+            except OSError as err:
+                logger.warning("live: can't write %s: %s", DESCRIPTION_FILE, err)
+        return self.verifier.heartbeat_payload()
 
 
 def run(name, verifier, *, stop, keeper=None, on_ready=None):

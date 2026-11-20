@@ -429,6 +429,9 @@ func (s *Service) logSection(meta session, row section) {
 		if t.PromptWritten {
 			event = event.Str("new_prompt_image", t.NewPromptImage)
 		}
+		if len(t.Distractors) > 0 {
+			event = event.Strs("distractors", t.Distractors)
+		}
 		if t.Error != "" {
 			event = event.Str("target_error", t.Error)
 		}
