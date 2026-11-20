@@ -38,8 +38,9 @@ type Settings struct {
 	LocalDetector string `json:"local_detector,omitempty"`
 	// Verifier is the Ollama model (at OLLAMA_HOST, else localhost:11434)
 	// that checks the object a live run finds the vehicle tracking against
-	// the cliped verifier's prompt in VerifierLiveDir, and describes it for
-	// a new prompt when it isn't the one; empty skips the check.
+	// the cliped verifier's prompt in VerifierLiveDir, and makes a crop of it
+	// the verifier's image prompt (prompt.jpg) when it isn't the one; empty
+	// skips the check.
 	Verifier        string `json:"verifier,omitempty"`
 	VerifierLiveDir string `json:"verifier_live_dir,omitempty"`
 	// AutoDeploy sends each live section's compiled mission to the vehicle

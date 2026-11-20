@@ -99,7 +99,9 @@ class Verifier:
             event = uriel.Event(
                 kind=K.RESULT, lost=0, id=input_id(self.seq), engine=VERIFIER, flow="flow", outcome=0,
                 payload_type=GENERIC_RESULT_TYPE,
-                result=result_pb2.GenericResult(payload=json.dumps({"match": match}).encode()).SerializeToString(),
+                result=result_pb2.GenericResult(payload=json.dumps(
+                    {"match": match} if match is not None else {"match": None, "unsure": True}).encode()
+                ).SerializeToString(),
                 at_ns=0, offered_at_ns=None, received_at_ns=None)
             self.reranker.on_queue_event(event, now=now)
             answered.append((tile, match))
@@ -290,17 +292,22 @@ def test_the_verifier_enlarges_small_frames_only():
     assert args["min_side"] == 224
 
 
-def test_the_box_question_asks_about_the_reference_when_there_is_one():
-    from cliped.verifier import BOX_IMAGE_QUESTION, BOX_QUESTION, Verifier
+def test_the_box_question_asks_about_the_image_s_text_when_there_is_one():
+    from cliped.verifier import BOX_QUESTION, Verifier
 
     def asked(reference):
         model = []
-        Verifier(lambda q, images: model.append(q) or "yes", label="person.jpg" if reference else "a person",
-                 reference=reference, question="box").on_input(make_input(1, make_frame()))
-        return model[0]
 
-    assert asked(b"reference") == BOX_IMAGE_QUESTION.format(prompt="person.jpg")
-    assert asked(None) == BOX_QUESTION.format(prompt="a person")
+        def ask(q, images, max_tokens=8, scores=False):
+            model.append((q, len(images)))
+            return ("yes", 0.9, 0.1) if scores else "a person"
+        Verifier(ask, label="person.jpg" if reference else "a person",
+                 reference=reference, question="box").on_input(make_input(1, make_frame()))
+        return model[-1]
+
+    # The image is named once, then only the frame is shown
+    assert asked(b"reference") == (BOX_QUESTION.format(prompt="a person"), 1)
+    assert asked(None) == (BOX_QUESTION.format(prompt="a person"), 1)
 
 def _candidates(*rows):
     """Stand-ins for Candidates: (verdict, s, score) each."""
@@ -439,3 +446,15 @@ def test_with_ignore_new_the_configured_prompt_is_kept():
                                               "ignore_new": True}))["ignore_new"] is True
     with pytest.raises(main.ConfigError):
         main.parse_rerank_args(json.dumps({"detector": "d", "verifier": "v", "class": "c", "ignore_new": "yes"}))
+
+
+def test_an_unsure_answer_is_counted_and_cools_down_but_is_not_learned():
+    r = make_reranker()
+    verifier = Verifier(r)
+    r.decide(frame(0, objects=((DOG, GREEN),)), detections((DOG, 0.9)), now=0)
+    answered = verifier.answer_all(lambda tile: None, now=0)
+    assert answered
+    assert r.answers["unsure"] == len(answered) and not r.answers["yes"] and not r.answers["no"]
+    assert not r.selector.good and not r.selector.backgrounds
+    # Asked about, so crops like it wait out the cooldown
+    assert len(r._answered) == len(answered)

@@ -76,9 +76,15 @@ class FrameError(ValueError):
     pass
 
 
+# read_verdict's answer for a frame the verifier was unsure about: forwarded,
+# but not to be learned from
+UNSURE = "unsure"
+
+
 def read_verdict(event):
-    """The verifier's answer in its RESULT `event`, True or False; or None
-    if the result is not a GenericResult holding {"match": true|false}."""
+    """The verifier's answer in its RESULT `event`, True or False, or UNSURE
+    for {"match": null, "unsure": true}; or None if the result is not a
+    GenericResult holding one of them."""
     if event.payload_type.replace(".", "/") != GENERIC_RESULT_TYPE:
         return None
     try:
@@ -86,6 +92,8 @@ def read_verdict(event):
     except (DecodeError, ValueError) as err:
         logger.warning("unreadable verifier result: %s", err)
         return None
+    if isinstance(answer, dict) and answer.get("unsure") is True:
+        return UNSURE
     if not isinstance(answer, dict) or not isinstance(answer.get("match"), bool):
         logger.warning("verifier result %r has no boolean 'match'", answer)
         return None
@@ -163,6 +171,9 @@ class Cliped:
         queue if that changed what the selector knows."""
         match = read_verdict(event)
         if match is None or tile.embedding is None:
+            return
+        if match == UNSURE:
+            logger.info("verifier: unsure about the tile of frame %d; not learned", tile.frame_id)
             return
         outcome = self.selector.learn(tile.embedding, match)
         message = "verifier: %s for the tile of frame %d: %s (%d good, %d confirmed; %d background tiles)"

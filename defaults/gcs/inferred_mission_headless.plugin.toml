@@ -53,7 +53,7 @@ default = ""
 [[args]]
 name = "verifier_live_dir"
 type = "string"
-description = "Absolute path of the cliped verifier's live directory, whose prompt.txt is replaced with a description of the tracked box when the verifier's model says it isn't the prompt"
+description = "Absolute path of the cliped verifier's live directory, whose prompt.jpg is replaced with a crop of the tracked box when the verifier's model says it isn't the prompt; give the verifier image_descriptive = true, so it describes the crop's colors and features"
 default = ""
 
 [[args]]

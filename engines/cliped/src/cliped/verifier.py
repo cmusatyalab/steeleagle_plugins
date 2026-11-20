@@ -2,21 +2,30 @@
 30B-A3B Instruct by default) whether each RawFrame matches the prompt, forwards the frame
 if it does and drops it if not.
 
-The prompt is text, or a reference image; with an image, the model is shown
-the reference first and the frame second, or, with image_mode "description",
-the image's kind in a few words (CATEGORY_QUESTION) as a text prompt.
-Either way it answers yes or no,
-and every input gets a GenericResult holding the JSON object
-{"match": true|false}, so cliped's send queue sees a RESULT event for each
-tile it sent, and cliped learns from it.
+The prompt is always text. A reference image is turned into text once, when
+it is set: with image_descriptive, a short description of what it shows with
+its noticeable colors and distinguishing features visible from far above
+(DESCRIPTIVE_QUESTION, e.g. "Mannequin in dark green shirt and black pants");
+without, just what kind of thing it is (CATEGORY_QUESTION, e.g. "a quadruped
+robot dog"). The model is never shown the image with a frame.
+
+The answer is read from the model's probabilities of yes and no for its
+first token: a yes at least yes_conf likely, a no at least no_conf likely,
+and anything between is unsure. A yes is forwarded with the GenericResult
+{"match": true}, a no dropped with {"match": false}, and an unsure frame
+forwarded with {"match": null, "unsure": true}, so cliped's send queue sees a
+RESULT event for each tile it sent; cliped and box_rerank learn from a yes or
+a no, but not from an unsure answer, so a hard view of the target the model
+hesitates on isn't taught to them as background. Each result also holds
+"p_yes" and "p_no". If the server gives no probabilities, the model's word
+decides.
 
 With a live directory (LiveDir), the question and the prompt can change while
 it runs: question.txt, and prompt.txt or prompt.jpg/.jpeg, are read when it
 starts and again whenever they change. Every heartbeat (PromptKeeper), it
-publishes a DERIVED event of type PROMPT_TYPE holding the prompt's
-description as UTF-8 text: the text prompt, or, for an image, the model's
-description of it. box_rerank follows it, so it ranks its boxes by the
-verifier's prompt and starts learning over when it changes.
+publishes a DERIVED event of type PROMPT_TYPE holding the text prompt as
+UTF-8, the image's text for an image. box_rerank follows it, so CLIP ranks
+its boxes by the verifier's prompt and starts learning over when it changes.
 
 Nothing here imports torch: the verifier runs on a server without the edge
 filter's models.
@@ -24,6 +33,7 @@ filter's models.
 import base64
 import json
 import logging
+import math
 import time
 import urllib.error
 import urllib.request
@@ -58,28 +68,33 @@ HEARTBEAT_S = 1.0
 QUESTION_FILE = "question.txt"
 PROMPT_TEXT_FILE = "prompt.txt"
 PROMPT_IMAGE_FILES = ("prompt.jpg", "prompt.jpeg")
-# Asked about an image prompt once, for the heartbeat: a phrase CLIP can rank
-# box_rerank's crops by, which it does far better with text than with an image
-DESCRIBE_QUESTION = (
-    "Describe the person or object in this image as a short phrase for an image search that must find it "
-    "from a drone, e.g. 'a person in a red shirt and green shorts' or 'a quadruped robot dog'. Describe only "
-    "the person or object itself, not the ground, background or what it is doing; only colors and shapes "
-    "visible from far above. Answer with the phrase only, under 15 words."
+# Asked about an image prompt once, with image_descriptive: what it shows, with
+# its noticeable colors and the features visible from far above, as the text
+# prompt of both the verifier and CLIP (box_rerank, through the heartbeat).
+# What it is doing, where it is and small details are left out: a drone
+# can't see them, and CLIP ranks by a long phrase poorly (on mannequin tiles,
+# a 25-word description with brands and shoes made cliped send almost
+# nothing, where "mannequin wearing dark green shirt and black pants" doubled
+# the precision of the image prompt). Qwen3-VL 30B-A3B gave "Mannequin in
+# dark green shirt and black pants with white stripes", "Gray robotic dog with
+# four legs and a camera on its head" and "Person in red shirt and dark
+# shorts walking".
+DESCRIPTIVE_QUESTION = (
+    "Describe the main person or object in this image as a short phrase for finding it in a low-resolution photo "
+    "taken by a drone from far above: what it is, then its most noticeable colors and any distinguishing features "
+    "large enough to see from far away. Leave out what it is doing, where it is and the background, and small "
+    "details such as logos, brands, text, small patterns, shoes and accessories. Answer with the phrase only, "
+    "under 12 words."
 )
-# Asked about an image prompt once, in description mode: the kind of thing it
-# shows, in a few words, for the verifier's own text question. Asking whether
-# a crop is a kind of thing rejects look-alikes; comparing it with the image,
-# or with a detailed description, asks how alike they are, and a grey chair
-# is alike enough to a grey robot dog. On 147 labeled live crops of a robot
-# dog (Qwen3-VL 30B-A3B), a photo of the dog was described as "a quadruped
-# robot dog", which said yes to 48 of 67 dog crops and to 4 of 80 others;
-# the photo itself, with BOX_IMAGE_QUESTION, to 53 and 25, and the detailed
-# description ("a gray quadruped robot dog with white markings and black
-# feet") to 67 and 43. It suits a target whose look-alikes are other kinds of
-# thing; to tell individuals of one kind apart, show the image: on labeled
-# crops of three people, both photos were described as "a person", while
-# the photos themselves found 71 of 75 crops of their person and said yes to
-# 1 of 115 of the others
+# Asked about an image prompt once, without image_descriptive: the kind of
+# thing it shows, in a few words. Asking whether a crop is a kind of thing
+# rejects look-alikes of other kinds: on 147 labeled live crops of a robot dog
+# (Qwen3-VL 30B-A3B), a photo of the dog was named "a quadruped robot dog",
+# which said yes to 48 of 67 dog crops and to 4 of 80 others; the photo
+# itself, shown with each crop, to 53 and 25, and a detailed description
+# ("a gray quadruped robot dog with white markings and black feet") to 67 and
+# 43. It can't tell individuals of one kind apart (two people are both "a
+# person"): image_descriptive is for that.
 CATEGORY_QUESTION = (
     "Name what kind of object or person this image shows, in 2 to 5 words, e.g. 'a person' or "
     "'a quadruped robot dog'. Name only its kind, not its colors, markings or parts. "
@@ -87,8 +102,11 @@ CATEGORY_QUESTION = (
 )
 # Tokens a description may take
 DESCRIBE_TOKENS = 40
-# How an image prompt is verified: the image itself, or its kind as text
-IMAGE_MODES = ("image", "description")
+# The defaults of yes_conf and no_conf. Qwen3-VL 30B leans to no: on 273
+# mannequin tiles, every tile between P(yes) 0.3 and 0.7 was a real
+# mannequin, and 117 of 120 other tiles had P(no) at least 0.9
+YES_CONF = 0.7
+NO_CONF = 0.9
 # Tokens of context the model is loaded with. A request is one or two small
 # images, a question and an answer of a few words, well under 4096; Ollama's
 # default (the model's full context, 262144 for Qwen3-VL) reserves a KV cache
@@ -100,22 +118,14 @@ NUM_CTX = 4096
 # frame, for no better answer.
 REFERENCE_MAX_SIDE = 448
 
+# Most likely first tokens asked for, to read the probability of yes and of no
+TOP_LOGPROBS = 20
+# The verdicts
+YES, NO, UNSURE = "yes", "no", "unsure"
+
 TEXT_QUESTION = (
     "This is a tile cut from an aerial drone photo. Does it show {prompt}? "
     "Answer with only yes or no."
-)
-# The reference is usually a ground-level photo, and the tile is a small,
-# low-resolution view from above: say so, and that the target never looks
-# exactly like the reference, so the model doesn't demand the same appearance.
-# Asking for "this target" still rejects most look-alikes. On the mannequin
-# tiles cliped sent (parkinglot, traintrack, street) it kept 103/105 real ones
-# and said yes to 2/19 tiles of people and 28/303 of nothing; the earlier
-# "same appearance, not merely the same category" kept only 86/105.
-IMAGE_QUESTION = (
-    "Image 1 is a reference photo of a target, taken from the ground. Image 2 is a low-resolution tile cut "
-    "from an aerial drone photo, seen from above. The target in image 2 would be small and will never look "
-    "exactly like the reference. Does image 2 contain this target, possibly rotated, lying down or partly "
-    "out of frame? Answer with only yes or no."
 )
 # For box_rerank's crops: a detection with context around it, its box drawn
 # in red. The context helps the model recognize a small object, and the box
@@ -125,17 +135,6 @@ BOX_QUESTION = (
     "This image is cut from an aerial drone video. Is the object inside the red box {prompt}? "
     "Answer with only yes or no."
 )
-# box_rerank's crops with a reference image (an individual, e.g. one person
-# among several): as IMAGE_QUESTION, about the boxed object only, so a crop
-# whose context holds the target next to another object is a no for the
-# other one
-BOX_IMAGE_QUESTION = (
-    "Image 1 is a reference photo of a target, taken from the ground. Image 2 is cut from an aerial drone "
-    "video, seen from above, with one object marked by a red box. That object would be small and will never "
-    "look exactly like the reference. Is the object inside the red box this target, possibly rotated, lying "
-    "down or partly out of frame? Judge only the object inside the red box. Answer with only yes or no."
-)
-
 
 class OllamaError(Exception):
     pass
@@ -179,9 +178,12 @@ class Ollama:
         if status.get("status") != "success":
             raise OllamaError(f"pulling {self.model}: {status}")
 
-    def ask(self, question, images, max_tokens=8):
+    def ask(self, question, images, max_tokens=8, scores=False):
         """The model's answer to `question` about `images` (encoded image
-        files, e.g. PNG or JPEG bytes), of at most `max_tokens` tokens."""
+        files, e.g. PNG or JPEG bytes), of at most `max_tokens` tokens. With
+        `scores`, (answer, p_yes, p_no): the answer and the probabilities of
+        its first token being yes and no (answer_scores), or None for both if
+        the server gave no probabilities (Ollama before 0.12.11)."""
         body = {
             "model": self.model,
             "messages": [{
@@ -193,20 +195,51 @@ class Ollama:
             "keep_alive": -1,  # keep it loaded between frames
             "options": {"temperature": 0, "num_predict": max_tokens},
         }
+        if scores:
+            body["logprobs"] = True
+            body["top_logprobs"] = TOP_LOGPROBS
         if self.num_ctx:
             # Every request asks for the same context: Ollama reloads the
             # model when it changes
             body["options"]["num_ctx"] = self.num_ctx
         reply = self._post("/api/chat", body, self.timeout_s)
         try:
-            return reply["message"]["content"]
+            answer = reply["message"]["content"]
         except (KeyError, TypeError):
             raise OllamaError(f"/api/chat: unexpected reply {reply!r}") from None
+        if not scores:
+            return answer
+        return (answer, *answer_scores(reply.get("logprobs")))
 
-    def describe(self, image):
-        """A short description of what the encoded image file `image` shows,
-        for a text prompt."""
-        return clean_description(self.ask(DESCRIBE_QUESTION, [image], max_tokens=DESCRIBE_TOKENS))
+
+def answer_scores(logprobs):
+    """The probabilities of yes and of no as the first token of an answer,
+    from Ollama's `logprobs` (a list of tokens, each with its top_logprobs):
+    the sum over the alternatives that are yes (or no) in any case or
+    spacing. (None, None) without them."""
+    try:
+        top = logprobs[0]["top_logprobs"]
+    except (IndexError, KeyError, TypeError):
+        return None, None
+    p = {YES: 0.0, NO: 0.0}
+    for candidate in top:
+        try:
+            word = str(candidate["token"]).strip().lower()
+            if word in p:
+                p[word] += math.exp(float(candidate["logprob"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return min(1.0, p[YES]), min(1.0, p[NO])
+
+
+def verdict(p_yes, p_no, yes_conf, no_conf):
+    """YES if `p_yes` is at least `yes_conf`, NO if `p_no` is at least
+    `no_conf`, else UNSURE."""
+    if p_yes >= yes_conf:
+        return YES
+    if p_no >= no_conf:
+        return NO
+    return UNSURE
 
 
 def clean_description(text):
@@ -255,39 +288,47 @@ def encode_png(rgb):
 
 
 class Verifier:
-    """Decides whether inputs match the prompt. `ask(question, images)` is
-    the model (Ollama.ask). With `reference`, an encoded image file, the
-    prompt is that image, named `label`; otherwise it is the text `label`.
+    """Decides whether inputs match the prompt. `ask(question, images,
+    max_tokens=..., scores=...)` is the model (Ollama.ask). With `reference`,
+    an encoded image file named `label`, the prompt is the model's text for
+    the image: with `image_descriptive`, a short description of it
+    (DESCRIPTIVE_QUESTION), else its kind (CATEGORY_QUESTION), asked as soon
+    as the image is set, at startup or from the live directory; if the model
+    can't be asked then, the next frame or heartbeat asks again. Without one,
+    the prompt is the text `label`.
+
     `tile_log` (files.TileLog), if given, gets each input and each frame
-    forwarded. `question`, if given, replaces TEXT_QUESTION or
-    IMAGE_QUESTION, with {prompt} in it replaced by `label`: wording for one
-    target (e.g. "the same kind of animal" for an animal) can tell it from
-    look-alikes better than the generic questions; "box" is BOX_QUESTION or,
-    with a reference, BOX_IMAGE_QUESTION. Each frame is enlarged to at least
-    `min_side` pixels on its shorter side before the model sees it (0 for as
-    is).
+    forwarded. `question`, if given, replaces TEXT_QUESTION, with {prompt} in
+    it replaced by the text prompt: wording for one target can tell it from
+    look-alikes better than the generic question; "box" is BOX_QUESTION. Each
+    frame is enlarged to at least `min_side` pixels on its shorter side
+    before the model sees it (0 for as is).
 
-    With `image_mode` "description", an image prompt is verified as the text
-    prompt its kind is (`category`, asked of the model with CATEGORY_QUESTION
-    as soon as the image is set, at startup or from the live directory)
-    rather than by showing the model the image; "image" shows it the image.
-    If the model can't be asked then, the next frame asks again. A text
-    prompt is the same either way.
+    A frame is a yes when the model's P(yes) is at least `yes_conf`, a no when
+    its P(no) is at least `no_conf`, and unsure otherwise (verdict): an unsure
+    frame is forwarded with {"match": null, "unsure": true}, so it is not
+    learned from. Both are over 0.5 and at most 1. If the model gives no
+    probabilities, its word decides.
 
-    `description` is the prompt as text, for the heartbeat: the label of a
-    text prompt, or, for an image, its description once PromptKeeper has
-    asked for it (None until then)."""
+    `description` is the text prompt, for the heartbeat and the question: the
+    label of a text prompt, or the image's text once the model has given it
+    (None until then)."""
 
     def __init__(self, ask, *, label, reference=None, tile_log=None, question=None, min_side=0,
-                 image_mode="image"):
-        if image_mode not in IMAGE_MODES:
-            raise ValueError(f"image_mode must be one of {IMAGE_MODES}, not {image_mode!r}")
+                 image_descriptive=False, yes_conf=YES_CONF, no_conf=NO_CONF):
+        for name, value in (("yes_conf", yes_conf), ("no_conf", no_conf)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.5 < value <= 1:
+                raise ValueError(f"{name} must be over 0.5 and at most 1, not {value!r}")
         self.ask = ask
         self.tile_log = tile_log
         self.min_side = min_side
-        self.image_mode = image_mode
+        self.image_descriptive = image_descriptive
+        self.yes_conf = yes_conf
+        self.no_conf = no_conf
         self.frames = 0
         self.matched = 0
+        self.unsure = 0
+        self._warned_no_scores = False
         self.set_prompt(label, reference)
         self.set_question(question)
 
@@ -296,51 +337,41 @@ class Verifier:
         return self.reference is not None or bool(self.label)
 
     def set_prompt(self, label, reference=None):
-        """Verifies against the image `reference` (encoded), named `label`,
-        from now on, or the text `label` without one."""
+        """Verifies against the text of the image `reference` (encoded), named
+        `label`, from now on, or the text `label` without one."""
         self.label = label
         self.reference = reference
         self.description = None if reference is not None else (label or None)
-        self.category = None
-        if reference is not None and self.image_mode == "description":
+        if reference is not None:
             try:
-                self._category()
+                self.describe_image()
             except Exception as err:
-                logger.warning("couldn't name what the image %s shows (%s); asking again at the next frame",
-                               label, err)
+                logger.warning("couldn't describe the image %s (%s); asking again at the next frame", label, err)
 
     def set_question(self, question):
         """Asks `question` from now on, or the default one for None or "". """
         self.custom_question = question or None
 
-    def _category(self):
-        if self.category is None:
-            answer = self.ask(CATEGORY_QUESTION, [self.reference], max_tokens=DESCRIBE_TOKENS)
-            category = clean_description(answer)
-            if not category:
-                raise OllamaError(f"the model didn't name the kind of thing the image {self.label} shows")
-            self.category = category
-            logger.info("the image %s shows %r: verifying frames against that", self.label, category)
-        return self.category
+    def describe_image(self):
+        """The text prompt, asking the model for the image's if it has not
+        given it yet. Raises OllamaError if it gives none."""
+        if self.description is None and self.reference is not None:
+            question = DESCRIPTIVE_QUESTION if self.image_descriptive else CATEGORY_QUESTION
+            text = clean_description(self.ask(question, [self.reference], max_tokens=DESCRIBE_TOKENS))
+            if not text:
+                raise OllamaError(f"the model gave no text for the image {self.label}")
+            self.description = text
+            logger.info("the image %s is %r: verifying frames against that%s", self.label, text,
+                        "" if self.image_descriptive else " (its kind; image_descriptive describes it)")
+        return self.description
 
-    def _text_question(self, prompt, png):
+    def question(self, png):
+        """The question about the encoded frame `png`, and the images it
+        shows: the frame alone."""
         custom = self.custom_question
         if custom == "box":
             custom = BOX_QUESTION
-        return (custom or TEXT_QUESTION).format(prompt=prompt), [png]
-
-    def question(self, png):
-        """The first pass's question about the encoded frame `png`, and the
-        images it shows."""
-        if self.reference is None:
-            return self._text_question(self.label, png)
-        if self.image_mode == "description":
-            return self._text_question(self._category(), png)
-        custom = self.custom_question
-        if custom == "box":
-            custom = BOX_IMAGE_QUESTION
-        return (custom or IMAGE_QUESTION).format(prompt=self.label), [self.reference, png]
-
+        return (custom or TEXT_QUESTION).format(prompt=self.describe_image()), [png]
 
     def on_input(self, input):
         """Whether to forward `input`, and the serialized GenericResult.
@@ -350,20 +381,40 @@ class Verifier:
         if self.tile_log is not None:
             self.tile_log.input(frame.id, rgb)
         started = time.perf_counter()
-        answer = self.ask(*self.question(encode_png(enlarge(rgb, self.min_side))))
-        match = parse_answer(answer)
-        if match is None:
-            logger.warning("frame %d: the model answered %r, not yes or no; dropping it", frame.id, answer)
-        match = bool(match)
+        question, images = self.question(encode_png(enlarge(rgb, self.min_side)))
+        answer, p_yes, p_no = self.ask(question, images, scores=True)
+        result = {}
+        if p_yes is None:
+            if not self._warned_no_scores:
+                logger.warning("the model gave no probabilities of yes and no; taking its answers as they are")
+                self._warned_no_scores = True
+            match = parse_answer(answer)
+            if match is None:
+                logger.warning("frame %d: the model answered %r, not yes or no; dropping it", frame.id, answer)
+            decided = YES if match else NO
+        else:
+            decided = verdict(p_yes, p_no, self.yes_conf, self.no_conf)
+            result = {"p_yes": round(p_yes, 4), "p_no": round(p_no, 4)}
+        unsure = decided == UNSURE
+        forward = decided != NO
         self.frames += 1
-        self.matched += match
-        if match and self.tile_log is not None:
+        self.matched += decided == YES
+        self.unsure += unsure
+        if forward and self.tile_log is not None:
             self.tile_log.output(frame.id, 0, rgb)
 
-        logger.info("frame %d (%dx%d): %s in %.0f ms; %d of %d matched", frame.id, rgb.shape[1], rgb.shape[0],
-                    "match, forwarding it" if match else "no match, dropping it",
-                    (time.perf_counter() - started) * 1e3, self.matched, self.frames)
-        return match, result_pb2.GenericResult(payload=json.dumps({"match": match}).encode()).SerializeToString()
+        what = {YES: "match, forwarding it", NO: "no match, dropping it",
+                UNSURE: "unsure, forwarding it unlearned"}[decided]
+        if result:
+            what += f" (p yes {result['p_yes']:.2f}, no {result['p_no']:.2f})"
+        logger.info("frame %d (%dx%d): %s in %.0f ms; %d of %d matched, %d unsure", frame.id, rgb.shape[1],
+                    rgb.shape[0], what, (time.perf_counter() - started) * 1e3, self.matched, self.frames,
+                    self.unsure)
+        if unsure:
+            result = {"match": None, "unsure": True, **result}
+        else:
+            result = {"match": decided == YES, **result}
+        return forward, result_pb2.GenericResult(payload=json.dumps(result).encode()).SerializeToString()
 
 
 def valid_question(question):
@@ -435,16 +486,14 @@ class LiveDir:
 class PromptKeeper:
     """Keeps the verifier's prompt and question up to date with the live
     directory `live` (a LiveDir, or None), and gives the heartbeat's payload
-    every `interval_s` seconds: the prompt's description, as UTF-8. An image
-    prompt is read with `load_image(path)`, which returns it encoded (and
-    raises on a file it can't read), and described with `describe(image)`
-    (Ollama.describe), once; if that fails, it is asked again at the next
-    heartbeat."""
+    every `interval_s` seconds: the text prompt, as UTF-8. An image prompt is
+    read with `load_image(path)`, which returns it encoded (and raises on a
+    file it can't read); the verifier turns it into text, and if that fails,
+    it is asked again at the next heartbeat."""
 
-    def __init__(self, verifier, *, live=None, describe=None, load_image=None, interval_s=HEARTBEAT_S):
+    def __init__(self, verifier, *, live=None, load_image=None, interval_s=HEARTBEAT_S):
         self.verifier = verifier
         self.live = live
-        self.describe = describe
         self.load_image = load_image
         self.interval_s = interval_s
         self._next = None
@@ -482,15 +531,11 @@ class PromptKeeper:
         return changed
 
     def _describe(self):
-        v = self.verifier
-        if v.description is not None or v.reference is None or self.describe is None:
-            return
         try:
-            v.description = clean_description(self.describe(v.reference)) or None
+            self.verifier.describe_image()
         except Exception as err:
-            logger.warning("couldn't describe the image %s (%s); asking again at the next heartbeat", v.label, err)
-            return
-        logger.info("the image %s described as %r", v.label, v.description)
+            logger.warning("couldn't describe the image %s (%s); asking again at the next heartbeat",
+                           self.verifier.label, err)
 
     def step(self, now):
         """The heartbeat's payload if one is due at `now` (seconds,
@@ -515,8 +560,9 @@ def run(name, verifier, *, stop, keeper=None, on_ready=None):
     with uriel.Engine(name, result_type=GENERIC_RESULT_TYPE, max_output_size=MAX_OUTPUT_SIZE) as engine:
         engine.subscribe(name)
         flow, last_id = None, None
-        logger.info("engine %s ready; verifying %s %r; a heartbeat every %gs", name,
-                    "image" if verifier.reference is not None else "prompt", verifier.label, keeper.interval_s)
+        logger.info("engine %s ready; verifying %s %r; a heartbeat every %gs; a yes at p >= %g, a no at p >= %g, "
+                    "else unsure", name, "image" if verifier.reference is not None else "prompt", verifier.label,
+                    keeper.interval_s, verifier.yes_conf, verifier.no_conf)
         if on_ready is not None:
             on_ready()
         while not stop.is_set():

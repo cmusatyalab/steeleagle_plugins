@@ -68,7 +68,9 @@ VERIFIER_DEFAULTS = {
     "live": "",
     "heartbeat": 1.0,
     "num_ctx": 4096,
-    "image_mode": "image",
+    "image_descriptive": False,
+    "yes_conf": 0.7,
+    "no_conf": 0.9,
 }
 # Defaults of the args of box_rerank.plugin.toml
 RERANK_DEFAULTS = {
@@ -285,11 +287,15 @@ def parse_verifier_args(content):
         raise ConfigError(f"timeout_ms must be a positive number, not {timeout!r}")
     if not isinstance(args["log_tiles"], bool):
         raise ConfigError("log_tiles must be true or false")
-    if args["image_mode"] not in ("image", "description"):
-        raise ConfigError(f"image_mode must be \"image\" or \"description\", not {args['image_mode']!r}")
+    if not isinstance(args["image_descriptive"], bool):
+        raise ConfigError("image_descriptive must be true or false")
     _positive_int(args, "min_side", 0)
     _positive_int(args, "num_ctx", 0)
     _number(args, "heartbeat", 0, 3600, low_open=True)
+    for name in ("yes_conf", "no_conf"):
+        value = args[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.5 < value <= 1:
+            raise ConfigError(f"{name} must be over 0.5 and at most 1, not {value!r}")
     return args
 
 
@@ -565,11 +571,14 @@ def main_verifier(name):
         sys.exit(f"Ollama at {ollama.host} can't serve {args['model']}: {err}")
     vlog = logging.getLogger("cliped.verifier")
     vlog.info("asking %s at %s", args["model"], ollama.host)
+    if "image_mode" in args:
+        vlog.warning("image_mode is no longer an arg: the prompt is always text, an image's kind or, with "
+                     "image_descriptive, its description; ignoring image_mode = %r", args["image_mode"])
     verifier = Verifier(ollama.ask, label=args["image"] or args["prompt"], reference=reference, tile_log=log,
                         question=args["question"] or None, min_side=args["min_side"],
-                        image_mode=args["image_mode"])
-    keeper = PromptKeeper(verifier, live=live, describe=ollama.describe, load_image=load_image,
-                          interval_s=args["heartbeat"])
+                        image_descriptive=args["image_descriptive"], yes_conf=args["yes_conf"],
+                        no_conf=args["no_conf"])
+    keeper = PromptKeeper(verifier, live=live, load_image=load_image, interval_s=args["heartbeat"])
     if live is not None:
         vlog.info("live: watching %s", live.path)
         # What the directory holds now wins over the args

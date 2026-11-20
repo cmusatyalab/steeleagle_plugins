@@ -4,9 +4,10 @@ package inferredmission
 // detection box of the object the pilot is following (target_box). That
 // box's detector class becomes the Track class, and the box is checked
 // against the cliped verifier's prompt with the verifier's own model: if the
-// model says it isn't the prompt, it describes the box, and the description
-// becomes the verifier's prompt through its live directory, which box_rerank
-// then follows. With auto_deploy, the section's compiled mission is sent to
+// model says it isn't the prompt, a crop of the box becomes the verifier's
+// image prompt (prompt.jpg) through its live directory. The verifier turns
+// it into text (with image_descriptive, a short description of its colors
+// and features), and box_rerank follows that text. With auto_deploy, the section's compiled mission is sent to
 // the vehicle to compile and load, as its fallback when its data link fails.
 
 import (
@@ -38,16 +39,22 @@ import (
 const (
 	verifierBoxQuestion = "This image is cut from an aerial drone video. Is the object inside the red box {prompt}? " +
 		"Answer with only yes or no."
-	verifierDescribeQuestion = "Describe the person or object in this image as a short phrase for an image search that must find it " +
-		"from a drone, e.g. 'a person in a red shirt and green shorts' or 'a quadruped robot dog'. Describe only " +
-		"the person or object itself, not the ground, background or what it is doing; only colors and shapes " +
-		"visible from far above. Answer with the phrase only, under 15 words."
+	// The verifier's DESCRIPTIVE_QUESTION, with which it turns an image
+	// prompt into text when image_descriptive is set, as it is with the GCS
+	verifierDescribeQuestion = "Describe the main person or object in this image as a short phrase for finding it in a low-resolution photo " +
+		"taken by a drone from far above: what it is, then its most noticeable colors and any distinguishing features " +
+		"large enough to see from far away. Leave out what it is doing, where it is and the background, and small " +
+		"details such as logos, brands, text, small patterns, shoes and accessories. Answer with the phrase only, " +
+		"under 12 words."
 	// The verifier's context size: a request with another would make Ollama
 	// reload the model the verifier is using
 	verifierNumCtx = 4096
 	// The verifier's live directory files (cliped/verifier.py LiveDir); an
 	// image prompt wins over the text one
 	livePromptText = "prompt.txt"
+	// The image prompt the GCS writes, and its JPEG quality
+	livePromptImage = "prompt.jpg"
+	promptQuality   = 95
 	// The crops: the box with this much context around it, at least
 	// cropMinSide pixels, enlarged so the shorter side is enlargeMinSide
 	checkContext   = 2.0
@@ -79,10 +86,11 @@ type targetCheck struct {
 	PromptSource string `json:"verifier_prompt_source,omitempty"`
 	Answer       string `json:"verifier_answer,omitempty"`
 	Match        *bool  `json:"verifier_match,omitempty"`
-	// The description of the box, when it wasn't the prompt (or there was
-	// none), and whether it was written to the live directory
-	NewPrompt     string  `json:"new_prompt,omitempty"`
-	PromptWritten bool    `json:"prompt_written,omitempty"`
+	// The crop of the box saved as the new image prompt, when it wasn't the
+	// prompt (or there was none): its file beside the section's record, and
+	// whether it was written to the live directory as prompt.jpg
+	NewPromptImage string  `json:"new_prompt_image,omitempty"`
+	PromptWritten  bool    `json:"prompt_written,omitempty"`
 	Error         string  `json:"error,omitempty"`
 	Elapsed       float64 `json:"elapsed,omitempty"`
 }
@@ -195,7 +203,7 @@ func trackedBox(evidence *liveEvidence, ref *boxRef) (detectorLabel, error) {
 }
 
 // checkTarget checks the box ref (label) of the section's images against the
-// verifier's prompt, and replaces the prompt with a description of the box
+// verifier's prompt, and makes a crop of the box the verifier's image prompt
 // if the verifier's model says it isn't the prompt.
 func (s *Service) checkTarget(r *run, meta session, row section, ref boxRef, label detectorLabel, images []nl2dsl.Image) *targetCheck {
 	start := time.Now()
@@ -249,33 +257,30 @@ func (s *Service) checkTarget(r *run, meta session, row section, ref boxRef, lab
 			return check
 		}
 	}
-	// Described without the red box or much around it, so the description
-	// is of the object alone
-	tight, err := encodePNG(enlarge(cropAround(frame, *label.Box, describeMargin, false), enlargeMinSide))
+	// Without the red box or much around it, so the verifier describes the
+	// object alone
+	tight, err := encodeJPEG(enlarge(cropAround(frame, *label.Box, describeMargin, false), enlargeMinSide))
 	if err != nil {
 		return fail(err)
 	}
-	description, err := model.ask(ctx, verifierDescribeQuestion, tight, 40)
-	if err != nil {
-		return fail(err)
-	}
-	if check.NewPrompt = cleanDescription(description); check.NewPrompt == "" {
-		return fail(errors.New("the verifier's model gave no description"))
-	}
+	// Kept beside the section's record too, for review
+	check.NewPromptImage = "new_prompt.jpg"
+	_ = os.WriteFile(filepath.Join(r.sectionDir(row.Index), check.NewPromptImage), tight, 0o600)
 	if dir != "" {
-		if err := writeLivePrompt(dir, check.NewPrompt); err != nil {
+		if err := writeLivePromptImage(dir, tight); err != nil {
 			return fail(err)
 		}
 		check.PromptWritten = true
-		s.log.Info().Str("vehicle", meta.Vehicle).Str("prompt", check.NewPrompt).Str("class", label.Class).
-			Msg("inferred mission: the tracked object isn't the verifier's prompt; replaced it")
+		s.log.Info().Str("vehicle", meta.Vehicle).Str("class", label.Class).
+			Msg("inferred mission: the tracked object isn't the verifier's prompt; its crop is the new image prompt")
 	}
 	return check
 }
 
 // livePrompt is the verifier's prompt in its live directory dir: the text of
 // prompt.txt, or the model's description of the image prompt (the verifier
-// describes it the same way), and the file's name; "" if there is none.
+// describes it the same way, with image_descriptive), and the file's name; ""
+// if there is none.
 func (s *Service) livePrompt(ctx context.Context, model ollama, dir string) (string, string, error) {
 	var newest os.FileInfo
 	for _, name := range livePromptImages {
@@ -326,35 +331,41 @@ func (s *Service) livePrompt(ctx context.Context, model ollama, dir string) (str
 	return described, newest.Name(), nil
 }
 
-// writeLivePrompt makes text the verifier's prompt: prompt.txt replaced
-// whole, then any image prompt, which would win over it, renamed aside.
-// The directory is made if the verifier hasn't made it yet (it does when it
-// first reads its prompt, which may be after the first section).
-func writeLivePrompt(dir, text string) error {
+// writeLivePromptImage makes the JPEG image the verifier's prompt:
+// prompt.jpg replaced whole, and prompt.jpeg, which would win over it if it
+// were newer, renamed aside. An image wins over prompt.txt, which is left
+// as it is. The directory is made if the verifier hasn't made it yet (it
+// does when it first reads its prompt, which may be after the first
+// section).
+func writeLivePromptImage(dir string, jpegData []byte) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("could not make the verifier's live directory: %w", err)
 	}
-	temp, err := os.CreateTemp(dir, ".prompt-*.txt")
-	if err != nil {
-		return fmt.Errorf("could not write the verifier's prompt: %w", err)
-	}
-	defer os.Remove(temp.Name())
-	_, err = temp.WriteString(text + "\n")
-	if closeErr := temp.Close(); err == nil {
-		err = closeErr
-	}
-	if err == nil {
-		err = os.Rename(temp.Name(), filepath.Join(dir, livePromptText))
-	}
-	if err != nil {
-		return fmt.Errorf("could not write the verifier's prompt: %w", err)
-	}
 	stamp := time.Now().UTC().Format("20060102T150405")
 	for _, name := range livePromptImages {
+		if name == livePromptImage {
+			continue
+		}
 		err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, "replaced-"+stamp+"-"+name))
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("could not set aside the image prompt %s: %w", name, err)
 		}
+	}
+	temp, err := os.CreateTemp(dir, ".prompt-*.jpg")
+	if err != nil {
+		return fmt.Errorf("could not write the verifier's prompt: %w", err)
+	}
+	defer os.Remove(temp.Name())
+	_, err = temp.Write(jpegData)
+	if closeErr := temp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		// Renamed into place whole, so the verifier never reads half of it
+		err = os.Rename(temp.Name(), filepath.Join(dir, livePromptImage))
+	}
+	if err != nil {
+		return fmt.Errorf("could not write the verifier's prompt: %w", err)
 	}
 	return nil
 }
@@ -566,6 +577,14 @@ func enlarge(img *image.RGBA, minSide int) *image.RGBA {
 		}
 	}
 	return out
+}
+
+func encodeJPEG(img image.Image) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: promptQuality}); err != nil {
+		return nil, fmt.Errorf("could not encode the crop: %w", err)
+	}
+	return buf.Bytes(), nil
 }
 
 func encodePNG(img image.Image) ([]byte, error) {

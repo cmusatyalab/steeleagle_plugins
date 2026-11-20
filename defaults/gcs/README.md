@@ -249,10 +249,13 @@ auto_deploy = true
 - With `verifier`, the GCS asks that model (at `OLLAMA_HOST`, else
   `localhost:11434`) the verifier's box question about that box, against the
   prompt in `verifier_live_dir` (`prompt.txt`, or the description of
-  `prompt.jpg`). If it says no, or there is no prompt, it describes the box and
-  writes the description to `prompt.txt`, setting any image prompt aside. The
-  verifier picks it up and box_rerank follows its heartbeat. The section's
-  History records the check, and `target.png` beside its record is the crop.
+  `prompt.jpg`). If it says no, or there is no prompt, it writes a crop of the
+  box to `prompt.jpg` (an image wins over `prompt.txt`), setting any
+  `prompt.jpeg` aside. The verifier turns it into text (give it
+  `image_descriptive = true`, so the text is a short description of the box's
+  colors and features rather than just its kind), and box_rerank follows its
+  heartbeat. The section's History records the check; `target.png` beside its
+  record is the crop checked, and `new_prompt.jpg` the one written.
 - `auto_deploy` is off by default. When on, each live section's compiled
   mission (including the wait-and-return fallback) is sent to the vehicle with
   `CompileMission`, compiled there as `inferred_mission` and loaded, and the

@@ -49,6 +49,7 @@ from cliped.engine import (
     RAW_FRAME_TYPE,
     REINTEGRATION,
     RGB_CHANNELS,
+    UNSURE,
     FrameError,
     Reintegration,
     producer_name,
@@ -312,7 +313,14 @@ class Reranker:
         if match is None:
             return
         now = time.monotonic() if now is None else now
+        # Asked about, so a crop like it isn't asked about again until the
+        # cooldown, whatever the answer
         self._answered.append((tile.embedding, now))
+        if match == UNSURE:
+            self.answers["unsure"] += 1
+            logger.info("verifier: unsure about the box of frame %d (score %.2f); not learned",
+                        tile.frame_id, tile.score)
+            return
         self.answers["yes" if match else "no"] += 1
         outcome = self.selector.learn(tile.embedding, match)
         if self.gate is not None:
@@ -519,14 +527,14 @@ class Reranker:
             c = self._counts
             logger.info(
                 "last %.0f s: %d frames, %d candidates (%d vetoed) | reported %d confirmed, %d unverified "
-                "(%d over the top box) | none: %d without candidates, %d all held back%s | verifier %d yes, %d no; "
+                "(%d over the top box) | none: %d without candidates, %d all held back%s | verifier %d yes, %d no, %d unsure; "
                 "queue %d (%d in flight)%s",
                 (now - self._summary_at_ns) / 1e9, c["frames"], c["candidates"], c["vetoed"],
                 c["reported confirmed"], c["reported unverified"], c["over the top box"], c["no detection"],
                 c["all held back"],
                 "".join(f", {c[why]} {why}" for why in (SKIPPED, TIMED_OUT, DISCONNECTED, UNDECODABLE, TOO_LATE)
                         if c[why]),
-                self.answers["yes"], self.answers["no"], len(self.queue), self.queue.in_flight, self._gate_summary())
+                self.answers["yes"], self.answers["no"], self.answers["unsure"], len(self.queue), self.queue.in_flight, self._gate_summary())
         self._counts = Counter()
         self._summary_at_ns = now
 

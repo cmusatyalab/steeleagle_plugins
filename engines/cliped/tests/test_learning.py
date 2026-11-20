@@ -17,7 +17,7 @@ from cliped.clip import (
     KNOWN,
     Selector,
 )
-from cliped.engine import GENERIC_RESULT_TYPE, Cliped, read_verdict
+from cliped.engine import GENERIC_RESULT_TYPE, UNSURE, Cliped, read_verdict
 from cliped.send_queue import SendQueue, Tile
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from steeleagle_protocol.v1.messages.result import result_pb2
@@ -218,6 +218,8 @@ def test_read_verdict():
     assert read_verdict(result_event(1, {"match": True})) is True
     assert read_verdict(result_event(1, {"match": False})) is False
     assert read_verdict(result_event(1, {"match": "yes"})) is None
+    assert read_verdict(result_event(1, {"match": None, "unsure": True, "p_yes": 0.4})) == UNSURE
+    assert read_verdict(result_event(1, {"match": True, "p_yes": 0.9, "p_no": 0.1})) is True
     assert read_verdict(result_event(1, {"match": True}, payload_type="")) is None
 
 
@@ -289,3 +291,12 @@ def test_a_result_that_is_not_a_verdict_teaches_nothing(learning_cliped):
     cliped.queue.next(input_id(1), now=0)
     cliped.on_event(result_event(1, {"match": False}, payload_type="steeleagle_protocol/v1/messages/result/DetectionResult"))
     assert cliped.queue.confirmed == 1 and not cliped.selector.backgrounds
+
+
+def test_an_unsure_answer_settles_the_tile_but_teaches_nothing(learning_cliped):
+    cliped = learning_cliped
+    cliped.on_input(make_input(1, gray_frame(1)), now=0)
+    cliped.queue.next(input_id(1), now=0)
+    cliped.on_event(result_event(1, {"match": None, "unsure": True}))
+    # Out of the queue, so not sent again, but neither good nor background
+    assert cliped.queue.confirmed == 1 and not cliped.selector.backgrounds and not cliped.selector.good

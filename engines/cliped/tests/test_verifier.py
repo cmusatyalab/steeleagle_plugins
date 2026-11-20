@@ -7,20 +7,26 @@ from conftest import make_frame, make_input
 
 from cliped import main
 from cliped.files import FilesError, TileLog, resolve
-from cliped.verifier import IMAGE_QUESTION, Verifier, parse_answer
+from cliped.verifier import CATEGORY_QUESTION, DESCRIPTIVE_QUESTION, Verifier, parse_answer
 from steeleagle_protocol.v1.messages.result import result_pb2
 
 
 class Model:
-    """Stands in for Ollama: answers `answer`, and records what it was asked."""
+    """Stands in for Ollama: answers `answer`, and records what it was asked.
+    Asked with scores, P(yes) is 0.95 for an answer starting with yes and
+    0.05 for any other, and P(no) the rest."""
 
     def __init__(self, answer):
         self.answer = answer
         self.asked = []
 
-    def __call__(self, question, images, max_tokens=8):
+    def __call__(self, question, images, max_tokens=8, scores=False):
         self.asked.append((question, images))
-        return self.answer(question) if callable(self.answer) else self.answer
+        answer = self.answer(question) if callable(self.answer) else self.answer
+        if not scores:
+            return answer
+        p_yes = 0.95 if answer.strip().lower().startswith("yes") else 0.05
+        return answer, p_yes, round(1 - p_yes, 4)
 
 
 def verdict(result):
@@ -30,7 +36,7 @@ def verdict(result):
 def test_a_match_is_forwarded_with_a_yes():
     model = Model("Yes.")
     keep, result = Verifier(model, label="a white square").on_input(make_input(1, make_frame(id=5)))
-    assert keep and verdict(result) == {"match": True}
+    assert keep and verdict(result) == {"match": True, "p_yes": 0.95, "p_no": 0.05}
     question, images = model.asked[0]
     assert "a white square" in question and len(images) == 1
     assert cv2.imdecode(np.frombuffer(images[0], np.uint8), cv2.IMREAD_COLOR).shape == (300, 400, 3)
@@ -39,24 +45,50 @@ def test_a_match_is_forwarded_with_a_yes():
 def test_anything_but_yes_is_dropped_with_a_no():
     for answer in ["No", "no.", "maybe"]:
         keep, result = Verifier(Model(answer), label="x").on_input(make_input(1, make_frame()))
-        assert not keep and verdict(result) == {"match": False}
+        assert not keep and verdict(result) == {"match": False, "p_yes": 0.05, "p_no": 0.95}
 
 
-def test_an_image_prompt_shows_the_reference_first():
-    model = Model("yes")
-    keep, result = Verifier(model, label="tarp.jpg", reference=b"reference").on_input(make_input(1, make_frame()))
-    question, images = model.asked[0]
-    assert question == IMAGE_QUESTION and images[0] == b"reference" and len(images) == 2
-    assert keep and verdict(result) == {"match": True}
+def named(text, answer="yes"):
+    """A model that gives `text` for an image and `answer` about a frame."""
+    return Model(lambda q: text if q in (CATEGORY_QUESTION, DESCRIPTIVE_QUESTION) else answer)
+
+
+def test_an_image_prompt_becomes_its_kind_and_the_model_sees_only_the_frame():
+    model = named("'A quadruped robot dog.'")
+    verifier = Verifier(model, label="dog.jpg", reference=b"reference")
+    # Named as soon as it is set, before any frame
+    assert verifier.description == "A quadruped robot dog" and model.asked == [(CATEGORY_QUESTION, [b"reference"])]
+    for _ in range(2):
+        keep, result = verifier.on_input(make_input(1, make_frame()))
+        assert keep and verdict(result)["match"] is True
+    question = "This is a tile cut from an aerial drone photo. Does it show A quadruped robot dog? " \
+               "Answer with only yes or no."
+    assert [q for q, _ in model.asked[1:]] == [question, question]
+    assert all(len(images) == 1 and images[0] != b"reference" for _, images in model.asked[1:])
+
+
+def test_image_descriptive_describes_the_image_instead():
+    model = named("Mannequin in dark green shirt and black pants.")
+    verifier = Verifier(model, label="m.jpg", reference=b"reference", image_descriptive=True)
+    assert model.asked == [(DESCRIPTIVE_QUESTION, [b"reference"])]
+    assert verifier.description == "Mannequin in dark green shirt and black pants"
+
+
+def test_a_text_prompt_is_used_as_is_either_way():
+    for descriptive in (False, True):
+        model = Model("yes")
+        verifier = Verifier(model, label="a dog", question="box", image_descriptive=descriptive)
+        verifier.on_input(make_input(1, make_frame()))
+        assert [q for q, _ in model.asked] == [BOX_QUESTION.format(prompt="a dog")]
 
 
 def test_a_question_replaces_the_default_one():
-    for reference, n_images in ((None, 1), (b"reference", 2)):
-        model = Model("yes")
+    for reference in (None, b"reference"):
+        model = named("a dog")
         verifier = Verifier(model, label="a dog", reference=reference, question="Is {prompt} here? Answer yes or no.")
         keep, _ = verifier.on_input(make_input(1, make_frame()))
-        question, images = model.asked[0]
-        assert keep and question == "Is a dog here? Answer yes or no." and len(images) == n_images
+        question, images = model.asked[-1]
+        assert keep and question == "Is a dog here? Answer yes or no." and len(images) == 1
 
 
 def test_parse_answer():
@@ -81,12 +113,12 @@ def test_verifier_args():
     assert main.parse_verifier_args(json.dumps({"prompt": "a tarp"}))["question"] == ""
     args = main.parse_verifier_args(json.dumps({"image": "t.jpg", "question": " Same kind of animal? "}))
     assert args["question"] == "Same kind of animal?"
-    assert args["image_mode"] == "image"
-    assert main.parse_verifier_args(json.dumps({"image": "t.jpg", "image_mode": "description"}))["image_mode"] == \
-        "description"
+    assert args["image_descriptive"] is False and (args["yes_conf"], args["no_conf"]) == (0.7, 0.9)
+    assert main.parse_verifier_args(json.dumps({"image": "t.jpg", "image_descriptive": True}))["image_descriptive"]
     for bad in [{}, {"prompt": "p", "timeout_ms": 0}, {"prompt": "p", "model": ""}, {"prompt": "p", "log_tiles": 1},
                 {"prompt": "p", "question": "Is {thing} here?"}, {"prompt": "p", "question": 3},
-                {"prompt": "p", "image_mode": "photo"}]:
+                {"prompt": "p", "image_descriptive": "yes"}, {"prompt": "p", "yes_conf": 0.5},
+                {"prompt": "p", "no_conf": 1.1}, {"prompt": "p", "yes_conf": True}, {"prompt": "p", "no_conf": "0.9"}]:
         with pytest.raises(main.ConfigError):
             main.parse_verifier_args(json.dumps(bad))
 
@@ -111,17 +143,6 @@ def test_shrink_caps_the_longer_side_and_keeps_the_aspect_ratio():
     assert shrink(small) is small
 
 
-def test_the_box_image_question_shows_the_reference_then_the_crop():
-    from cliped.verifier import BOX_IMAGE_QUESTION
-
-    model = Model("yes")
-    verifier = Verifier(model, label="person.jpg", reference=b"reference", question=BOX_IMAGE_QUESTION)
-    keep, _ = verifier.on_input(make_input(1, make_frame()))
-    question, images = model.asked[0]
-    assert keep and question == BOX_IMAGE_QUESTION and images[0] == b"reference" and len(images) == 2
-    assert "red box" in question and "{" not in question
-
-
 # The live directory and the prompt heartbeat
 
 import os
@@ -137,15 +158,20 @@ def write(path, data, mtime):
 
 
 def keeper_for(tmp_path, *, label="a tarp", describe=None, **kwargs):
-    verifier = Verifier(Model("yes"), label=label, **kwargs)
+    """A verifier whose model names any image with `describe(image)` (by
+    default '"A Red Tarp."'), its PromptKeeper over the live directory
+    `tmp_path`, and the images it was asked to name."""
     described = []
 
-    def fake_describe(image):
-        described.append(image)
-        return describe(image) if describe else '"A Red Tarp."'
+    def ask(question, images, max_tokens=8, scores=False):
+        if question in (CATEGORY_QUESTION, DESCRIPTIVE_QUESTION):
+            described.append(images[0])
+            return describe(images[0]) if describe else '"A Red Tarp."'
+        return ("yes", 0.95, 0.05) if scores else "yes"
 
-    keeper = PromptKeeper(verifier, live=LiveDir(tmp_path), describe=fake_describe,
-                          load_image=lambda path: b"encoded " + path.read_bytes(), interval_s=1.0)
+    verifier = Verifier(ask, label=label, **kwargs)
+    keeper = PromptKeeper(verifier, live=LiveDir(tmp_path), load_image=lambda path: b"encoded " + path.read_bytes(),
+                          interval_s=1.0)
     return verifier, keeper, described
 
 
@@ -164,7 +190,7 @@ def test_an_image_prompt_is_described_once_for_the_heartbeat(tmp_path):
 
 
 def test_a_failed_description_is_asked_again_at_the_next_heartbeat(tmp_path):
-    answers = iter([RuntimeError("Ollama is down"), "a red tarp"])
+    answers = iter([RuntimeError("Ollama is down"), RuntimeError("still down"), "a red tarp"])
 
     def describe(image):
         answer = next(answers)
@@ -172,6 +198,7 @@ def test_a_failed_description_is_asked_again_at_the_next_heartbeat(tmp_path):
             raise answer
         return answer
 
+    # At startup, then at the first heartbeat, the model is down
     verifier, keeper, _ = keeper_for(tmp_path, label="tarp.jpg", reference=b"reference", describe=describe)
     assert keeper.step(0.0) is None
     assert keeper.step(1.0) == b"a red tarp"
@@ -199,7 +226,7 @@ def test_an_image_wins_over_text_and_changes_are_followed(tmp_path):
     assert not keeper.update() and len(described) == 1
     write(tmp_path / "prompt.jpg", b"jpeg 2!", 300)
     keeper.update()
-    assert verifier.reference == b"encoded jpeg 2!" and verifier.description is None
+    assert verifier.reference == b"encoded jpeg 2!" and len(described) == 2
     # The newer of prompt.jpg and prompt.jpeg
     write(tmp_path / "prompt.jpeg", b"jpeg 3", 400)
     keeper.update()
@@ -249,8 +276,8 @@ def test_an_image_that_cant_be_read_is_tried_again(tmp_path):
             raise ValueError("not an image yet")
         return b"encoded"
 
-    verifier = Verifier(Model("yes"), label="a tarp")
-    keeper = PromptKeeper(verifier, live=LiveDir(tmp_path), describe=lambda image: "a tarp", load_image=load)
+    verifier = Verifier(named("a tarp"), label="a tarp")
+    keeper = PromptKeeper(verifier, live=LiveDir(tmp_path), load_image=load)
     assert not keeper.update() and verifier.reference is None
     assert keeper.update() and verifier.reference == b"encoded"
 
@@ -301,56 +328,18 @@ def test_the_model_is_loaded_with_a_small_context(monkeypatch):
             main.parse_verifier_args(json.dumps({"prompt": "p", "num_ctx": bad}))
 
 
-# Description mode: a fake model that names the image's kind and answers each
-# frame question by its prompt
-def described_model(answers):
-    from cliped.verifier import CATEGORY_QUESTION
-
-    def answer(question):
-        if question == CATEGORY_QUESTION:
-            return "'A quadruped robot dog.'"
-        return next(a for prompt, a in answers.items() if prompt in question)
-    return Model(answer)
-
-
-def test_description_mode_asks_about_the_image_s_kind_as_text():
-    from cliped.verifier import BOX_QUESTION, CATEGORY_QUESTION
-    model = described_model({"A quadruped robot dog": "yes"})
-    verifier = Verifier(model, label="dog.jpg", reference=b"reference", question="box", image_mode="description")
-    # Named as soon as it is set, before any frame
-    assert verifier.category == "A quadruped robot dog" and len(model.asked) == 1
-    for _ in range(2):
-        keep, result = verifier.on_input(make_input(1, make_frame()))
-        assert keep and verdict(result) == {"match": True}
-    # Named once, then each frame asked about as text, without the image
-    question = BOX_QUESTION.format(prompt="A quadruped robot dog")
-    assert [q for q, _ in model.asked] == [CATEGORY_QUESTION, question, question]
-    assert model.asked[0][1] == [b"reference"] and all(len(images) == 1 for _, images in model.asked[1:])
-    # The heartbeat's description is still PromptKeeper's
-    assert verifier.description is None
-
-
-def test_description_mode_leaves_a_text_prompt_as_is():
-    from cliped.verifier import BOX_QUESTION
-    model = Model("yes")
-    keep, _ = Verifier(model, label="a dog", question="box", image_mode="description").on_input(
-        make_input(1, make_frame()))
-    assert keep and [q for q, _ in model.asked] == [BOX_QUESTION.format(prompt="a dog")]
-
-
 def test_a_new_image_is_named_when_it_is_set():
-    model = described_model({"A quadruped robot dog": "yes"})
-    verifier = Verifier(model, label="dog.jpg", reference=b"reference", question="box", image_mode="description")
+    model = named("A quadruped robot dog")
+    verifier = Verifier(model, label="dog.jpg", reference=b"reference", question="box")
     verifier.on_input(make_input(1, make_frame()))
     verifier.set_prompt("other.jpg", b"other")
-    assert model.asked[-1] == (model.asked[0][0], [b"other"]) and verifier.category == "A quadruped robot dog"
+    assert model.asked[-1] == (CATEGORY_QUESTION, [b"other"]) and verifier.description == "A quadruped robot dog"
     # A text prompt replaces it as is
     verifier.set_prompt("a cat")
-    assert verifier.category is None and len(model.asked) == 3
+    assert verifier.description == "a cat" and len(model.asked) == 3
 
 
 def test_an_image_the_model_couldnt_name_is_named_at_the_next_frame():
-    from cliped.verifier import CATEGORY_QUESTION
     down = [True]
 
     def answer(question):
@@ -360,26 +349,105 @@ def test_an_image_the_model_couldnt_name_is_named_at_the_next_frame():
             return "a quadruped robot dog"
         return "yes"
     model = Model(answer)
-    verifier = Verifier(model, label="dog.jpg", reference=b"reference", question="box", image_mode="description")
-    assert verifier.category is None
+    verifier = Verifier(model, label="dog.jpg", reference=b"reference", question="box")
+    assert verifier.description is None
     down[0] = False
     keep, _ = verifier.on_input(make_input(1, make_frame()))
-    assert keep and verifier.category == "a quadruped robot dog"
+    assert keep and verifier.description == "a quadruped robot dog"
     assert [q for q, _ in model.asked][:2] == [CATEGORY_QUESTION, CATEGORY_QUESTION]
 
 
-def test_a_live_image_is_named_when_it_changes(tmp_path):
-    from cliped.verifier import CATEGORY_QUESTION
-    model = described_model({"A quadruped robot dog": "yes"})
-    verifier = Verifier(model, label="a dog", question="box", image_mode="description")
+def test_a_live_image_is_described_when_it_changes(tmp_path):
+    model = named("A gray robotic dog")
+    verifier = Verifier(model, label="a dog", question="box", image_descriptive=True)
     live = tmp_path / "live"
     live.mkdir()
     keeper = PromptKeeper(verifier, live=LiveDir(live), load_image=lambda path: path.read_bytes())
     (live / "prompt.jpg").write_bytes(b"photo")
     keeper.update()
-    assert model.asked == [(CATEGORY_QUESTION, [b"photo"])] and verifier.category == "A quadruped robot dog"
+    assert model.asked == [(DESCRIPTIVE_QUESTION, [b"photo"])] and verifier.description == "A gray robotic dog"
+    assert keeper.step(0.0) == b"A gray robotic dog"
 
 
-def test_an_unknown_image_mode_is_refused():
-    with pytest.raises(ValueError):
-        Verifier(Model("yes"), label="x", image_mode="photo")
+class ScoredModel:
+    """Stands in for Ollama asked with scores: answers `answer` with the
+    probabilities `p_yes` and `p_no` (None for a server without them)."""
+
+    def __init__(self, answer, p_yes, p_no):
+        self.answer, self.p_yes, self.p_no = answer, p_yes, p_no
+        self.scored = []
+
+    def __call__(self, question, images, max_tokens=8, scores=False):
+        self.scored.append(scores)
+        return (self.answer, self.p_yes, self.p_no) if scores else self.answer
+
+
+def confident(model):
+    return Verifier(model, label="a mannequin")
+
+
+def test_with_confidences_the_probabilities_decide_and_are_reported():
+    keep, result = confident(ScoredModel("Yes", 0.8, 0.2)).on_input(make_input(1, make_frame()))
+    assert keep and verdict(result) == {"match": True, "p_yes": 0.8, "p_no": 0.2}
+    keep, result = confident(ScoredModel("No", 0.05, 0.95)).on_input(make_input(1, make_frame()))
+    assert not keep and verdict(result) == {"match": False, "p_yes": 0.05, "p_no": 0.95}
+
+
+def test_between_the_confidences_a_frame_is_forwarded_as_unsure():
+    # The model's word is no, but not confidently: forwarded, not to be learned
+    for p_yes in (0.11, 0.5, 0.69):
+        model = ScoredModel("No", p_yes, 1 - p_yes)
+        v = confident(model)
+        keep, result = v.on_input(make_input(1, make_frame()))
+        assert keep and model.scored == [True]
+        assert verdict(result) == {"match": None, "unsure": True, "p_yes": p_yes, "p_no": round(1 - p_yes, 4)}
+        assert (v.matched, v.unsure, v.frames) == (0, 1, 1)
+
+
+def test_without_probabilities_the_answer_decides():
+    keep, result = confident(ScoredModel("No", None, None)).on_input(make_input(1, make_frame()))
+    assert not keep and verdict(result) == {"match": False}
+
+
+def test_the_confidences_can_be_set():
+    keep, result = Verifier(ScoredModel("Yes", 0.8, 0.2), label="x", yes_conf=0.85).on_input(make_input(1, make_frame()))
+    assert keep and verdict(result)["unsure"] is True
+    keep, result = Verifier(ScoredModel("No", 0.15, 0.85), label="x", no_conf=0.8).on_input(make_input(1, make_frame()))
+    assert not keep and verdict(result)["match"] is False
+    for kwargs in ({"yes_conf": 0.5}, {"no_conf": 1.2}, {"yes_conf": True}):
+        with pytest.raises(ValueError):
+            Verifier(Model("yes"), label="x", **kwargs)
+
+
+def test_answer_scores_sums_the_spellings_of_yes_and_no():
+    import math
+
+    from cliped.verifier import answer_scores
+
+    top = [{"token": "No", "logprob": math.log(0.6)}, {"token": " no", "logprob": math.log(0.1)},
+           {"token": "Yes", "logprob": math.log(0.25)}, {"token": "YES", "logprob": math.log(0.04)},
+           {"token": "Maybe", "logprob": math.log(0.01)}]
+    p_yes, p_no = answer_scores([{"token": "No", "logprob": math.log(0.6), "top_logprobs": top}])
+    assert (round(p_yes, 6), round(p_no, 6)) == (0.29, 0.7)
+    assert answer_scores(None) == (None, None) and answer_scores([]) == (None, None)
+
+
+def test_asking_for_scores_asks_ollama_for_logprobs(monkeypatch):
+    import math
+
+    from cliped.verifier import Ollama
+
+    sent = []
+
+    def post(self, path, body, timeout_s):
+        sent.append(body)
+        return {"message": {"content": "Yes"},
+                "logprobs": [{"token": "Yes", "logprob": math.log(0.9),
+                              "top_logprobs": [{"token": "Yes", "logprob": math.log(0.9)},
+                                               {"token": "No", "logprob": math.log(0.1)}]}]}
+
+    monkeypatch.setattr(Ollama, "_post", post)
+    answer, p_yes, p_no = Ollama("localhost:11434", "m").ask("q?", [b"png"], scores=True)
+    assert answer == "Yes" and round(p_yes, 6) == 0.9 and round(p_no, 6) == 0.1
+    assert sent[0]["logprobs"] is True and sent[0]["top_logprobs"] == 20
+    assert Ollama("localhost:11434", "m").ask("q?", [b"png"]) == "Yes" and "logprobs" not in sent[1]

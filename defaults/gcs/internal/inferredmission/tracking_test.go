@@ -67,22 +67,31 @@ func TestCropsAreSquareAroundTheBoxAndEnlarged(t *testing.T) {
 	}
 }
 
-func TestWritingAPromptSetsAsideTheImagePrompt(t *testing.T) {
+func TestWritingAnImagePromptReplacesPromptJPGAndSetsAsidePromptJPEG(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "prompt.jpg"), []byte("jpeg"), 0o600); err != nil {
+	for name, data := range map[string]string{"prompt.jpg": "old jpg", "prompt.jpeg": "old jpeg", "prompt.txt": "a person\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeLivePromptImage(dir, []byte("new jpeg")); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeLivePrompt(dir, "a white quadruped robot"); err != nil {
-		t.Fatal(err)
+	if data, _ := os.ReadFile(filepath.Join(dir, "prompt.jpg")); string(data) != "new jpeg" {
+		t.Fatalf("got prompt.jpg %q", data)
 	}
-	if text, _ := os.ReadFile(filepath.Join(dir, "prompt.txt")); string(text) != "a white quadruped robot\n" {
+	if _, err := os.Stat(filepath.Join(dir, "prompt.jpeg")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("prompt.jpeg, which could win over prompt.jpg, is still there")
+	}
+	if aside, _ := filepath.Glob(filepath.Join(dir, "replaced-*-prompt.jpeg")); len(aside) != 1 {
+		t.Fatalf("expected prompt.jpeg kept aside, got %v", aside)
+	}
+	// The text prompt is left as it is: the image wins over it
+	if text, _ := os.ReadFile(filepath.Join(dir, "prompt.txt")); string(text) != "a person\n" {
 		t.Fatalf("got prompt.txt %q", text)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "prompt.jpg")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("the image prompt, which wins over the text, is still there")
-	}
-	if aside, _ := filepath.Glob(filepath.Join(dir, "replaced-*-prompt.jpg")); len(aside) != 1 {
-		t.Fatalf("expected the image prompt kept aside, got %v", aside)
+	if temps, _ := filepath.Glob(filepath.Join(dir, ".prompt-*")); len(temps) != 0 {
+		t.Fatalf("left temporary files %v", temps)
 	}
 }
 
@@ -126,7 +135,7 @@ func targetFrame(t *testing.T) []nl2dsl.Image {
 }
 
 func TestATrackedObjectThatIsntThePromptBecomesThePrompt(t *testing.T) {
-	asked := fakeOllama(t, "No.", `"A white quadruped robot."`)
+	asked := fakeOllama(t, "No.", "unused")
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "prompt.txt"), []byte("a person in a red shirt\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -135,17 +144,29 @@ func TestATrackedObjectThatIsntThePromptBecomesThePrompt(t *testing.T) {
 	meta := session{Settings: DefaultSettings()}
 	meta.Settings.Verifier, meta.Settings.VerifierLiveDir = "qwen", dir
 	r := &run{dir: t.TempDir()}
+	if err := os.MkdirAll(r.sectionDir(0), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	label := detectorLabel{ID: 2, Class: "robotic dog", Box: &[4]float64{0.4, 0.4, 0.5, 0.6}}
 	check := s.checkTarget(r, meta, section{}, boxRef{1, 2}, label, targetFrame(t))
 	if check.Error != "" || check.Prompt != "a person in a red shirt" || check.Match == nil || *check.Match ||
-		check.NewPrompt != "A white quadruped robot" || !check.PromptWritten {
+		check.NewPromptImage != "new_prompt.jpg" || !check.PromptWritten {
 		t.Fatalf("expected the prompt replaced, got %+v", check)
 	}
-	if len(*asked) != 2 || !strings.Contains((*asked)[0], "red box a person in a red shirt?") {
-		t.Fatalf("expected the box question with the prompt, then a description, got %q", *asked)
+	// Only the box question: the verifier describes the crop itself
+	if len(*asked) != 1 || !strings.Contains((*asked)[0], "red box a person in a red shirt?") {
+		t.Fatalf("expected only the box question with the prompt, got %q", *asked)
 	}
-	if text, _ := os.ReadFile(filepath.Join(dir, "prompt.txt")); string(text) != "A white quadruped robot\n" {
-		t.Fatalf("got prompt.txt %q", text)
+	data, err := os.ReadFile(filepath.Join(dir, "prompt.jpg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := jpeg.Decode(bytes.NewReader(data))
+	if err != nil || img.Bounds().Dx() < enlargeMinSide {
+		t.Fatalf("expected a JPEG crop at least %d px, got %v (%v)", enlargeMinSide, img.Bounds(), err)
+	}
+	if saved, _ := os.ReadFile(filepath.Join(r.sectionDir(0), "new_prompt.jpg")); !bytes.Equal(saved, data) {
+		t.Fatal("the crop isn't kept beside the section's record")
 	}
 }
 
@@ -160,7 +181,7 @@ func TestATrackedObjectThatIsThePromptKeepsIt(t *testing.T) {
 	meta.Settings.Verifier, meta.Settings.VerifierLiveDir = "qwen", dir
 	label := detectorLabel{ID: 1, Class: "robotic dog", Box: &[4]float64{0.4, 0.4, 0.5, 0.6}}
 	check := s.checkTarget(&run{dir: t.TempDir()}, meta, section{}, boxRef{1, 1}, label, targetFrame(t))
-	if check.Error != "" || check.Match == nil || !*check.Match || check.NewPrompt != "" || len(*asked) != 1 {
+	if check.Error != "" || check.Match == nil || !*check.Match || check.NewPromptImage != "" || len(*asked) != 1 {
 		t.Fatalf("expected the prompt kept, got %+v after %q", check, *asked)
 	}
 	if text, _ := os.ReadFile(filepath.Join(dir, "prompt.txt")); string(text) != "a quadruped robot dog" {
@@ -211,12 +232,12 @@ func TestDeployCompilesOnTheVehicleThenSetsTheFailsafe(t *testing.T) {
 
 // The live directory may not exist yet when the first section's prompt is
 // written
-func TestWriteLivePromptMakesTheDirectory(t *testing.T) {
+func TestWriteLivePromptImageMakesTheDirectory(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "verifier_live")
-	if err := writeLivePrompt(dir, "a person in a red jacket"); err != nil {
+	if err := writeLivePromptImage(dir, []byte("jpeg")); err != nil {
 		t.Fatal(err)
 	}
-	if text, _ := os.ReadFile(filepath.Join(dir, "prompt.txt")); string(text) != "a person in a red jacket\n" {
-		t.Fatalf("prompt.txt is %q", text)
+	if data, _ := os.ReadFile(filepath.Join(dir, "prompt.jpg")); string(data) != "jpeg" {
+		t.Fatalf("prompt.jpg is %q", data)
 	}
 }

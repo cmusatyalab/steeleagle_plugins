@@ -427,7 +427,7 @@ func (s *Service) logSection(meta session, row section) {
 			event = event.Bool("verifier_match", *t.Match)
 		}
 		if t.PromptWritten {
-			event = event.Str("new_prompt", t.NewPrompt)
+			event = event.Str("new_prompt_image", t.NewPromptImage)
 		}
 		if t.Error != "" {
 			event = event.Str("target_error", t.Error)

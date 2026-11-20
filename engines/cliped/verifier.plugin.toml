@@ -1,7 +1,7 @@
 [plugin]
 name = "CLIP Edge Filter Verifier"
 type = "engine"
-description = "Asks a vision-language model on Ollama (Qwen3-VL 30B-A3B Instruct by default) whether each frame, e.g. a tile from the CLIP edge filter, matches a text or image prompt; forwards the frames that do and drops the rest"
+description = "Asks a vision-language model on Ollama (Qwen3-VL 30B-A3B Instruct by default) whether each frame, e.g. a tile from the CLIP edge filter, matches a text prompt (an image prompt is turned into text first); forwards the frames it says yes or is unsure about and drops the rest"
 
 [[args]]
 name = "prompt"
@@ -12,7 +12,7 @@ default = ""
 [[args]]
 name = "image"
 type = "string"
-description = "An image of what to look for, instead of prompt: a file in the daemon's files directory (STEELEAGLE_FILES), e.g. \"target.jpg\". With both set, image is used"
+description = "An image of what to look for, instead of prompt: a file in the daemon's files directory (STEELEAGLE_FILES), e.g. \"target.jpg\". The model turns it into a text prompt once (see image_descriptive), and is never shown it with a frame. With both set, image is used"
 default = ""
 
 [[args]]
@@ -36,14 +36,14 @@ default = 30000
 [[args]]
 name = "question"
 type = "string"
-description = "The question asked about each frame, instead of the default one; {prompt} in it is replaced by prompt (or the image's name). With image, the model sees the reference first and the frame second. It should ask for a yes or no answer: anything but yes drops the frame. Blank uses the default question; \"box\" asks about the object in the red box, for box_rerank's crops: whether it is the prompt, or, with image, the reference's target"
+description = "The question asked about each frame, instead of the default one; {prompt} in it is replaced by the text prompt (an image's text). It should ask for a yes or no answer. Blank uses the default question; \"box\" asks whether the object in the red box is the prompt, for box_rerank's crops"
 default = ""
 
 [[args]]
-name = "image_mode"
-type = "string"
-description = "How an image prompt is verified: \"image\" shows the model the image with each frame; \"description\" asks the model once what kind of thing the image shows, in a few words (e.g. \"a quadruped robot dog\"), and verifies each frame against that text. Description rejects look-alikes of other kinds (on live crops of a robot dog, it said yes to 4 of 80 others, against 25 with the image); image tells individuals of one kind apart (one person among others, where description is just \"a person\"). No effect on a text prompt"
-default = "image"
+name = "image_descriptive"
+type = "boolean"
+description = "How an image prompt becomes the text prompt, of the verifier and of CLIP (box_rerank follows it through the heartbeat): true asks the model for a short description of what it shows, with its noticeable colors and features visible from far above (e.g. \"Mannequin in dark green shirt and black pants\"), to tell an individual from others of its kind; false, just its kind (e.g. \"a quadruped robot dog\", \"a person\"), which rejects look-alikes of other kinds best (on live crops of a robot dog, its kind said yes to 4 of 80 others, a detailed description to 43). No effect on a text prompt"
+default = false
 
 [[args]]
 name = "min_side"
@@ -72,8 +72,20 @@ default = ""
 [[args]]
 name = "heartbeat"
 type = "number"
-description = "Seconds between prompt heartbeats: DERIVED events (type cliped/Prompt) holding the prompt's description as UTF-8 text, the text prompt or the model's description of the image, which box_rerank follows. They start once the first input has come"
+description = "Seconds between prompt heartbeats: DERIVED events (type cliped/Prompt) holding the text prompt as UTF-8, an image's text for an image, which box_rerank follows. They start once the first input has come"
 default = 1.0
+
+[[args]]
+name = "yes_conf"
+type = "number"
+description = "The least P(yes), the model's probability of yes as its first token, for a yes; over 0.5 and at most 1. A frame neither a yes nor a no (P(no) at least no_conf) is unsure: forwarded like a yes, but its result is {\"match\": null, \"unsure\": true}, so cliped and box_rerank learn nothing from it. Qwen3-VL 30B leans to no: on mannequin tiles, every frame between P(yes) 0.3 and 0.7 was a real mannequin. If the model gives no probabilities, its word decides"
+default = 0.7
+
+[[args]]
+name = "no_conf"
+type = "number"
+description = "The least P(no) for a no, which drops the frame; over 0.5 and at most 1. See yes_conf"
+default = 0.9
 
 [engine]
 type = "filter"
@@ -81,5 +93,7 @@ inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
 # Each RGB frame the model says matches is forwarded unchanged, and every other
 # frame is dropped. Either way the result is a GenericResult holding the JSON
 # {"match": true|false}, so cliped's send queue sees a RESULT for every tile
-# it sent, and learns from it.
+# it sent, and learns from it. An unsure frame (yes_conf, no_conf) is
+# forwarded with {"match": null, "unsure": true}, which isn't learned from;
+# every result also holds "p_yes" and "p_no".
 result = "steeleagle_protocol/v1/messages/result/GenericResult"
