@@ -6,7 +6,7 @@ description = "Scores the tiles of each camera frame against a text or image pro
 [[args]]
 name = "prompt"
 type = "string"
-description = "What to search for, as a noun phrase, e.g. \"a red tarp\" or \"person lying down\"; this or image is required"
+description = "What to search for, as a noun phrase, e.g. \"a red tarp\" or \"person lying down\". Optional: with neither this nor image, every frame is dropped until the verifier's prompt heartbeat sets the prompt"
 default = ""
 
 [[args]]
@@ -158,6 +158,24 @@ name = "defer_similar_matches"
 type = "number"
 description = "Keypoints (of 200) of a picked tile that must match a tile sent before for it to count as a near-copy, with defer_similar; lower counts more tiles as copies. Consecutive tiles of one object matched 45-139, unrelated tiles at most ~25, and one person from two angles 30"
 default = 40
+
+[[args]]
+name = "ignore_new"
+type = "boolean"
+description = "Keep this prompt (prompt or image, which must be set), whatever the verifier's prompt heartbeat says; false follows the verifier's prompt: its description, else its class, replaces this one, and learning starts over"
+default = false
+
+[[args]]
+name = "visual_guard"
+type = "boolean"
+description = "With learn: a no is kept from being learned only if its tile is visually (ORB keypoints, defer_similar_matches of them) a tile the verifier said yes to; false keeps the CLIP cosine guard, which in aerial video, where tiles' embeddings are all alike, keeps almost every no from being learned"
+default = true
+
+[[args]]
+name = "propagate_s"
+type = "number"
+description = "With learn: each answer of the verifier is also learned for the unanswered tiles picked in the last this many seconds that are visually the answered tile (ORB keypoints, defer_similar_matches of them), so one answer can confirm what is seen frame after frame; 0 learns only the answered tile. ~6 ms an answer on a Cortex-A55 core at 20"
+default = 20.0
 
 [engine]
 type = "classification"

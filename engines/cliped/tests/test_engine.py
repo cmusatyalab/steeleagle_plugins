@@ -175,9 +175,9 @@ def test_args_default_and_validate():
     args = main.parse_args(json.dumps({"prompt": "a red tarp", "image": " tarp.jpg ", "verifier": "v"}))
     assert (args["image"], args["prompt"]) == ("tarp.jpg", "")
     assert main.parse_args(json.dumps({"image": "tarp.jpg", "verifier": "v"}))["image"] == "tarp.jpg"
+    # Neither is fine: the verifier's prompt heartbeat sets it
+    assert main.parse_args(json.dumps({"prompt": " ", "image": "", "verifier": "v"}))["prompt"] == ""
     for bad in [
-        {"verifier": "v"},
-        {"prompt": " ", "image": "", "verifier": "v"},
         {"prompt": "p"},
         {"prompt": "p", "verifier": "v", "image": 3},
         {"prompt": "p", "verifier": "v", "log_tiles": "yes"},

@@ -31,7 +31,6 @@ a time, as cliped's does, and each RESULT of the verifier is learned. The
 frames themselves never wait on the verifier.
 """
 import csv
-import json
 import logging
 import math
 import time
@@ -60,7 +59,7 @@ from cliped.engine import (
 )
 from cliped.send_queue import Tile
 from cliped.sent_log import log_path
-from cliped.verifier import PROMPT_TYPE
+from cliped.prompt import PROMPT_TYPE, heartbeat_prompt, is_heartbeat, read_prompt, type_name  # noqa: F401
 from steeleagle_protocol.v1.messages.result import result_pb2
 
 logger = logging.getLogger("cliped.rerank")
@@ -82,12 +81,6 @@ DISCONNECTED = "detector disconnected"
 UNDECODABLE = "undecodable result"
 TOO_LATE = "result too late"
 _FAILED = {uriel.EventKind.SKIPPED: SKIPPED, uriel.EventKind.TIMED_OUT: TIMED_OUT}
-
-
-def type_name(payload_type):
-    """Engines write a type's name with slashes or, as detection-qnn does,
-    dots."""
-    return payload_type.replace(".", "/")
 
 
 def normalize_class(name):
@@ -186,23 +179,6 @@ class CandidateLog:
 
     def close(self):
         self._file.close()
-
-
-def read_prompt(text):
-    """The text prompt and class prompt of the verifier's heartbeat `text`:
-    JSON {"class", "description"}, the description CLIP ranks by (else the
-    class) and the class for the gate (None if it has none, or the same
-    text); or, from a verifier before the JSON, the text prompt alone."""
-    try:
-        payload = json.loads(text)
-    except ValueError:
-        return text, None
-    if not isinstance(payload, dict):
-        return text, None
-    clean = lambda value: " ".join(value.split()) if isinstance(value, str) else ""
-    description, class_prompt = clean(payload.get("description")), clean(payload.get("class"))
-    prompt = description or class_prompt
-    return prompt, (class_prompt if class_prompt and class_prompt.lower() != prompt.lower() else None)
 
 
 class Reranker:
@@ -359,17 +335,13 @@ class Reranker:
         heartbeat (a DERIVED event of type PROMPT_TYPE) holds. Returns whether
         the event was a heartbeat. With ignore_new, a heartbeat changes
         nothing."""
-        if (event.kind != uriel.EventKind.DERIVED or event.engine != self.verifier
-                or type_name(event.payload_type or "") != PROMPT_TYPE):
+        if not is_heartbeat(event, self.verifier):
             return False
         if self.ignore_new:
             return True
-        try:
-            text = bytes(event.result or b"").decode("utf-8")
-        except UnicodeDecodeError:
-            logger.warning("the verifier's prompt heartbeat isn't UTF-8; ignoring it")
-            return True
-        self.on_prompt(*read_prompt(text))
+        prompt = heartbeat_prompt(event)
+        if prompt is not None:
+            self.on_prompt(*prompt)
         return True
 
     def on_prompt(self, text, class_prompt=None):

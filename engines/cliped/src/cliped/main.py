@@ -54,6 +54,9 @@ DEFAULTS = {
     "log_scored": "",
     "defer_similar": False,
     "defer_similar_matches": 40,
+    "ignore_new": False,
+    "visual_guard": True,
+    "propagate_s": 20.0,
 }
 # Defaults of the args of verifier.plugin.toml
 VERIFIER_DEFAULTS = {
@@ -155,7 +158,11 @@ def parse_args(content):
     unset arg defaulted. Raises ConfigError for args that are missing or out
     of range."""
     args = _load(content, DEFAULTS)
-    _prompt_or_image(args)
+    # Neither is fine: every frame is dropped until the verifier's prompt
+    # heartbeat arrives
+    _strings(args, "prompt", "image")
+    if args["image"]:
+        args["prompt"] = ""
     _strings(args, "verifier")
     if not args["verifier"]:
         raise ConfigError("the 'verifier' arg must be set")
@@ -177,9 +184,16 @@ def parse_args(content):
             or not all(isinstance(bg, str) and bg.strip() for bg in backgrounds)):
         raise ConfigError("backgrounds must be a non-empty list of prompts")
     args["backgrounds"] = [bg.strip() for bg in backgrounds]
-    for name in ("quantized", "npu", "log_scores", "log_tiles", "learn", "defer_similar"):
+    for name in ("quantized", "npu", "log_scores", "log_tiles", "learn", "defer_similar", "ignore_new",
+                 "visual_guard"):
         if not isinstance(args[name], bool):
             raise ConfigError(f"{name} must be true or false")
+    propagate = args["propagate_s"]
+    if isinstance(propagate, bool) or not isinstance(propagate, (int, float)) or propagate < 0:
+        raise ConfigError(f"propagate_s must be a number of seconds of at least 0, not {propagate!r}")
+    args["propagate_s"] = float(propagate)
+    if args["ignore_new"] and not (args["prompt"] or args["image"]):
+        raise ConfigError("ignore_new keeps this engine's own prompt: set 'prompt' or 'image'")
     for name in ("log_sent", "log_scored"):
         if not isinstance(args[name], str):
             raise ConfigError(f"{name} must be a file name")
@@ -389,21 +403,36 @@ def encoders(args, image=None, texts=(), keep_text=False):
 
 def build(args, verifier, *, image=None, tile_log=None):
     """The Cliped of `args`, verified by the engine `verifier`, searching for
-    the image file `image` if given and for the text prompt if not."""
-    from cliped.clip import Selector
+    the image file `image` if given, for the text prompt if not, and for the
+    verifier's prompt once its heartbeat arrives (unless ignore_new)."""
+    import numpy as np
+
+    from cliped.clip import Selector, text_vectors
     from cliped.engine import Cliped
     from cliped.send_queue import SendQueue
 
     log = logging.getLogger("cliped")
-    image_encoder, t, b, _, _ = encoders(args, image)
+    # The text encoder is kept, to embed the verifier's prompt when it changes
+    follow = not args["ignore_new"]
+    image_encoder, t, b, _, text_encoder = encoders(args, image, keep_text=follow)
+    has_prompt = t is not None
+    if t is None:
+        t = np.zeros(b.shape[1])  # no prompt yet: no frame is scored
     if args["learn"]:
         log.info("learning from the verifier's answers (similarity %.2f, %d no's to gate; good similarity %.2f, "
                  "%d yes's to force; at most %d of each)", args["learn_similarity"], args["confirmations"],
                  args["good_similarity"], args["good_confirmations"], args["max_learned"])
-    selector = Selector(t, b, k=args["k"], ema=args["ema"], margin=args["margin"], max_send=args["max_send"],
+
+    def selector_for(t):
+        return Selector(t, b, k=args["k"], ema=args["ema"], margin=args["margin"], max_send=args["max_send"],
                         learn=args["learn"], similarity=args["learn_similarity"],
                         confirmations=args["confirmations"], max_learned=args["max_learned"],
                         good_similarity=args["good_similarity"], good_confirmations=args["good_confirmations"])
+
+    def retarget(text):
+        return selector_for(text_vectors(text_encoder, text, args["backgrounds"])[0])
+
+    selector = selector_for(t)
     from cliped.sent_log import ScoredLog, SentLog
 
     queue = SendQueue(max_size=args["max_queue"])
@@ -414,6 +443,15 @@ def build(args, verifier, *, image=None, tile_log=None):
         similar = SimilarFilter(args["defer_similar_matches"])
         log.info("tiles like one sent before (%d keypoints matching) go behind the new ones",
                  args["defer_similar_matches"])
+    visual = None
+    if args["learn"] and (args["visual_guard"] or args["propagate_s"] > 0):
+        from cliped.similar import SimilarFilter
+
+        visual = similar or SimilarFilter(args["defer_similar_matches"])
+        log.info("learning: %s; %s", "a no is guarded only if its tile is visually a tile said yes to"
+                 if args["visual_guard"] else "the cosine guard", f"each answer is also learned for the tiles "
+                 f"picked in the last {args['propagate_s']:g}s that are visually its tile"
+                 if args["propagate_s"] > 0 else "no propagation")
     return Cliped(
         image_encoder,
         selector,
@@ -427,6 +465,12 @@ def build(args, verifier, *, image=None, tile_log=None):
         sent_log=SentLog(args["log_sent"]) if args.get("log_sent") else None,
         scored_log=ScoredLog(args["log_scored"]) if args.get("log_scored") else None,
         similar=similar,
+        has_prompt=has_prompt,
+        retarget=retarget if follow else None,
+        ignore_new=args["ignore_new"],
+        visual=visual,
+        visual_guard=args["visual_guard"],
+        propagate_s=args["propagate_s"],
     )
 
 
@@ -523,6 +567,11 @@ def main_cliped(name):
 
     verifier = qualify(os.environ.get("STEELEAGLE_REMOTE_QUALIFIER", ""), args["verifier"])
     cliped = build(args, verifier, image=image, tile_log=log)
+    clog = logging.getLogger("cliped")
+    if cliped.ignore_new:
+        clog.info("ignore_new: keeping this prompt, whatever the verifier's is")
+    elif not cliped.has_prompt:
+        clog.info("no prompt: dropping every frame until the verifier's prompt heartbeat arrives")
     run(name, cliped, max_output_size=max_output_size(args["tile_size"]), stop=stop_on_signals())
 
 

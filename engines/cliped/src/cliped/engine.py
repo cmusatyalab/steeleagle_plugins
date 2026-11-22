@@ -20,7 +20,27 @@ With learning on, the verifier's RESULT for a tile also teaches the selector
 (clip.Selector.learn): tiles like one it said yes to are sent, and tiles like
 one it said no to, again and again, are not; when that changes, every tile
 still queued is rescored, and the ones that no longer pass are dropped.
+With `visual`, a SimilarFilter, two things change. A no is kept from being
+learned (guarded) only if its tile is visually a tile the verifier said yes
+to, ORB keypoints matching, rather than CLIP-alike (visual_guard): CLIP
+embeddings of aerial tiles are too alike to tell. And each answer is also
+learned for every tile picked in the last `propagate_s` seconds that is
+visually the answered tile (propagation): a target or distractor seen in
+frame after frame is confirmed by one answer rather than by the verifier
+seeing it twice.
+
+The engine follows the verifier's prompt, as box_rerank does: it subscribes to
+the verifier and takes each prompt heartbeat (a DERIVED event of type
+prompt.PROMPT_TYPE). With no prompt or image of its own, it drops every frame
+until the first heartbeat, sending the verifier a primer tile (the middle of
+a frame, never learned from) at most every PRIME_INTERVAL_S while nothing is
+queued: the verifier's heartbeat is about an input, so it starts only once
+the verifier has one. Then, and whenever the verifier's prompt changes,
+it searches for that text, learning over: the tiles waiting are dropped, and
+answers about tiles sent for an earlier prompt are not learned from. With
+ignore_new, it keeps its own prompt and doesn't subscribe.
 """
+import collections
 import json
 import logging
 import time
@@ -30,6 +50,7 @@ import uriel
 from google.protobuf.message import DecodeError
 
 from cliped.clip import CONFIRMED, CONFIRMED_GOOD, DROPPED_GOOD, cut_tiles, tile_boxes
+from cliped.prompt import heartbeat_prompt, is_heartbeat
 from cliped.send_queue import Tile
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from steeleagle_protocol.v1.messages.result import result_pb2
@@ -51,6 +72,9 @@ POLL_INTERVAL_S = 0.02
 # The producer that sends queued tiles, as cliped.plugin.toml advertises it;
 # the engine publishes on {engine name}.{this}.
 REINTEGRATION = "reintegration"
+# Without a prompt, the least time between two primer tiles sent so that the
+# verifier has an input, which its first prompt heartbeat needs
+PRIME_INTERVAL_S = 5.0
 # Fields a tile keeps of the frame it was cut from.
 _FRAME_FIELDS = ("timestamp", "gimbal_info", "position_info")
 
@@ -138,11 +162,23 @@ class Cliped:
     has them; Reintegration sends the ones waiting."""
 
     def __init__(self, encoder, selector, queue, *, prompt, verifier, tile_size, stride, log_scores=False,
-                 tile_log=None, sent_log=None, scored_log=None, similar=None):
+                 tile_log=None, sent_log=None, scored_log=None, similar=None, has_prompt=True, retarget=None,
+                 ignore_new=False, visual=None, visual_guard=False, propagate_s=0.0):
         self.encoder = encoder
         self.selector = selector
         self.queue = queue
+        # The prompt: its text, or an image's file name ("" for none yet);
+        # whether there is one at all (without one, every frame is dropped);
+        # and retarget(text), the selector for the text prompt `text`, for
+        # the verifier's prompt (on_prompt), or None if it can't switch
         self.prompt = prompt
+        self.has_prompt = has_prompt
+        self.retarget = retarget
+        # Whether to keep this prompt whatever the verifier's is
+        self.ignore_new = ignore_new
+        # How many prompts it has switched to: an answer about a tile of an
+        # earlier one isn't learned from
+        self.generation = 0
         self.verifier = verifier
         self.tile_size = tile_size
         self.stride = stride
@@ -156,9 +192,24 @@ class Cliped:
         # A similar.SimilarFilter that tells the tiles like one sent before,
         # which go behind the new ones, or None (defer_similar off)
         self.similar = similar
+        # A similar.SimilarFilter whose ORB keypoints and matching the visual
+        # guard and propagation use, or None for neither
+        self.visual = visual
+        self.visual_guard = visual_guard and visual is not None
+        self.propagate_s = propagate_s if visual is not None else 0.0
+        # The tiles picked in the last propagate_s: (time.monotonic(), tile)
+        self._recent = collections.deque()
+        # The time of the latest input, which propagate_s is counted back from
+        self._last_now = None
+        # The keypoints of the tiles the verifier said yes to, newest last
+        self._good_features = collections.deque(maxlen=max(1, getattr(selector, "max_learned", 32)))
         self._boxes = {}  # (width, height) -> tile boxes
         self.frames = 0
         self.picked = 0
+        # Frames dropped for want of a prompt, and when the next primer tile
+        # may be sent (time.monotonic())
+        self.unprompted = 0
+        self._next_primer = None
 
     def on_event(self, event):
         """Takes an event about a reintegration input, at any engine."""
@@ -170,20 +221,124 @@ class Cliped:
         """Learns from the verifier's result about `tile`, then rescores the
         queue if that changed what the selector knows."""
         match = read_verdict(event)
-        if match is None or tile.embedding is None:
+        if match is None or tile.embedding is None or not self.has_prompt:
             return
+        if tile.generation != self.generation:
+            logger.info("verifier: an answer about the tile of frame %d, sent for an earlier prompt; not learned",
+                        tile.frame_id)
+            return
+        tile.answered = True
         if match == UNSURE:
             logger.info("verifier: unsure about the tile of frame %d; not learned", tile.frame_id)
             return
-        outcome = self.selector.learn(tile.embedding, match)
-        message = "verifier: %s for the tile of frame %d: %s (%d good, %d confirmed; %d background tiles)"
+        outcome = self._learn_one(tile, match)
+        changed = outcome in (CONFIRMED_GOOD, CONFIRMED, DROPPED_GOOD)
+        propagated = []
+        for other, n in self._like(tile):
+            also = self._learn_one(other, match)
+            changed |= also in (CONFIRMED_GOOD, CONFIRMED, DROPPED_GOOD)
+            propagated.append(f"{other.frame_id} ({n} keypoints): {also}")
+        message = "verifier: %s for the tile of frame %d: %s (%d good, %d confirmed; %d background tiles, %d confirmed)"
         args = ["yes" if match else "no", tile.frame_id, outcome, len(self.selector.good),
-                len(self.selector.confirmed_good), len(self.selector.backgrounds)]
-        if outcome in (CONFIRMED_GOOD, CONFIRMED, DROPPED_GOOD):
+                len(self.selector.confirmed_good), len(self.selector.backgrounds),
+                sum(n >= self.selector.confirmations for n in self.selector.noes)]
+        if propagated:
+            message += "; also learned for the tiles like it of frames %s"
+            args.append(", ".join(propagated))
+        if changed:
             dropped = self.queue.rescore(lambda t: self.selector.passes(t.embedding))
             message += "; rescored the queue, dropping %d (%d left)"
             args += [len(dropped), len(self.queue)]
         logger.info(message, *args)
+
+    def _learn_one(self, tile, match):
+        """Learns the answer `match` for `tile`: with the visual guard, a no
+        is guarded only if the tile's keypoints match a tile said yes to."""
+        guarded = None
+        if not match and self.visual_guard and tile.features is not None:
+            guarded = any(self.visual.matches(tile.features, g) >= self.visual.min_matches
+                          for g in self._good_features)
+        outcome = self.selector.learn(tile.embedding, match, guarded=guarded)
+        if match and tile.features is not None:
+            self._good_features.append(tile.features)
+        return outcome
+
+    def _like(self, tile, now=None):
+        """The tiles picked in the last propagate_s, for the current prompt and
+        not answered, that are visually `tile`, with how many keypoints
+        match. Each is learned once per answer it is like."""
+        if not self.propagate_s or tile.features is None:
+            return []
+        now = (self._last_now if self._last_now is not None else time.monotonic()) if now is None else now
+        while self._recent and now - self._recent[0][0] > self.propagate_s:
+            self._recent.popleft()
+        like = []
+        for _, other in self._recent:
+            if (other is tile or other.answered or other.generation != self.generation
+                    or other.features is None or other.embedding is None):
+                continue
+            n = self.visual.same(tile.features, other.features, tile.embedding, other.embedding)
+            if n >= self.visual.min_matches:
+                like.append((other, n))
+        return like
+
+    def on_prompt_event(self, event):
+        """Takes an event of the verifier: switches to the prompt its
+        heartbeat holds (on_prompt). Returns whether the event was a
+        heartbeat. With ignore_new, a heartbeat changes nothing."""
+        if not is_heartbeat(event, self.verifier):
+            return False
+        if self.ignore_new:
+            return True
+        prompt = heartbeat_prompt(event)
+        if prompt is not None:
+            # The description is what CLIP searches for, else the class
+            self.on_prompt(prompt[0])
+        return True
+
+    def on_prompt(self, text):
+        """Switches to the text prompt `text`, the verifier's, if it isn't the
+        current one, and starts learning over: what the verifier said about
+        the old prompt says nothing about the new one. The tiles waiting are
+        dropped; answers about the ones in flight are not learned from.
+        Returns whether it switched."""
+        text = " ".join((text or "").split())
+        if not text or (self.has_prompt and text == self.prompt):
+            return False
+        if self.retarget is None:
+            logger.warning("the verifier's prompt is %r, but this engine can't switch prompts", text)
+            self.prompt, self.has_prompt = text, True  # warn once; keeps searching for its own
+            return False
+        old = self.prompt if self.has_prompt else None
+        self.selector = self.retarget(text)
+        self.prompt, self.has_prompt = text, True
+        self.generation += 1
+        dropped = self.queue.rescore(lambda tile: (False, tile.score, False))
+        if self.similar is not None:
+            self.similar.forget()
+        self._recent.clear()
+        self._good_features.clear()
+        logger.info("prompt: now %r (was %s), the verifier's; learning cleared, %d waiting tiles dropped%s",
+                    text, "none" if old is None else repr(old), len(dropped),
+                    f"; {self.unprompted} frames dropped while it had none" if old is None and self.unprompted else "")
+        return True
+
+    def _prime(self, frame, rgb, now):
+        """Without a prompt, queues the middle tile of `frame` (`rgb`) for the
+        verifier, unless a tile waits or one was primed in the last
+        PRIME_INTERVAL_S: the verifier's prompt heartbeat starts with its
+        first input. It has no embedding, so its answer is never learned."""
+        if len(self.queue) or (self._next_primer is not None and now < self._next_primer):
+            return
+        boxes = self.boxes(rgb.shape[1], rgb.shape[0])
+        cx, cy = rgb.shape[1] / 2, rgb.shape[0] / 2
+        i = min(range(len(boxes)), key=lambda j: abs((boxes[j][0] + boxes[j][2]) / 2 - cx)
+                + abs((boxes[j][1] + boxes[j][3]) / 2 - cy))
+        self.queue.push(Tile(score=0.0, payload=tile_frame(frame, rgb, boxes[i]), frame_id=frame.id, box=boxes[i],
+                             index=i, generation=self.generation))
+        self._next_primer = now + PRIME_INTERVAL_S
+        logger.info("no prompt yet: sending the verifier the middle tile of frame %d, for its prompt heartbeat",
+                    frame.id)
 
     def boxes(self, width, height):
         key = (width, height)
@@ -199,7 +354,13 @@ class Cliped:
         picked is queued for reintegration, the one forwarded included.
         Raises FrameError if `input` is not an RGB RawFrame."""
         now = time.monotonic() if now is None else now
+        self._last_now = now
         frame, rgb = read_frame(bytes(input.data))
+        if not self.has_prompt:
+            # Nothing to search for until the verifier's prompt heartbeat
+            self.unprompted += 1
+            self._prime(frame, rgb, now)
+            return None, b""
         if self.tile_log is not None:
             self.tile_log.input(frame.id, rgb)
         height, width = rgb.shape[:2]
@@ -212,13 +373,18 @@ class Cliped:
 
         tiles = [
             Tile(score=float(s[i]), payload=tile_frame(frame, rgb, boxes[i]), frame_id=frame.id, box=boxes[i],
-                 index=int(i), embedding=v[i], must_send=bool(must))
+                 index=int(i), embedding=v[i], must_send=bool(must), generation=self.generation)
             for i, must in zip(picked, must_send)
         ]
         for tile in tiles:
+            x0, y0, x1, y1 = tile.box
+            if self.visual is not None:
+                tile.features = self.visual.features(np.ascontiguousarray(rgb[y0:y1, x0:x1]))
+                if self.propagate_s:
+                    self._recent.append((now, tile))
             if self.similar is not None:
-                x0, y0, x1, y1 = tile.box
-                tile.similar = not self.similar.is_new(rgb[y0:y1, x0:x1], tile.embedding, frame.id)
+                tile.similar = not self.similar.is_new(rgb[y0:y1, x0:x1], tile.embedding, frame.id,
+                                                       feats=tile.features)
             self.queue.push(tile)
             if self.sent_log is not None:
                 self.sent_log.write(frame, tile, width, height, self.prompt)
@@ -301,15 +467,25 @@ def run(name, cliped, *, max_output_size, stop, on_ready=None):
         uriel.Subscription.producer(producer) as events,
     ):
 
+        # For the verifier's prompt heartbeat
+        if not cliped.ignore_new:
+            engine.subscribe(cliped.verifier)
+
         def publish(payload):
             return uriel.InputId(producer, tiles.session, tiles.send(payload))
 
-        logger.info("engine %s ready, with producer %s; searching for %r, verified by %s",
-                    name, producer, cliped.prompt, cliped.verifier)
+        logger.info("engine %s ready, with producer %s; searching for %s, verified by %s",
+                    name, producer, repr(cliped.prompt) if cliped.has_prompt else "the verifier's prompt",
+                    cliped.verifier)
         if on_ready is not None:
             on_ready()
         while not stop.is_set():
             engine.wait(POLL_INTERVAL_S)
+            while (event := engine.poll_event()) is not None:
+                try:
+                    cliped.on_prompt_event(event)
+                except Exception:
+                    logger.exception("failed to handle a %s event", event.kind)
             while (event := events.poll()) is not None:
                 try:
                     cliped.on_event(event)

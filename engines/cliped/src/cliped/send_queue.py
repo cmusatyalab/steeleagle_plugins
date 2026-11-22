@@ -67,6 +67,11 @@ class Tile:
     # Whether it is like a tile queued or sent before (defer_similar): it
     # goes behind every new tile
     similar: bool = False
+    # Its ORB keypoints (similar.SimilarFilter.features), for the visual guard
+    # and propagation, or None
+    features: object = None
+    # Whether the verifier answered it
+    answered: bool = False
 
     @property
     def in_flight(self):

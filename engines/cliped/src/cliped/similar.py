@@ -63,6 +63,11 @@ class SimilarFilter:
         self._seen = collections.deque(maxlen=memory)
         self.similar = 0
 
+    def forget(self):
+        """Forgets every tile seen: after a prompt switch, a tile like one
+        sent for the old prompt is new to the new one."""
+        self._seen.clear()
+
     def features(self, rgb):
         """The ORB keypoint positions and descriptors of the RGB tile `rgb`."""
         keypoints, descriptors = self._orb.detectAndCompute(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY), None)
@@ -84,12 +89,21 @@ class SimilarFilter:
                                                  ransacReprojThreshold=REPROJECTION_PX)
         return int(inliers.sum()) if inliers is not None else 0
 
-    def is_new(self, rgb, embedding, frame_id):
+    def same(self, a, b, va=None, vb=None):
+        """How many keypoints of the features `a` and `b` match (matches), or
+        0 without comparing if their unit CLIP embeddings `va` and `vb`, when
+        both given, are under the gate."""
+        if va is not None and vb is not None and float(np.asarray(va) @ np.asarray(vb)) < self.gate:
+            return 0
+        return self.matches(a, b)
+
+    def is_new(self, rgb, embedding, frame_id, feats=None):
         """Whether the RGB tile `rgb` of frame `frame_id` is new: False if it
         is too like a new tile before it, which it then names in the log;
         True, remembering it, if not. `embedding` is its unit CLIP embedding,
-        or None to compare it with every tile remembered."""
-        feats = self.features(rgb)
+        or None to compare it with every tile remembered; `feats`, its
+        features if already computed."""
+        feats = self.features(rgb) if feats is None else feats
         v = None if embedding is None else np.asarray(embedding, dtype=np.float32)
         for seen_id, seen_v, seen_p, seen_d in reversed(self._seen):
             if v is not None and seen_v is not None and float(v @ seen_v) < self.gate:

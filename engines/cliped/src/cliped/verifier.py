@@ -56,6 +56,8 @@ import cv2
 import uriel
 
 from cliped.engine import GENERIC_RESULT_TYPE, POLL_INTERVAL_S, RAW_FRAME_TYPE, FrameError, read_frame
+# The type of the heartbeat's DERIVED events (heartbeat_payload)
+from cliped.prompt import PROMPT_TYPE
 from steeleagle_protocol.v1.messages.result import result_pb2
 
 logger = logging.getLogger("cliped.verifier")
@@ -71,9 +73,6 @@ DEFAULT_HOST = "http://localhost:11434"
 MAX_OUTPUT_SIZE = 64 << 10
 # How long pulling the model may take, the first time it runs on a server
 PULL_TIMEOUT_S = 3600
-# The type of the heartbeat's DERIVED events: UTF-8 JSON {"class": ...,
-# "description": ...} (heartbeat_payload)
-PROMPT_TYPE = "cliped/Prompt"
 # Seconds between heartbeats
 HEARTBEAT_S = 1.0
 # The live directory's files: the question, and the prompt, an image (which

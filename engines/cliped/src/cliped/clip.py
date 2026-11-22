@@ -241,7 +241,13 @@ class Selector:
     background tiles, or within `similarity` of one. A tile is added only if
     it is below `similarity` (`good_similarity` for a good tile) to every tile
     in its set, and at most `max_learned` per set are kept, oldest dropped
-    first."""
+    first.
+
+    A caller that can tell a no's tile is visually a good tile (cliped's
+    visual_guard: ORB keypoints matching a tile said yes to) passes that as
+    learn's `guarded` instead: CLIP embeddings of aerial tiles are so alike
+    (a no's tile of grass and a bag ~0.9 to a yes's of a mannequin in grass)
+    that the cosine guard keeps almost every no from being learned."""
 
     def __init__(self, t, b, *, k=2, ema=0.9, margin=0.25, max_send=1, learn=False, similarity=0.85,
                  confirmations=2, max_learned=32, good_similarity=0.9, good_confirmations=2):
@@ -305,9 +311,10 @@ class Selector:
         indices = np.flatnonzero(send)
         return indices[np.lexsort((-s[indices], -verdict[indices]))][: self.max_send], s
 
-    def learn(self, x, match):
+    def learn(self, x, match, guarded=None):
         """Learns the verifier's answer `match` about the tile with embedding
-        `x`: ADDED_GOOD or ADDED_BACKGROUND if the tile was added (a good one
+        `x`; for a no, `guarded` (if not None) says whether the tile looks
+        like a good tile, in place of the cosine guard: ADDED_GOOD or ADDED_BACKGROUND if the tile was added (a good one
         as a candidate); CONFIRMED_GOOD or CONFIRMED if the answer confirmed a
         good or a background tile, so that it now gates; DROPPED_GOOD if a no
         dropped a candidate good tile; KNOWN if it was too close to a tile in
@@ -336,7 +343,7 @@ class Selector:
                 return DROPPED_GOOD
         sims = np.array([float(n @ x) for n in self.backgrounds])
         near_background = float(sims.max()) if len(sims) else np.inf
-        if near_good >= min(self.similarity, near_background):
+        if guarded if guarded is not None else near_good >= min(self.similarity, near_background):
             return GUARDED
         if len(sims) and near_background >= self.similarity:
             j = int(sims.argmax())

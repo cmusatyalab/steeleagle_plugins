@@ -25,6 +25,12 @@ cliped.reintegration → webp encoder ══ link ══ webp decoder → verifi
 
 With an `image` prompt, `t` is the reference image's embedding by the same image encoder as the tiles (the whole image, squeezed to a square). Image-to-image similarities run well above the image-to-text similarities of the backgrounds, so most tiles score `s > 0` and the adaptive threshold alone decides what is sent.
 
+### Following the verifier's prompt
+
+cliped follows the verifier's prompt heartbeat as box_rerank does (see [below](#following-the-verifiers-prompt)): it subscribes to the verifier, and its text prompt becomes the heartbeat's `description`, else its `class`. When that differs from cliped's current prompt, cliped embeds it and starts over: what it learned from the verifier is cleared, the tiles waiting are dropped (and, with `defer_similar`, the tiles seen are forgotten), and answers about tiles sent before the switch are not learned from. The same text changes nothing. So an `image` given to the verifier reaches cliped as the model's description of it (with `image_mode = "descriptive"`, e.g. "Mannequin in dark green shirt and black pants with white stripes"), which CLIP ranks by better than an image.
+
+`prompt` and `image` are optional: with neither, cliped drops every frame until the first heartbeat arrives. A heartbeat is about an input, so the verifier sends none until it has one: meanwhile cliped queues a primer tile, the middle tile of a frame, at most every 5 s while nothing else waits. Its answer is never learned from. Expect the frames before the first heartbeat (about one round trip and a verifier answer) to be dropped. With `ignore_new = true`, cliped keeps its own `prompt` or `image` (one must be set) and never subscribes.
+
 ## Learning from the verifier
 
 With `learn` (on by default), every `RESULT` the verifier sends back for a tile teaches cliped: the result is a `GenericResult` holding `{"match": true|false}`, and cliped keeps the tile's embedding, in its good tiles on a yes and its background tiles on a no. The learned tiles gate `s` rather than join it, the same way for text and image prompts. Tile-to-tile similarities (~0.8) dwarf a tile's similarity to the prompt (~0.5 to a reference photo, ~0.25 to text), so a learned tile in `s` would outscore the prompt everywhere.
@@ -54,13 +60,22 @@ The engine only adds to the queue; the `reintegration` producer delivers it. The
 
 When more than `max_queue` tiles wait, the lowest-priority tile is dropped, in flight or not: not a must-send, lowest score. A tile sent again may reach the verifier twice, if its `RESULT` was among the lost events; that is the price of never losing one.
 
+### Visual learning
+
+Learning confirms a tile once the verifier has answered two tiles alike, which in video means the same object in two picked frames. A no is not learned (guarded) when its tile looks like a tile said yes to, so that a target the verifier missed is not suppressed. By CLIP alone, aerial tiles all look alike: in the field_search flight (2026-11-22), every tile the verifier said no to (a bag, a patch of brush seen 10 times) was 0.84-0.92 cosine to a mannequin tile it said yes to, above the 0.85 guard, and 13 of its 14 no's were guarded; nothing was ever learned as background. With `visual_guard`, a no is guarded only if ORB keypoints of its tile match a yes's tile, as `defer_similar` tells near-copies; replaying that flight's answers, both distractors were confirmed as background and all 14 of their tiles would have been dropped, with none of the 24 mannequin tiles.
+
+With `propagate_s`, each answer is also learned for the unanswered tiles picked in the last `propagate_s` seconds whose keypoints match the answered tile, so the first answer about an object seen frame after frame confirms it. Each tile picked keeps its keypoints (3.4 ms a tile, shared with `defer_similar`), and an answer compares its tile with the tiles in the window: on fermi, 0.4 ms a pair and ~14 tiles in 20 s, ~6 ms an answer.
+
 ## Args
 
 | Arg | Default | Description |
 | --- | --- | --- |
-| `prompt` | | What to search for, as a noun phrase, e.g. `person lying down`; this or `image` is required |
+| `prompt` | | What to search for, as a noun phrase, e.g. `person lying down`. Optional: see [Following the verifier's prompt](#following-the-verifiers-prompt-1) |
 | `image` | | An image of what to search for, instead of `prompt`: a file in the daemon's files directory (`STEELEAGLE_FILES`). With both set, `image` is used |
 | `verifier` | | Required: the verifier's service name on the remote daemon, qualified with `STEELEAGLE_REMOTE_QUALIFIER` |
+| `ignore_new` | `false` | Keep this `prompt` or `image` (one must be set), whatever the verifier's prompt heartbeat says |
+| `visual_guard` | `true` | With `learn`: a no is kept from being learned only if its tile is visually a tile the verifier said yes to (ORB keypoints, `defer_similar_matches` of them), not merely CLIP-alike. See [Visual learning](#visual-learning) |
+| `propagate_s` | `20` | With `learn`: each answer is also learned for the unanswered tiles picked in the last this many seconds that are visually the answered tile; `0` learns only the answered tile |
 | `quantized` | `true` | INT8 image encoder (`image_encoder_int8.tflite`); `false` runs the FP32 one (`distill_visual.pt`) in PyTorch. Both are in the models directory: see [Models](#models) |
 | `tile_size` | `200` | Side of the square tiles, in pixels |
 | `stride` | `150` | Distance between neighboring tiles, in pixels |
