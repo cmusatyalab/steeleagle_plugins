@@ -1,7 +1,7 @@
 [plugin]
 name = "SwiftMap Reachback"
 type = "engine"
-description = "SwiftMap on the vehicle, after preprocess: forwards keyframes and sends back stored frames covering the weak targets of the swiftmap engine's plans"
+description = "SwiftMap on the vehicle, after preprocess: stores every frame, publishes keyframes on its keyframes producer, and the stored frames covering the weak targets of the swiftmap engine's plans on its sendback producer"
 
 [[args]]
 name = "remote"
@@ -24,11 +24,21 @@ default = 40.0
 [[args]]
 name = "max_output_size"
 type = "number"
-description = "Largest frame sent back, in bytes"
+description = "Largest frame published, in bytes"
 default = 6237184
 
 [engine]
 type = "filter"
 inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]
-# No result: keyframes forwarded, others dropped; frames sent back
-# (swiftmap/ReachbackFrame, then swiftmap/ReachbackDone) take incoming frames' places
+# A dead end: every frame is stored and dropped (no edge out of it)
+
+[[engine.producers]]
+# Keyframes, as the keyframe filter keeps them, unless holding. Give it one token
+name = "keyframes"
+output = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
+
+[[engine.producers]]
+# For each request, a stored frame per coverable target, one at a time, then an
+# EncodedFrame with no image as the end marker. Give it one token
+name = "sendback"
+output = "steeleagle_protocol/v1/messages/frame/EncodedFrame"

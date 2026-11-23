@@ -23,12 +23,9 @@ default = 1048576
 
 [engine]
 type = "generic"
-inputs = [
-    "steeleagle_protocol/v1/messages/frame/EncodedFrame",
-    "swiftmap/ReachbackFrame",
-    "swiftmap/ReachbackDone",
-]
-# The frame is forwarded unchanged. Its result is empty, or the bare KML of the
+inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]
+# Keyframes from reachback's keyframes producer, and frames sent back (or the
+# empty end marker) from its sendback producer. Its result is empty, or the bare KML of the
 # next-flight area the server planned since the last frame, which the vehicle
 # stores as a GenericResult's payload
 result = "steeleagle_protocol/v1/messages/result/GenericResult"
