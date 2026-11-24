@@ -1,11 +1,11 @@
 """The swiftmap engine, on the remote daemon: sends each frame's WebP and GPS to
-the SwiftMap server over TCP: a keyframe from reachback's keyframes producer,
+the SwiftMap server over TCP: a keyframe from the framestore's keyframes producer,
 or, from its sendback producer, a frame sent back or the empty end marker. The
 server's next-flight KML is the next frame's result, and its weak targets the
 next reachback request.
 
 In NFN mode the server holds new frames while a batch's rounds run (NFN_HOLD,
-NFN_RELEASE on its replies). The engine tells reachback the NFN status, whether
+NFN_RELEASE on its replies). The engine tells the framestore the NFN status, whether
 the server holds and the current request, when it changes, and polls the
 server every POLL_S while idle, so it hears of holds and plans without frames.
 
@@ -235,7 +235,7 @@ class SwiftMap:
         self._status_due = True
 
     def take_status(self):
-        """The NFN status to tell reachback, once each time it changes; else None."""
+        """The NFN status to tell the framestore, once each time it changes; else None."""
         if not self._status_due or self.last_id is None:
             return None
         self._status_due = False
@@ -295,4 +295,4 @@ def run(name, swiftmap, *, max_output_size, stop, on_ready=None):
                 try:
                     engine.publish_derived(swiftmap.last_id, flow, status, result_type=STATUS_TYPE)
                 except Exception:
-                    logger.exception("failed to tell reachback the NFN status")
+                    logger.exception("failed to tell the framestore the NFN status")

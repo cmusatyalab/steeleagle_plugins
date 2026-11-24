@@ -1,7 +1,7 @@
 [plugin]
-name = "SwiftMap Reachback"
+name = "SwiftMap Framestore"
 type = "engine"
-description = "SwiftMap on the vehicle, after preprocess: stores every frame, publishes keyframes on its keyframes producer, and the stored frames covering the weak targets of the swiftmap engine's plans on its sendback producer"
+description = "SwiftMap on the vehicle, after the encoder: stores every frame, publishes keyframes on its keyframes producer, and the stored frames covering the weak targets of the swiftmap engine's plans on its sendback producer"
 
 [[args]]
 name = "remote"

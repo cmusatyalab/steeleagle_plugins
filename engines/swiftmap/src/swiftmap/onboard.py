@@ -1,5 +1,5 @@
-"""Vehicle-side frame work: the preprocess engine, which shrinks each camera
-frame to SwiftMap's model input, and the keyframe filter reachback runs, so
+"""Vehicle-side frame work: the encoder engine, which shrinks each camera
+frame to SwiftMap's model input as WebP, and the keyframe filter the framestore runs, so
 only keyframes far enough apart cross the network."""
 
 import io
@@ -87,8 +87,8 @@ def encode_frame(data, *, image_resolution, patch_size, lossless, quality):
     return out.SerializeToString()
 
 
-def run_preprocess(name, args, *, stop):
-    """Serves the preprocess engine `name` until `stop` is set."""
+def run_encoder(name, args, *, stop):
+    """Serves the encoder engine `name` until `stop` is set."""
     options = {k: args[k] for k in ("image_resolution", "patch_size", "lossless", "quality")}
     limit = args["max_output_size"]
     with uriel.Engine(name, max_output_size=limit) as engine:

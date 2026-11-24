@@ -70,7 +70,7 @@ def server():
 
 @dataclass(frozen=True)
 class Id:
-    """An input id; hashable, as uriel's is, since reachback keys sends by it."""
+    """An input id; hashable, as uriel's is, since the framestore keys sends by it."""
 
     seq: int
     producer: str = "camera"
@@ -104,7 +104,7 @@ WEBP_HEADER = b"RIFF\0\0\0\0WEBP"
 
 
 def numbered_frame(number, gps=(40.0, -79.0, 10.0), yaw=0.0, pitch=-90.0):
-    """A WebP EncodedFrame numbered `number`, as the preprocess engine sends
+    """A WebP EncodedFrame numbered `number`, as the encoder engine sends
     one, whose "WebP" is a header and its number, so the server shows the
     order frames came, taken at `gps` with the camera at `yaw` and `pitch`
     degrees."""

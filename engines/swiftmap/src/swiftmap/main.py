@@ -1,6 +1,6 @@
 """Entrypoint of the swiftmap plugins (`pixi run start`). eagled names the plugin
 in STEELEAGLE_PLUGIN, its args in STEELEAGLE_PLUGIN_ARGS (JSON), and the engine
-name in STEELEAGLE_ENGINE_ENDPOINT; reachback also needs STEELEAGLE_REMOTE_QUALIFIER.
+name in STEELEAGLE_ENGINE_ENDPOINT; framestore also needs STEELEAGLE_REMOTE_QUALIFIER.
 Unset args take the defaults in the plugin's .plugin.toml."""
 
 import json
@@ -13,12 +13,12 @@ import threading
 import tomllib
 from pathlib import Path
 
-from swiftmap import onboard, reachback, remote
+from swiftmap import framestore, onboard, remote
 
 SWIFTMAP_PLUGIN = "swiftmap.plugin.toml"
-REACHBACK_PLUGIN = "reachback.plugin.toml"
-PREPROCESS_PLUGIN = "preprocess.plugin.toml"
-PLUGINS = (SWIFTMAP_PLUGIN, REACHBACK_PLUGIN, PREPROCESS_PLUGIN)
+FRAMESTORE_PLUGIN = "framestore.plugin.toml"
+ENCODER_PLUGIN = "encoder.plugin.toml"
+PLUGINS = (SWIFTMAP_PLUGIN, FRAMESTORE_PLUGIN, ENCODER_PLUGIN)
 PLUGIN_DIR = Path(__file__).resolve().parents[2]
 
 
@@ -48,7 +48,7 @@ def parse_args(plugin, content):
             raise ConfigError(f"{name} must not be negative")
     if args["max_output_size"] <= 0:
         raise ConfigError("max_output_size must be positive")
-    if plugin == PREPROCESS_PLUGIN:
+    if plugin == ENCODER_PLUGIN:
         if not 0 < args["patch_size"] <= args["image_resolution"]:
             raise ConfigError("patch_size must be positive and at most image_resolution")
         if args["image_resolution"] % args["patch_size"]:
@@ -58,19 +58,19 @@ def parse_args(plugin, content):
     return args
 
 
-def run_reachback(name, args, stop):
+def run_framestore(name, args, stop):
     remote_ip = os.environ.get("STEELEAGLE_REMOTE_QUALIFIER")
     if not remote_ip:
-        sys.exit("reachback needs STEELEAGLE_REMOTE_QUALIFIER")
+        sys.exit("framestore needs STEELEAGLE_REMOTE_QUALIFIER")
     # One database per service, replaced on each start
-    path = Path(tempfile.gettempdir()) / f"swiftmap-reachback-{name}.sqlite3"
+    path = Path(tempfile.gettempdir()) / f"swiftmap-framestore-{name}.sqlite3"
     path.unlink(missing_ok=True)
-    store = reachback.FrameStore(str(path))
+    store = framestore.FrameStore(str(path))
     keyframes = onboard.KeyframeFilter(min_disparity=args["min_disparity"],
                                        send_distance=args["send_distance"])
     try:
-        reachback.run(name, reachback.Reachback(store, keyframes),
-                      f"{remote_ip}.{args['remote']}", max_output_size=args["max_output_size"], stop=stop)
+        framestore.run(name, framestore.FrameStoreEngine(store, keyframes),
+                       f"{remote_ip}.{args['remote']}", max_output_size=args["max_output_size"], stop=stop)
     finally:
         store.close()
         path.unlink(missing_ok=True)
@@ -101,10 +101,10 @@ def main():
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
-    if plugin == REACHBACK_PLUGIN:
-        run_reachback(name, args, stop)
-    elif plugin == PREPROCESS_PLUGIN:
-        onboard.run_preprocess(name, args, stop=stop)
+    if plugin == FRAMESTORE_PLUGIN:
+        run_framestore(name, args, stop)
+    elif plugin == ENCODER_PLUGIN:
+        onboard.run_encoder(name, args, stop=stop)
     else:
         run_swiftmap(name, args, stop)
 

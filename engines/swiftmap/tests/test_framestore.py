@@ -1,4 +1,4 @@
-"""Tests of the reachback engine: its store, keyframes published unless
+"""Tests of the framestore engine: its store, keyframes published unless
 holding, the frames it picks for the weak targets of a request, published one
 at a time, and a real Uriel flow where its producers feed the swiftmap engine."""
 
@@ -14,10 +14,10 @@ import uriel
 from conftest import TARGET, Id, Input, near, numbered_frame, numbered_input, numbers_received, plan_kml
 
 from steeleagle_protocol.v1.messages.frame import frame_pb2
-from swiftmap import reachback, remote
-from swiftmap.main import REACHBACK_PLUGIN, ConfigError, parse_args
+from swiftmap import framestore, remote
+from swiftmap.framestore import END, STORE_INTERVAL_S, FrameStore, FrameStoreEngine
+from swiftmap.main import FRAMESTORE_PLUGIN, ConfigError, parse_args
 from swiftmap.protocol import ENCODED_FRAME_TYPE, KEYFRAMES, SENDBACK, encode_status, producer_name
-from swiftmap.reachback import END, STORE_INTERVAL_S, FrameStore, Reachback
 from swiftmap.remote import FRAME, NFN_HOLD, POLL, REACHBACK, REACHBACK_DONE, Sender, SwiftMap, SwiftMapClient
 
 TIMEOUT_S = 10.0
@@ -103,98 +103,98 @@ def test_the_database_has_no_journal_file(tmp_path):
 
 def test_keyframes_are_published_and_stored_as_sent_and_others_stored_every_interval(store):
     published = []
-    rb = Reachback(store, Keyframes({2}))
+    fs = FrameStoreEngine(store, Keyframes({2}))
     for n, now in ((1, 0.0), (2, STORE_INTERVAL_S / 2), (3, STORE_INTERVAL_S / 2), (4, STORE_INTERVAL_S * 2)):
-        rb.on_input(numbered_input(n), now, published.append)
+        fs.on_input(numbered_input(n), now, published.append)
     no_pose = numbered_frame(5)
     no_pose.ClearField("gimbal_info")
-    rb.on_input(Input(ENCODED_FRAME_TYPE, no_pose.SerializeToString(), Id(5)), 9.0, published.append)
+    fs.on_input(Input(ENCODED_FRAME_TYPE, no_pose.SerializeToString(), Id(5)), 9.0, published.append)
     assert [number_of(p) for p in published] == [2]
     assert list(store.unsent()[1]) == [1, 4]
 
 
 def answering(store, keep=()):
-    """A Reachback that has stored frames 0-4, posed AWAY, FAR, OFF, SLIGHT and BEST."""
-    rb = Reachback(store, Keyframes(keep), interval=0)
+    """A FrameStoreEngine that has stored frames 0-4, posed AWAY, FAR, OFF, SLIGHT and BEST."""
+    fs = FrameStoreEngine(store, Keyframes(keep), interval=0)
     for n, pose in enumerate((AWAY, FAR, OFF, SLIGHT, BEST)):
-        rb.on_input(numbered_input(n, pose=pose), 0.0, lambda data: None)
-    return rb
+        fs.on_input(numbered_input(n, pose=pose), 0.0, lambda data: None)
+    return fs
 
 
 def test_no_keyframe_is_published_or_even_checked_while_holding(store):
-    rb = answering(store, keep={10, 11})
-    asked = rb.keyframes.asked
+    fs = answering(store, keep={10, 11})
+    asked = fs.keyframes.asked
     published = []
-    rb.on_status(status(True))
-    rb.on_input(numbered_input(10), 1.0, published.append)
-    assert published == [] and rb.keyframes.asked == asked
-    rb.on_status(status(False))
-    rb.on_input(numbered_input(11), 1.0, published.append)
+    fs.on_status(status(True))
+    fs.on_input(numbered_input(10), 1.0, published.append)
+    assert published == [] and fs.keyframes.asked == asked
+    fs.on_status(status(False))
+    fs.on_input(numbered_input(11), 1.0, published.append)
     assert [number_of(p) for p in published] == [11]
 
 
 def test_a_request_takes_the_best_frame_per_coverable_target_up_to_its_count_then_the_end(store):
-    rb = answering(store)
-    rb.on_status(status(True, ([WEAK, NOWHERE, WEAK, WEAK], 3)))
-    queued = list(rb.queue)
+    fs = answering(store)
+    fs.on_status(status(True, ([WEAK, NOWHERE, WEAK, WEAK], 3)))
+    queued = list(fs.queue)
     assert [number_of(p) for p in queued[:-1]] == [4, 3] and queued[-1] == END
     assert 4 not in store.unsent()[1] and 3 not in store.unsent()[1]
 
 
 def test_a_request_is_started_once_and_a_new_one_starts_again(store):
-    rb = answering(store)
-    rb.on_status(status(True, ([WEAK], 1)))
-    rb.on_status(status(True, ([WEAK], 1)))
-    assert len(rb.queue) == 2
-    rb.on_status(status(True, ([WEAK, WEAK], 2)))
-    queued = list(rb.queue)
+    fs = answering(store)
+    fs.on_status(status(True, ([WEAK], 1)))
+    fs.on_status(status(True, ([WEAK], 1)))
+    assert len(fs.queue) == 2
+    fs.on_status(status(True, ([WEAK, WEAK], 2)))
+    queued = list(fs.queue)
     # Frame 4 went for the first request; only frame 3 is left that sees the target
     assert [number_of(p) for p in queued[:3:2]] == [4, 3] and queued[1] == queued[3] == END
 
 
 def test_frames_are_sent_back_one_at_a_time_each_after_the_last_ones_turn(store):
-    rb = answering(store)
-    rb.on_status(status(True, ([WEAK, WEAK], 2)))
+    fs = answering(store)
+    fs.on_status(status(True, ([WEAK, WEAK], 2)))
     sent = []
 
     def publish(data):
         sent.append(data)
-        return Id(len(sent), producer="rb.sendback")
+        return Id(len(sent), producer="fs.sendback")
 
-    rb.send_next(publish)
-    rb.send_next(publish)
+    fs.send_next(publish)
+    fs.send_next(publish)
     assert [number_of(p) for p in sent] == [4]
-    rb.on_sendback_event(Event(uriel.EventKind.RESULT, Id(99, producer="rb.sendback")))
-    rb.send_next(publish)
+    fs.on_sendback_event(Event(uriel.EventKind.RESULT, Id(99, producer="fs.sendback")))
+    fs.send_next(publish)
     assert len(sent) == 1
-    rb.on_sendback_event(Event(uriel.EventKind.TIMED_OUT, Id(1, producer="rb.sendback")))
-    rb.send_next(publish)
-    rb.on_sendback_event(Event(uriel.EventKind.DISCONNECTED))
-    rb.send_next(publish)
+    fs.on_sendback_event(Event(uriel.EventKind.TIMED_OUT, Id(1, producer="fs.sendback")))
+    fs.send_next(publish)
+    fs.on_sendback_event(Event(uriel.EventKind.DISCONNECTED))
+    fs.send_next(publish)
     assert [number_of(p) for p in sent[:2]] == [4, 3] and sent[2] == END
-    rb.on_sendback_event(Event(uriel.EventKind.RESULT, Id(3, producer="rb.sendback")))
-    assert not rb.sending_back
+    fs.on_sendback_event(Event(uriel.EventKind.RESULT, Id(3, producer="fs.sendback")))
+    assert not fs.sending_back
 
 
 def test_no_keyframe_is_published_while_sending_back(store):
-    rb = answering(store, keep={10})
-    rb.on_status(status(False, ([WEAK], 1)))
+    fs = answering(store, keep={10})
+    fs.on_status(status(False, ([WEAK], 1)))
     published = []
-    rb.on_input(numbered_input(10), 1.0, published.append)
+    fs.on_input(numbered_input(10), 1.0, published.append)
     assert published == []
 
 
 def test_a_bad_status_raises(store):
     with pytest.raises(ValueError):
-        Reachback(store, Keyframes(())).on_status(b"{}")
+        FrameStoreEngine(store, Keyframes(())).on_status(b"{}")
 
 
-def test_reachback_args_are_defaulted_and_checked():
-    args = parse_args(REACHBACK_PLUGIN, "")
+def test_framestore_args_are_defaulted_and_checked():
+    args = parse_args(FRAMESTORE_PLUGIN, "")
     assert (args["remote"], args["send_distance"], args["min_disparity"]) == ("swiftmap", 5.0, 40.0)
     for bad in ('{"remote": " "}', '{"send_distance": -1}', '{"min_disparity": -1}'):
         with pytest.raises(ConfigError):
-            parse_args(REACHBACK_PLUGIN, bad)
+            parse_args(FRAMESTORE_PLUGIN, bad)
 
 
 MAX_BYTES = 1 << 16
@@ -212,7 +212,7 @@ name = "{sendback}"
 tokens = 1
 
 [[engines]]
-name = "{reachback}"
+name = "{framestore}"
 location = "local"
 
 [[engines]]
@@ -221,7 +221,7 @@ location = "local"
 
 [[edges]]
 from = "{camera}"
-to = "{reachback}"
+to = "{framestore}"
 timeout = "5s"
 
 [[edges]]
@@ -244,8 +244,8 @@ def serve_swiftmap(name, port, stop, ready):
         remote.run(name, SwiftMap(sender), max_output_size=MAX_BYTES, stop=stop, on_ready=ready.set)
 
 
-def serve_reachback(name, swiftmap_name, rb, stop, ready):
-    reachback.run(name, rb, swiftmap_name, max_output_size=MAX_BYTES, stop=stop, on_ready=ready.set)
+def serve_framestore(name, swiftmap_name, fs, stop, ready):
+    framestore.run(name, fs, swiftmap_name, max_output_size=MAX_BYTES, stop=stop, on_ready=ready.set)
 
 
 def until(condition):
@@ -256,19 +256,19 @@ def until(condition):
 
 
 @contextlib.contextmanager
-def nfn_flow(server, rb):
-    """Runs a camera into reachback `rb`, whose keyframes and sendback
+def nfn_flow(server, fs):
+    """Runs a camera into the framestore `fs`, whose keyframes and sendback
     producers feed a swiftmap engine sending to `server`. Yields send(n),
-    which publishes the camera frame numbered n and waits for reachback to take it."""
+    which publishes the camera frame numbered n and waits for the framestore to take it."""
     suffix = uuid.uuid4().hex[:8]
-    camera, reachback_name, swiftmap_name = f"camera-{suffix}", f"reachback-{suffix}", f"swiftmap-{suffix}"
-    keyframes, sendback = producer_name(reachback_name, KEYFRAMES), producer_name(reachback_name, SENDBACK)
+    camera, framestore_name, swiftmap_name = f"camera-{suffix}", f"framestore-{suffix}", f"swiftmap-{suffix}"
+    keyframes, sendback = producer_name(framestore_name, KEYFRAMES), producer_name(framestore_name, SENDBACK)
     stop = threading.Event()
     readies = [threading.Event() for _ in range(2)]
     threads = [
         threading.Thread(target=serve_swiftmap, daemon=True, args=(swiftmap_name, server.port, stop, readies[0])),
-        threading.Thread(target=serve_reachback, daemon=True,
-                         args=(reachback_name, swiftmap_name, rb, stop, readies[1])),
+        threading.Thread(target=serve_framestore, daemon=True,
+                         args=(framestore_name, swiftmap_name, fs, stop, readies[1])),
     ]
     try:
         for thread, ready in zip(threads, readies):
@@ -278,25 +278,25 @@ def nfn_flow(server, rb):
             uriel.Server(f"server-{suffix}") as uriel_server,
             uriel.Client(f"client-{suffix}", f"server-{suffix}") as client,
             uriel.Producer(camera, input_type=ENCODED_FRAME_TYPE, max_input_size=MAX_BYTES) as producer,
-            uriel.Subscription.engine(reachback_name) as reachback_events,
+            uriel.Subscription.engine(framestore_name) as framestore_events,
         ):
-            for name in (reachback_name, swiftmap_name):
+            for name in (framestore_name, swiftmap_name):
                 uriel_server.add_engine(name)
             for name in (camera, keyframes, sendback):
                 client.add_producer(name)
             client.add_flow(f"flow-{suffix}", FLOW_SPEC.format(
                 camera=camera, keyframes=keyframes, sendback=sendback,
-                reachback=reachback_name, swiftmap=swiftmap_name,
+                framestore=framestore_name, swiftmap=swiftmap_name,
             ))
 
             def send(n):
-                """Publishes camera frame n and waits until reachback has taken it,
+                """Publishes camera frame n and waits until the framestore has taken it,
                 so a newer frame never replaces it while it waits."""
                 seq = producer.send(numbered_frame(n, **POSES[n]).SerializeToString())
-                while (event := reachback_events.next(TIMEOUT_S)) is not None:
+                while (event := framestore_events.next(TIMEOUT_S)) is not None:
                     if event.kind == uriel.EventKind.RESULT and event.id.seq == seq:
                         return
-                raise AssertionError(f"reachback never took camera frame {n}")
+                raise AssertionError(f"the framestore never took camera frame {n}")
 
             yield send
     finally:
@@ -305,12 +305,12 @@ def nfn_flow(server, rb):
             thread.join(TIMEOUT_S)
 
 
-def test_keyframes_and_frames_sent_back_reach_the_server_through_reachbacks_producers(server):
+def test_keyframes_and_frames_sent_back_reach_the_server_through_the_framestores_producers(server):
     server.replies.extend([NFN_HOLD, PLAN])
     store = FrameStore()
-    rb = Reachback(store, Keyframes({0}), interval=0)
+    fs = FrameStoreEngine(store, Keyframes({0}), interval=0)
     try:
-        with nfn_flow(server, rb) as send:
+        with nfn_flow(server, fs) as send:
             for n in range(4):
                 send(n)
             until(lambda: REACHBACK_DONE in server.kinds)

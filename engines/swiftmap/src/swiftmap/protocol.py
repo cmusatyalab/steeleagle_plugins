@@ -1,6 +1,6 @@
-"""What the vehicle and remote engines share: payload types, the reachback
+"""What the vehicle and remote engines share: payload types, the framestore
 engine's producers, frame helpers, and the NFN status the swiftmap engine
-tells reachback."""
+tells the framestore."""
 
 import json
 
@@ -13,7 +13,7 @@ ENCODED_FRAME_TYPE = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
 GENERIC_RESULT_TYPE = "steeleagle_protocol/v1/messages/result/GenericResult"
 STATUS_TYPE = "swiftmap/NfnStatus"
 
-# The reachback engine's producers, published as {engine}.{producer}: new
+# The framestore engine's producers, published as {engine}.{producer}: new
 # keyframes, and frames sent back for a request, then an empty end marker
 KEYFRAMES = "keyframes"
 SENDBACK = "sendback"
@@ -39,7 +39,7 @@ def producer_name(engine, producer):
 
 
 def is_sendback(input_id):
-    """Whether the input came from a reachback engine's sendback producer."""
+    """Whether the input came from a framestore engine's sendback producer."""
     return input_id.producer.endswith(f".{SENDBACK}")
 
 
@@ -58,11 +58,11 @@ def is_webp(data):
 
 
 def webp_bytes(frame):
-    """The EncodedFrame's WebP file, as the preprocess engine sends it."""
+    """The EncodedFrame's WebP file, as the encoder engine sends it."""
     if frame.codec in (WEBP_CODEC, frame_pb2.CODEC_UNSPECIFIED) and is_webp(frame.encoded_data):
         return frame.encoded_data
     raise FrameError(f"{frame_pb2.Codec.Name(frame.codec)} frames are not supported, only WebP "
-                     "from the preprocess engine")
+                     "from the encoder engine")
 
 
 def frame_gps(frame):

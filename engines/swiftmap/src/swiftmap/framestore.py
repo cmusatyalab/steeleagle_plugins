@@ -1,4 +1,4 @@
-"""The reachback engine, on the vehicle, after preprocess. It is a dead end:
+"""The framestore engine, on the vehicle, after the encoder. It is a dead end:
 each camera frame is stored with the camera's pose and dropped. A frame the
 keyframe filter keeps (onboard.KeyframeFilter) is published on its keyframes
 producer. The swiftmap engine's NFN status says when to hold keyframes, and
@@ -22,7 +22,7 @@ from swiftmap.protocol import (
     decode_status, frame_gps, producer_name, same_type,
 )
 
-logger = logging.getLogger("swiftmap.reachback")
+logger = logging.getLogger("swiftmap.framestore")
 
 KEEP_FRAMES = 6000
 STORE_INTERVAL_S = 0.2
@@ -107,7 +107,7 @@ class FrameStore:
         return None if row is None else row[0]
 
 
-class Reachback:
+class FrameStoreEngine:
     """Stores a posed frame every `interval` s and every keyframe; publishes
     keyframes unless holding or sending back; for a request, publishes one
     covering frame per target, one at a time, then END."""
@@ -180,7 +180,7 @@ class Reachback:
             self._last_stored = now
 
 
-def run(name, reachback, remote, *, max_output_size, stop, on_ready=None):
+def run(name, framestore, remote, *, max_output_size, stop, on_ready=None):
     """Serves the engine `name`, following the status of the engine `remote`,
     with its keyframes and sendback producers, until `stop` is set."""
     keyframes_name, sendback_name = producer_name(name, KEYFRAMES), producer_name(name, SENDBACK)
@@ -204,17 +204,17 @@ def run(name, reachback, remote, *, max_output_size, stop, on_ready=None):
             while (event := engine.poll_event()) is not None:
                 if event.kind == uriel.EventKind.DERIVED and event.payload_type == STATUS_TYPE:
                     try:
-                        reachback.on_status(event.result)
+                        framestore.on_status(event.result)
                     except ValueError as err:
                         logger.warning("bad NFN status from %s: %s", remote, err)
             while (event := sendback_events.poll()) is not None:
-                reachback.on_sendback_event(event)
+                framestore.on_sendback_event(event)
             if (input := engine.poll()) is not None:
                 try:
-                    reachback.on_input(input, time.monotonic(), keyframes.send)
+                    framestore.on_input(input, time.monotonic(), keyframes.send)
                 except FrameError as err:
                     logger.warning("input %d: %s", input.id.seq, err)
                 except Exception:
                     logger.exception("input %d: failed to handle it", input.id.seq)
                 engine.drop()
-            reachback.send_next(publish_sendback)
+            framestore.send_next(publish_sendback)

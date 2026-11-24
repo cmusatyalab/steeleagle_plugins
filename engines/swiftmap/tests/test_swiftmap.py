@@ -24,7 +24,7 @@ VIEW = ((40.0, -79.0, 15.0), (40.0001, -79.0, 0.0))
 
 
 def webp_input(seq, gps=None, width=32, height=24):
-    """A WebP EncodedFrame, as the preprocess engine sends one."""
+    """A WebP EncodedFrame, as the encoder engine sends one."""
     webp = cv2.imencode(".webp", np.full((height, width, 3), 120, dtype=np.uint8),
                         [cv2.IMWRITE_WEBP_QUALITY, 101])[1].tobytes()
     frame = frame_pb2.EncodedFrame(encoded_data=webp, id=seq, codec=frame_pb2.CODEC_UNSPECIFIED)
@@ -106,11 +106,11 @@ def test_a_started_sender_sends_on_its_own_thread(server):
     assert numbers_received(server) == [1, 2, 5, 3]
 
 
-SENDBACK = "100.64.0.2.reachback.sendback"
+SENDBACK = "100.64.0.2.framestore.sendback"
 
 
 def sent_back(frame_number):
-    """A stored frame published on reachback's sendback producer."""
+    """A stored frame published on the framestore's sendback producer."""
     return Input(ENCODED_FRAME_TYPE, numbered_frame(frame_number).SerializeToString(),
                  Id(frame_number, producer=SENDBACK))
 
