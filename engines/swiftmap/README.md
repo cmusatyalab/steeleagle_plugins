@@ -30,7 +30,7 @@ Does VGGT-Omega's preprocessing on board: center-crop an aspect ratio outside [0
 | --- | --- | --- |
 | `image_resolution` | `512` | The server's `VGGT_OMEGA_IMAGE_RESOLUTION` |
 | `patch_size` | `16` | Model patch size, px |
-| `lossless` | `true` | `false` for lossy WebP at `quality` |
+| `lossless` | `true` | `false` for lossy WebP at `quality`; lossless uses the least encoder effort (~5 ms a 688×384 frame, ~8% more bytes than the default effort's ~90 ms) |
 | `quality` | `90` | WebP quality when not lossless |
 | `max_output_size` | `6237184` | Largest frame sent, bytes |
 
