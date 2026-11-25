@@ -1,0 +1,332 @@
+[plugin]
+name = "CLIC Smart Search"
+type = "engine"
+description = "Searches for the prompt among class-agnostic object proposals (YOLOE-26X prompt-free objectness on the HTP): embeds the most object-like boxes of each frame with MobileCLIP, drops the ones off the prompt and the duplicates, vetoes boxes like ones the remote verifier said no to, prefers boxes like ones it said yes to, and delivers the rest to the verifier, off the frame path, on its reintegration producer. clic_box_rerank's engine with the settings of run 2.3.13 as defaults, and no keypoint lifting of vetoes"
+
+[[args]]
+name = "detector"
+type = "string"
+description = "Service name of the detection engine on this daemon whose boxes are reranked (e.g. detection-qnn); it must get the same frames as this engine. Required"
+default = ""
+
+[[args]]
+name = "verifier"
+type = "string"
+description = "Service name of the engine on the remote daemon that verifies crops (the verifier plugin, with question = \"box\"); a crop stays queued until its RESULT event for it shows it has the crop. Required"
+default = ""
+
+[[args]]
+name = "class"
+type = "string"
+description = "The class reported, as the tracker asks for it, e.g. \"robotic dog\". Required"
+default = ""
+
+[[args]]
+name = "classes"
+type = "array"
+description = "The detector's classes whose boxes are candidates: [\"object\"] for YOLOE-26X prompt-free objectness proposals (detection-qnn with only_classes = [\"object\"])"
+default = ["object"]
+
+[[args]]
+name = "prompt"
+type = "string"
+description = "What the target is, as a noun phrase, for the CLIP prompt score s. Optional: with neither this nor image, the most confident box is reported until the verifier's prompt heartbeat arrives. Replaced by the verifier's prompt when that differs, unless ignore_new"
+default = ""
+
+[[args]]
+name = "image"
+type = "string"
+description = "An image of the target, instead of prompt: a file in the daemon's files directory (STEELEAGLE_FILES). With both set, image is used"
+default = ""
+
+[[args]]
+name = "confidence"
+type = "number"
+description = "Least confidence for an unverified box (one the verifier's answers say nothing about) to be reported. Run the detector at a lower confidence to give the reranker more candidates: a box like one the verifier confirmed is reported at any confidence"
+default = 0.5
+
+[[args]]
+name = "require_verified"
+type = "boolean"
+description = "Report only boxes like ones the verifier confirmed: no detection until it has, whatever the confidence"
+default = false
+
+[[args]]
+name = "input_confidence"
+type = "number"
+description = "Drop the detector's boxes scoring below this before anything else: they are never candidates, embedded, reported or sent to the verifier. In the detector's own score units (e.g. 6.4 for objectness 0.01 with a score scaled by 640). 0 keeps every box"
+default = 0.0
+
+[[args]]
+name = "prompt_filter"
+type = "boolean"
+description = "Apply clic_tile_search's relevance floor: an unverified candidate whose s (how much more like the prompt than the backgrounds, as clic_tile_search scores a tile) is not above min_prompt_score is neither sent to the verifier nor reported. Confirmed candidates are exempt; off until there is a prompt"
+default = true
+
+[[args]]
+name = "min_prompt_score"
+type = "number"
+description = "With prompt_filter: the s a candidate must exceed. 0 is clic_tile_search's own floor (it sends no tile with s at or below 0)"
+default = 0.0
+
+[[args]]
+name = "queue_by"
+type = "string"
+description = "What orders the crops waiting for the verifier: \"confidence\", the detector's score, or \"prompt\", s (how much more like the prompt than the backgrounds), as clic_tile_search orders its tiles. Crops like ones queued before still go behind new ones (defer_similar), and the reported box first. Without a prompt yet, by confidence"
+default = "confidence"
+
+[[args]]
+name = "dedupe_overlap"
+type = "number"
+description = "Drop a detector box when at least this fraction of the smaller of it and a better-scoring box of the same frame lies inside the other, and the larger is at most dedupe_max_area_ratio times the smaller's area: a part of an object, or the same object framed a little differently. Applied before max_candidates, so a duplicate frees its place. A much larger box (a scene around small objects) never removes a small one, nor the other way round. e.g. 0.8; 0 turns it off"
+default = 0.8
+
+[[args]]
+name = "dedupe_max_area_ratio"
+type = "number"
+description = "With dedupe_overlap: the largest area ratio (larger box over smaller) of two boxes for one to count as a duplicate of the other"
+default = 4.0
+
+[[args]]
+name = "max_candidates"
+type = "number"
+description = "Most boxes of a frame embedded, best confidence first; each costs ~6 ms on the HTP"
+default = 5
+
+[[args]]
+name = "context"
+type = "number"
+description = "Side of the square crop embedded, as a multiple of the box's longer side"
+default = 1.25
+
+[[args]]
+name = "verify_context"
+type = "number"
+description = "Side of the square crop the verifier sees, the box drawn in red, as a multiple of the box's longer side"
+default = 1.25
+
+[[args]]
+name = "min_verify_side"
+type = "number"
+description = "Least side of the crop the verifier sees, in pixels of the frame"
+default = 48
+
+[[args]]
+name = "max_verify_side"
+type = "number"
+description = "Largest side of the crop the verifier sees, in pixels: a larger crop is scaled down to it. Set the verifier's min_side to enlarge small crops there, off the link"
+default = 128
+
+[[args]]
+name = "novelty"
+type = "number"
+description = "Cosine similarity at which a crop counts as one already queued or answered within the cooldown, and is not queued, in (0, 1]"
+default = 0.92
+
+[[args]]
+name = "cooldown"
+type = "number"
+description = "Seconds after the verifier answers a crop before crops like it are asked about again (to confirm a no or a yes)"
+default = 5.0
+
+[[args]]
+name = "prompt_weight"
+type = "number"
+description = "Weight of the CLIP prompt score s against confidence when ranking unverified boxes; 0 ranks them by confidence alone"
+default = 0.0
+
+[[args]]
+name = "rank"
+type = "string"
+description = "How a frame's unverified boxes (above confidence) are ranked: \"confidence\", the detector's (plus prompt_weight times s), or \"prompt\", their CLIP prompt score s against each other, as clic_tile_search ranks a frame's tiles: the box most like the prompt or image wins, whatever s's scale. A confirmed box wins either way. \"confidence\" only for a prompt that just names the detector's class, which can't tell its boxes apart"
+default = "prompt"
+
+[[args]]
+name = "gate"
+type = "boolean"
+description = "Learns from the verifier's answers whether a frame's best box is the target at all, and reports none if not: an unverified box must be more like the prompt, over the class prompt, than the midpoint of the boxes the verifier said yes and no to. For a target that is one instance of the detector's class (a person in a red shirt among people). Needs a text prompt"
+default = false
+
+[[args]]
+name = "class_prompt"
+type = "string"
+description = "With gate: the prompt for any box of the class, against which the prompt's likeness is measured, until the verifier's prompt heartbeat brings its own class (an image prompt's kind), which replaces it, and whenever a heartbeat has none (a text prompt). Default: \"a <first of classes>\" (e.g. \"a person\")"
+default = ""
+
+[[args]]
+name = "ignore_new"
+type = "boolean"
+description = "Keep this engine's prompt (or image) whatever the verifier's prompt heartbeat says. Without it, a different prompt from the verifier replaces this one and all learning starts over"
+default = false
+
+[[args]]
+name = "timeout"
+type = "number"
+description = "The longest to wait for the detector's result on a frame, in milliseconds; the frame then has no detection"
+default = 1000
+
+[[args]]
+name = "learn_similarity"
+type = "number"
+description = "Cosine similarity of crop embeddings at which a crop counts as one the verifier said no to, in (0, 1]: lower vetoes more, and risks vetoing the target"
+default = 0.85
+
+[[args]]
+name = "confirmations"
+type = "number"
+description = "No's, to crops within learn_similarity of each other, before crops like them are vetoed"
+default = 2
+
+[[args]]
+name = "good_similarity"
+type = "number"
+description = "Cosine similarity of crop embeddings at which a crop counts as one the verifier said yes to, in (0, 1]"
+default = 0.9
+
+[[args]]
+name = "good_confirmations"
+type = "number"
+description = "Yes's, to crops within good_similarity of each other, before crops like them are confirmed. A wrong confirmation reports a distractor at any confidence, so keep it at least 2"
+default = 2
+
+[[args]]
+name = "max_learned"
+type = "number"
+description = "Most yes and most no answers kept learned, each; past it, the oldest is forgotten"
+default = 32
+
+[[args]]
+name = "backgrounds"
+type = "array"
+description = "Background prompts, for the CLIP prompt score s"
+default = ["grass", "dirt", "rocks", "trees", "a road", "a roof"]
+
+[[args]]
+name = "max_queue"
+type = "number"
+description = "Most crops waiting for the verifier; past it, the least confident is dropped"
+default = 512
+
+[[args]]
+name = "quantized"
+type = "boolean"
+description = "Run the INT8 image encoder (image_encoder_int8.tflite in cliped/ in the daemon's models directory); false runs the FP32 one in PyTorch on the CPU"
+default = true
+
+[[args]]
+name = "npu"
+type = "boolean"
+description = "Run the INT8 image encoder on the HTP through QNN (cliped/libs/ in the daemon's models directory); false runs it on the CPU. Only with quantized"
+default = true
+
+[[args]]
+name = "threads"
+type = "number"
+description = "CPU threads for the text encoder, and for the image encoder off the HTP"
+default = 4
+
+[[args]]
+name = "log_tiles"
+type = "boolean"
+description = "Write each crop sent to the verifier to STEELEAGLE_FILES/<engine>/out/<frame id>_<candidate>.jpeg, as JPEG at quality 75"
+default = false
+
+[[args]]
+name = "log_candidates"
+type = "string"
+description = "CSV file to log every candidate of every frame to: frame_id, timestamp_ns, candidate, class, score, its box (left, top, right, bottom) in a frame_width x frame_height frame, s, verdict (-1 vetoed, 0 unverified, 1 confirmed), reported, queued and ms. A relative path is in the daemon's files directory. Replaced when the plugin starts. Empty for none"
+default = ""
+
+
+[[args]]
+name = "log_answers"
+type = "string"
+description = "CSV file to log every verifier answer about a crop to: frame_id, candidate (as in log_candidates), the square the verifier saw (left, top, right, bottom, in pixels of the frame), score, answer (yes, no or unsure) and time_ns. A relative path is in the daemon's files directory. Replaced when the plugin starts. Empty for none"
+default = ""
+
+[[args]]
+name = "score_jump"
+type = "number"
+description = "Ask about a box, though it looks like a repeat and even if a no vetoes crops like it, when its detector score is at least this many times that of every crop like it (within learn_similarity) asked about before: something new at a place answered before, like a person walking into a spot said no to while empty. The asked crop's score then sets the bar for crops like it. 0 for off"
+default = 3.0
+
+[[args]]
+name = "score_jump_floor"
+type = "number"
+description = "With score_jump: the least score the earlier crops' best is taken as, in the detector's score units, so a jump from a near-zero score needs at least score_jump times this"
+default = 6.4
+
+[[args]]
+name = "relevance_k"
+type = "integer"
+description = "With prompt_filter: clic_tile_search's adaptive bar too. Each frame the relevance_k-th best candidate's s is smoothed by an EMA, and an unverified candidate must beat that (plus relevance_margin times the frame's spread of s) as well as min_prompt_score; 0 turns it off"
+default = 0
+
+[[args]]
+name = "relevance_ema"
+type = "number"
+description = "With relevance_k: the weight of the old bar in each frame's update (0.9: the bar follows about the last 10-20 frames)"
+default = 0.9
+
+[[args]]
+name = "relevance_margin"
+type = "number"
+description = "With relevance_k: how many of the frame's standard deviations of s a candidate must beat the smoothed bar by"
+default = 0.0
+
+[[args]]
+name = "repeat_matches"
+type = "integer"
+description = "Don't send the same thing twice unless its score jumps: a crop of an object sent before (within repeat_window, whatever the verifier answered) is held back unless its score is at least score_jump times the last send's. A crop is that object when this many ORB keypoints match, both crops scaled up to repeat_side px; 0 turns it off"
+default = 10
+
+[[args]]
+name = "repeat_window"
+type = "number"
+description = "With repeat_matches: how long, in seconds, what was sent is remembered; 0 is the whole flight"
+default = 0.0
+
+[[args]]
+name = "repeat_side"
+type = "integer"
+description = "With repeat_matches: the side, in px, crops are scaled up to before ORB looks for keypoints (a 48 px crop has almost none)"
+default = 96
+
+[[args]]
+name = "defer_similar"
+type = "boolean"
+description = "Send a queued crop that is a near-copy of one queued before (ORB keypoints matching under one rotation, scale and shift) only after every new crop; as clic_tile_search's defer_similar"
+default = true
+
+[[args]]
+name = "defer_similar_matches"
+type = "number"
+description = "Keypoints (of 200) of a crop that must match another for the two to count as the same view: for defer_similar, the visual guard and propagation; as clic_tile_search's"
+default = 40
+
+[[args]]
+name = "visual_guard"
+type = "boolean"
+description = "ORB keypoints (defer_similar_matches of them) decide instead of CLIP alone whether a no is learned: a no is kept from being learned, or counts against a candidate yes, only if its crop is visually a crop the verifier said yes to. Unlike clic_box_rerank, a confirmed background's veto is never lifted by keypoints (on the large proposals it lifted ~80 background vetoes for each target one, for up to ~30 ms a frame). false keeps CLIP alone"
+default = true
+
+[[args]]
+name = "propagate_s"
+type = "number"
+description = "Each answer of the verifier is also learned for the unanswered crops queued in the last this many seconds that are visually the answered crop (ORB keypoints, defer_similar_matches of them); 0 learns only the answered crop. As clic_tile_search's"
+default = 20.0
+
+[engine]
+type = "detection"
+inputs = ["steeleagle_protocol/v1/messages/frame/RawFrame"]
+# Every frame is dropped; the box reported, named `class`, is its result, or
+# it has none
+result = "steeleagle_protocol/v1/messages/result/DetectionResult"
+
+[[engine.producers]]
+# Delivers the queued crops to the verifier, the box reported first, one at a
+# time, each until the verifier's RESULT for it. Give it one token, and encode
+# its crops (e.g. with the thumbnail plugin's WebP encoder) before they cross
+# to the verifier.
+name = "reintegration"
+output = "steeleagle_protocol/v1/messages/frame/RawFrame"
