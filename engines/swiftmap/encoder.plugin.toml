@@ -1,5 +1,5 @@
 [plugin]
-name = "SwiftMap Preprocess"
+name = "SwiftMap Encoder"
 type = "engine"
 description = "SwiftMap on the vehicle, after the camera: crops and resizes each frame to the VGGT-Omega model input and sends it as WebP; lossless, the model input is exactly the server's"
 

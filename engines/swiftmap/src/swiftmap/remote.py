@@ -1,11 +1,13 @@
-"""The swiftmap engine, on the remote daemon: forwards each frame unchanged and
-sends its WebP and GPS to the SwiftMap server over TCP. The server's next-flight
-KML is the next frame's result, and its weak targets the next reachback request.
+"""The swiftmap engine, on the remote daemon: sends each frame's WebP and GPS to
+the SwiftMap server over TCP: a keyframe from the framestore's keyframes producer,
+or, from its sendback producer, a frame sent back or the empty end marker. The
+server's next-flight KML is the next frame's result, and its weak targets the
+next reachback request.
 
 In NFN mode the server holds new frames while a batch's rounds run (NFN_HOLD,
-NFN_RELEASE on its replies); while held the engine polls it every POLL_S. It
-tells reachback the NFN status when it changes and every STATUS_S, and passes
-each frame sent back, then the end, to the server once.
+NFN_RELEASE on its replies). The engine tells the framestore the NFN status, whether
+the server holds and the current request, when it changes, and polls the
+server every POLL_S while idle, so it hears of holds and plans without frames.
 
 Wire: [BE uint32 size][WebP][3 x BE float64 lat, lon, alt][uint8 kind]; no image
 for the end marker and polls. Reply: 3 native float64 (status, keyframes,
@@ -23,9 +25,8 @@ import xml.etree.ElementTree as ET
 import uriel
 
 from swiftmap.protocol import (
-    ENCODED_FRAME_TYPE, GENERIC_RESULT_TYPE, POLL_INTERVAL_S, REACHBACK_DONE_TYPE,
-    REACHBACK_FRAME_TYPE, STATS_INTERVAL_S, STATUS_TYPE, FrameError, Request, encode_status,
-    frame_gps, read_frame, same_type, unstamp, webp_bytes,
+    GENERIC_RESULT_TYPE, POLL_INTERVAL_S, STATS_INTERVAL_S, STATUS_TYPE, FrameError,
+    encode_status, frame_gps, is_sendback, read_frame, webp_bytes,
 )
 
 logger = logging.getLogger("swiftmap")
@@ -37,7 +38,7 @@ FRAME, REACHBACK, REACHBACK_DONE, POLL = 0, 1, 2, 3
 KEYFRAME, SKIPPED, ERROR = "keyframe", "skipped", "error"
 RETRY_INTERVAL_S = 5
 SOCKET_TIMEOUT_S = 15
-POLL_S = STATUS_S = 1.0
+POLL_S = 1.0
 NO_GPS = (math.nan, math.nan, math.nan)
 KML = "{http://www.opengis.net/kml/2.2}"
 NFN_HOLD = b'{"nfn": "hold"}'
@@ -178,67 +179,43 @@ class Sender:
 
 
 class SwiftMap:
-    """Sends frames to the server, and the current request's frames sent back
-    once each; keeps the NFN status (hold, request) and polls while held."""
+    """Sends each frame to the server as it comes, keeps the NFN status
+    (hold, request) and polls the server while idle."""
 
     def __init__(self, sender):
         self.sender = sender
-        self.nfn = False  # no status to tell until the server speaks NFN
         self.holding = False
         self.request = None
         self.last_id = None
         self.result = b""
         self.received = 0
-        self._last_request_id = time.time_ns()  # never reused across restarts
-        self._sent_back = set()
-        self._done = False
         self._status_due = False
-        self._last_status = float("-inf")
         self._last_stats = (0, time.monotonic())
 
     def on_input(self, input):
+        """A keyframe goes to the server as a new frame; from sendback, a frame
+        sent back, or with no image, the end marker."""
         self._log_stats()
         self.last_id = input.id
         try:
-            if same_type(input.payload_type, REACHBACK_DONE_TYPE):
-                request_id, count, _ = unstamp(bytes(input.data))
-                self._on_done(request_id, count)
-            elif same_type(input.payload_type, REACHBACK_FRAME_TYPE):
-                self._on_sent_back(*unstamp(bytes(input.data)))
-            else:
-                frame = read_frame(input.payload_type, bytes(input.data))
+            frame = read_frame(input.payload_type, bytes(input.data))
+            if not is_sendback(input.id):
                 self.sender.send(webp_bytes(frame), frame_gps(frame) or NO_GPS, FRAME)
+            elif frame.encoded_data:
+                self.sender.send(webp_bytes(frame), frame_gps(frame) or NO_GPS, REACHBACK)
+            else:
+                logger.info("all frames sent back are in")
+                self.sender.send(b"", NO_GPS, REACHBACK_DONE)
         except FrameError as err:
             logger.warning("input %d: %s", input.id.seq, err)
-
-    def _current(self, request_id):
-        return self.request is not None and request_id == self.request.id and not self._done
-
-    def _on_sent_back(self, request_id, number, data):
-        if not self._current(request_id) or number in self._sent_back:
-            logger.info("dropping frame %d of request %d: duplicate, late or old", number, request_id)
-            return
-        frame = read_frame(ENCODED_FRAME_TYPE, data)
-        self.sender.send(webp_bytes(frame), frame_gps(frame) or NO_GPS, REACHBACK)
-        self._sent_back.add(number)
-
-    def _on_done(self, request_id, count):
-        if not self._current(request_id):
-            logger.info("dropping the end of request %d: duplicate or old", request_id)
-            return
-        self._done = True
-        logger.info("request %d: all frames sent back are in, %d of the %d picked",
-                    request_id, len(self._sent_back), count)
-        self.sender.send(b"", NO_GPS, REACHBACK_DONE)
 
     def on_reply(self, payload):
         """An NFN notice, or a plan: the next result, and a request if it has
         weak targets and a count."""
         if payload in (NFN_HOLD, NFN_RELEASE):
-            self.nfn = True
             self.holding = payload == NFN_HOLD
-            logger.info("NFN %s", "hold: polling for plans" if self.holding else "release")
-            self._set_request(None)
+            logger.info("NFN %s", "hold" if self.holding else "release")
+            self._set(self.holding, None)
             return
         logger.info("SwiftMap planned a next-flight area (%d bytes of KML)", len(payload))
         self.result = payload
@@ -247,29 +224,21 @@ class SwiftMap:
         except ValueError as err:
             logger.warning("can't read the planned KML: %s", err)
             targets, count = [], 0
-        if not (targets and count):
-            self._set_request(None)
-            return
-        self.nfn = True
-        self._last_request_id += 1
-        logger.info("request %d: %d frames covering %d weak targets",
-                    self._last_request_id, count, len(targets))
-        self._set_request(Request(self._last_request_id, targets, count))
+        if targets and count:
+            logger.info("request: %d frames covering %d weak targets", count, len(targets))
+            self._set(self.holding, (targets, count))
+        else:
+            self._set(self.holding, None)
 
-    def _set_request(self, request):
-        self.request = request
-        self._sent_back = set()
-        self._done = False
+    def _set(self, holding, request):
+        self.holding, self.request = holding, request
         self._status_due = True
 
-    def take_status(self, now):
-        """The NFN status to tell reachback when it changed or STATUS_S passed; else None."""
-        if not self.nfn or self.last_id is None:
-            return None
-        if not self._status_due and now - self._last_status < STATUS_S:
+    def take_status(self):
+        """The NFN status to tell the framestore, once each time it changes; else None."""
+        if not self._status_due or self.last_id is None:
             return None
         self._status_due = False
-        self._last_status = now
         return encode_status(self.holding, self.request)
 
     def take_result(self):
@@ -277,7 +246,8 @@ class SwiftMap:
         return result
 
     def poll(self, now):
-        if self.holding and now - self.sender.last_sent >= POLL_S:
+        """Asks the server for what it has queued after POLL_S idle, if connected."""
+        if (self.holding or self.sender.client.connected) and now - self.sender.last_sent >= POLL_S:
             self.sender.send(b"", NO_GPS, POLL)
 
     def _log_stats(self):
@@ -321,8 +291,8 @@ def run(name, swiftmap, *, max_output_size, stop, on_ready=None):
                     result = b""
                 engine.forward(result=result)
             swiftmap.poll(time.monotonic())
-            if flow is not None and (status := swiftmap.take_status(time.monotonic())) is not None:
+            if flow is not None and (status := swiftmap.take_status()) is not None:
                 try:
                     engine.publish_derived(swiftmap.last_id, flow, status, result_type=STATUS_TYPE)
                 except Exception:
-                    logger.exception("failed to tell reachback the NFN status")
+                    logger.exception("failed to tell the framestore the NFN status")

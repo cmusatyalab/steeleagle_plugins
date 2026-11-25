@@ -11,12 +11,11 @@ from conftest import Id, Input, numbered_frame, numbered_input, numbers_received
 
 from steeleagle_protocol.v1.messages.frame import frame_pb2
 from swiftmap.protocol import (
-    ENCODED_FRAME_TYPE, RAW_FRAME_TYPE, REACHBACK_DONE_TYPE, REACHBACK_FRAME_TYPE, FrameError,
-    Request, decode_status, encode_status, stamp, unstamp,
+    ENCODED_FRAME_TYPE, RAW_FRAME_TYPE, decode_status, encode_status, is_sendback,
 )
 from swiftmap.remote import (
-    FRAME, NFN_HOLD, NFN_RELEASE, POLL, POLL_S, REACHBACK, REACHBACK_DONE, STATUS_S, Sender,
-    SwiftMap, SwiftMapClient, read_plan,
+    FRAME, NFN_HOLD, NFN_RELEASE, POLL, POLL_S, REACHBACK, REACHBACK_DONE, Sender, SwiftMap,
+    SwiftMapClient, read_plan,
 )
 from swiftmap.main import SWIFTMAP_PLUGIN, ConfigError, parse_args
 
@@ -25,7 +24,7 @@ VIEW = ((40.0, -79.0, 15.0), (40.0001, -79.0, 0.0))
 
 
 def webp_input(seq, gps=None, width=32, height=24):
-    """A WebP EncodedFrame, as the preprocess engine sends one."""
+    """A WebP EncodedFrame, as the encoder engine sends one."""
     webp = cv2.imencode(".webp", np.full((height, width, 3), 120, dtype=np.uint8),
                         [cv2.IMWRITE_WEBP_QUALITY, 101])[1].tobytes()
     frame = frame_pb2.EncodedFrame(encoded_data=webp, id=seq, codec=frame_pb2.CODEC_UNSPECIFIED)
@@ -107,49 +106,27 @@ def test_a_started_sender_sends_on_its_own_thread(server):
     assert numbers_received(server) == [1, 2, 5, 3]
 
 
-def sent_back(request_id, number, frame_number):
-    frame = numbered_frame(frame_number).SerializeToString()
-    return Input(REACHBACK_FRAME_TYPE, stamp(request_id, number, frame), Id(9))
+SENDBACK = "100.64.0.2.framestore.sendback"
 
 
-def end_of(request_id, count):
-    return Input(REACHBACK_DONE_TYPE, stamp(request_id, count), Id(9))
+def sent_back(frame_number):
+    """A stored frame published on the framestore's sendback producer."""
+    return Input(ENCODED_FRAME_TYPE, numbered_frame(frame_number).SerializeToString(),
+                 Id(frame_number, producer=SENDBACK))
 
 
-def test_frames_sent_back_and_their_end_go_to_the_server_marked(server):
+END = Input(ENCODED_FRAME_TYPE, frame_pb2.EncodedFrame().SerializeToString(), Id(99, producer=SENDBACK))
+
+
+def test_inputs_from_the_sendback_producer_go_to_the_server_as_frames_sent_back_and_the_end(server):
     engine = swiftmap(server)
     engine.on_input(numbered_input(1))
-    engine.on_reply(plan_kml(VIEW, count=2))
-    request_id = engine.request.id
-    engine.on_input(sent_back(request_id, 0, 7))
-    engine.on_input(sent_back(request_id, 1, 3))
-    engine.on_input(end_of(request_id, 2))
+    engine.on_input(sent_back(7))
+    engine.on_input(sent_back(3))
+    engine.on_input(END)
     assert numbers_received(server) == [1, 7, 3]
     assert server.kinds == [FRAME, REACHBACK, REACHBACK, REACHBACK_DONE]
-
-
-def test_what_is_sent_back_twice_late_or_for_an_old_request_is_dropped(server):
-    engine = swiftmap(server)
-    engine.on_reply(plan_kml(VIEW, count=2))
-    old = engine.request.id
-    engine.on_reply(plan_kml(VIEW, count=2))
-    current = engine.request.id
-    for input in (sent_back(old, 0, 5), sent_back(current, 0, 7), sent_back(current, 0, 7),
-                  end_of(old, 1), end_of(current, 2), end_of(current, 2),
-                  sent_back(current, 1, 8)):
-        engine.on_input(input)
-    assert numbers_received(server) == [7]
-    assert server.kinds == [REACHBACK, REACHBACK_DONE]
-
-
-def test_a_payload_too_short_to_be_stamped_is_not_sent(server):
-    engine = swiftmap(server)
-    engine.on_input(Input(REACHBACK_FRAME_TYPE, b"short", Id(9)))
-    engine.on_input(Input(REACHBACK_DONE_TYPE, b"", Id(9)))
-    assert server.kinds == []
-    with pytest.raises(FrameError):
-        unstamp(b"short")
-    assert unstamp(stamp(7, 2, b"image")) == (7, 2, b"image")
+    assert is_sendback(Id(1, producer=SENDBACK)) and not is_sendback(Id(1, producer="x.keyframes"))
 
 
 def test_a_plan_has_targets_and_a_count():
@@ -163,48 +140,36 @@ def test_a_plan_with_targets_and_a_count_is_the_request(server):
     engine = swiftmap(server)
     engine.on_input(numbered_input(4))
     engine.on_reply(plan_kml(VIEW, VIEW, count=3))
-    hold, request = decode_status(engine.take_status(0.0))
-    assert not hold and (request.targets, request.count) == ([list(VIEW[1])] * 2, 3)
+    assert decode_status(engine.take_status()) == (False, ([list(VIEW[1])] * 2, 3))
     engine.on_reply(plan_kml(VIEW))
-    assert decode_status(engine.take_status(0.0)) == (False, None)
+    assert decode_status(engine.take_status()) == (False, None)
     engine.on_reply(plan_kml(VIEW, count=1))
     engine.on_reply(b"not xml")
     assert engine.request is None
 
 
-def test_request_ids_are_new_after_a_restart(server):
+def test_the_status_is_told_once_each_time_it_changes(server):
     engine = swiftmap(server)
-    engine.on_reply(plan_kml(VIEW, count=1))
-    restarted = swiftmap(server)
-    restarted.on_reply(plan_kml(VIEW, count=1))
-    assert restarted.request.id > engine.request.id
-
-
-def test_the_status_is_told_at_once_on_a_change_and_every_second_once_nfn_starts(server):
-    engine = swiftmap(server)
-    engine.on_input(numbered_input(4))
-    assert engine.take_status(0.0) is None
     engine.on_reply(NFN_HOLD)
-    assert decode_status(engine.take_status(0.0)) == (True, None)
-    assert engine.take_status(STATUS_S / 2) is None
-    assert decode_status(engine.take_status(STATUS_S)) == (True, None)
+    assert engine.take_status() is None
+    engine.on_input(numbered_input(4))
+    assert decode_status(engine.take_status()) == (True, None)
+    assert engine.take_status() is None
     engine.on_reply(NFN_RELEASE)
-    assert decode_status(engine.take_status(STATUS_S)) == (False, None)
-    assert engine.take_status(STATUS_S * 1.5) is None
-    assert decode_status(engine.take_status(STATUS_S * 2)) == (False, None)
+    assert decode_status(engine.take_status()) == (False, None)
+    assert engine.take_status() is None
 
 
-def test_a_hold_and_release_are_kept_and_it_polls_while_held(server):
+def test_it_polls_after_a_second_idle_while_connected_or_held(server):
     engine = swiftmap(server)
     engine.on_input(numbered_input(4))
-    engine.on_reply(NFN_HOLD)
-    assert engine.holding and engine.take_result() == b""
     engine.poll(engine.sender.last_sent + POLL_S / 2)
     engine.poll(engine.sender.last_sent + POLL_S)
-    engine.on_reply(NFN_RELEASE)
+    engine.sender.client.close()
     engine.poll(engine.sender.last_sent + POLL_S)
-    assert not engine.holding
-    assert server.kinds == [FRAME, POLL]
+    engine.on_reply(NFN_HOLD)
+    engine.poll(engine.sender.last_sent + POLL_S)
+    assert engine.holding and server.kinds == [FRAME, POLL, POLL]
 
 
 def test_a_hold_or_release_withdraws_the_request(server):
@@ -217,15 +182,14 @@ def test_a_hold_or_release_withdraws_the_request(server):
 
 
 def test_a_status_says_whether_to_hold_and_the_request():
-    request = Request(7, [list(VIEW[1])], 3)
+    request = ([list(VIEW[1])], 3)
     assert json.loads(encode_status(True, request)) == {
-        "hold": True, "request": {"id": 7, "targets": [list(VIEW[1])], "count": 3}}
+        "hold": True, "request": {"targets": [list(VIEW[1])], "count": 3}}
     assert decode_status(encode_status(True, request)) == (True, request)
     assert decode_status(encode_status(False, None)) == (False, None)
     for bad in (b"[]", b"{}", b'{"hold": 1, "request": null}',
-                b'{"hold": true, "request": {"id": 1, "targets": [[1, 2]], "count": 1}}',
-                b'{"hold": true, "request": {"id": 1, "targets": [], "count": -1}}',
-                b'{"hold": true, "request": {"id": -1, "targets": [], "count": 1}}',
+                b'{"hold": true, "request": {"targets": [[1, 2]], "count": 1}}',
+                b'{"hold": true, "request": {"targets": [], "count": -1}}',
                 b"\xff"):
         with pytest.raises(ValueError):
             decode_status(bad)

@@ -1,0 +1,44 @@
+[plugin]
+name = "SwiftMap Framestore"
+type = "engine"
+description = "SwiftMap on the vehicle, after the encoder: stores every frame, publishes keyframes on its keyframes producer, and the stored frames covering the weak targets of the swiftmap engine's plans on its sendback producer"
+
+[[args]]
+name = "remote"
+type = "string"
+description = "Service name of the swiftmap engine on the remote daemon"
+default = "swiftmap"
+
+[[args]]
+name = "send_distance"
+type = "number"
+description = "Meters of travel between keyframes forwarded; frames without a GPS fix are dropped. 0 turns this off"
+default = 5.0
+
+[[args]]
+name = "min_disparity"
+type = "number"
+description = "Optical-flow disparity from the last keyframe, in px at the frame's resolution, that makes the next keyframe. 0 turns this off"
+default = 40.0
+
+[[args]]
+name = "max_output_size"
+type = "number"
+description = "Largest frame published, in bytes"
+default = 6237184
+
+[engine]
+type = "filter"
+inputs = ["steeleagle_protocol/v1/messages/frame/EncodedFrame"]
+# A dead end: every frame is stored and dropped (no edge out of it)
+
+[[engine.producers]]
+# Keyframes, as the keyframe filter keeps them, unless holding. Give it one token
+name = "keyframes"
+output = "steeleagle_protocol/v1/messages/frame/EncodedFrame"
+
+[[engine.producers]]
+# For each request, a stored frame per coverable target, one at a time, then an
+# EncodedFrame with no image as the end marker. Give it one token
+name = "sendback"
+output = "steeleagle_protocol/v1/messages/frame/EncodedFrame"

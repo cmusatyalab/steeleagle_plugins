@@ -1,5 +1,5 @@
-"""Tests of the vehicle-side frame work: the preprocess engine, the keyframe
-tracker ported from the SwiftMap server, and reachback's keyframe filter."""
+"""Tests of the vehicle-side frame work: the encoder engine, the keyframe
+tracker ported from the SwiftMap server, and the framestore's keyframe filter."""
 
 import io
 from dataclasses import dataclass
@@ -86,7 +86,7 @@ class Input:
 
 
 def webp_frame(gray, id=0, gps=None):
-    """A lossless WebP EncodedFrame of `gray`, as the preprocess engine sends one."""
+    """A lossless WebP EncodedFrame of `gray`, as the encoder engine sends one."""
     webp = cv2.imencode(".webp", cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
                         [cv2.IMWRITE_WEBP_QUALITY, 101])[1].tobytes()
     frame = frame_pb2.EncodedFrame(encoded_data=webp, id=id, codec=frame_pb2.CODEC_UNSPECIFIED)
@@ -228,11 +228,11 @@ def test_a_frame_whose_pixels_do_not_fit_its_size_is_refused():
         encode_frame(frame.SerializeToString(), **ARGS)
 
 
-def test_preprocess_args_default_from_its_plugin_toml_and_are_checked():
-    from swiftmap.main import PREPROCESS_PLUGIN, ConfigError, parse_args
-    args = parse_args(PREPROCESS_PLUGIN, "")
+def test_encoder_args_default_from_its_plugin_toml_and_are_checked():
+    from swiftmap.main import ENCODER_PLUGIN, ConfigError, parse_args
+    args = parse_args(ENCODER_PLUGIN, "")
     assert args == {"image_resolution": 512, "patch_size": 16, "lossless": True, "quality": 90,
                     "max_output_size": 6237184}
     for bad in ('{"image_resolution": 500}', '{"quality": 101}', '{"patch_size": 0}'):
         with pytest.raises(ConfigError):
-            parse_args(PREPROCESS_PLUGIN, bad)
+            parse_args(ENCODER_PLUGIN, bad)
