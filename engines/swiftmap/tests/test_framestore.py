@@ -133,12 +133,12 @@ def test_no_keyframe_is_published_or_even_checked_while_holding(store):
     assert [number_of(p) for p in published] == [11]
 
 
-def test_a_request_takes_the_best_frame_per_coverable_target_up_to_its_count_then_the_end(store):
+def test_a_request_takes_the_best_frame_per_shown_target_at_any_distance_up_to_its_count_then_the_end(store):
     fs = answering(store)
     fs.on_status(status(True, ([WEAK, NOWHERE, WEAK, WEAK], 3)))
     queued = list(fs.queue)
-    assert [number_of(p) for p in queued[:-1]] == [4, 3] and queued[-1] == END
-    assert 4 not in store.unsent()[1] and 3 not in store.unsent()[1]
+    assert [number_of(p) for p in queued[:-1]] == [4, 1] and queued[-1] == END
+    assert 4 not in store.unsent()[1] and 1 not in store.unsent()[1]
 
 
 def test_a_request_is_started_once_and_a_new_one_starts_again(store):
@@ -147,9 +147,7 @@ def test_a_request_is_started_once_and_a_new_one_starts_again(store):
     fs.on_status(status(True, ([WEAK], 1)))
     assert len(fs.queue) == 2
     fs.on_status(status(True, ([WEAK, WEAK], 2)))
-    queued = list(fs.queue)
-    # Frame 4 went for the first request; only frame 3 is left that sees the target
-    assert [number_of(p) for p in queued[:3:2]] == [4, 3] and queued[1] == queued[3] == END
+    assert [None if p == END else number_of(p) for p in fs.queue] == [4, None, 1, 3, None]
 
 
 def test_frames_are_sent_back_one_at_a_time_each_after_the_last_ones_turn(store):
@@ -171,7 +169,7 @@ def test_frames_are_sent_back_one_at_a_time_each_after_the_last_ones_turn(store)
     fs.send_next(publish)
     fs.on_sendback_event(Event(uriel.EventKind.DISCONNECTED))
     fs.send_next(publish)
-    assert [number_of(p) for p in sent[:2]] == [4, 3] and sent[2] == END
+    assert [number_of(p) for p in sent[:2]] == [4, 1] and sent[2] == END
     fs.on_sendback_event(Event(uriel.EventKind.RESULT, Id(3, producer="fs.sendback")))
     assert not fs.sending_back
 

@@ -42,7 +42,7 @@ A dead end: each camera frame is stored and dropped, so the camera path never wa
 
 **Store.** One frame every 0.2 s, plus every keyframe, with its GPS and gimbal yaw/pitch, in SQLite (newest 6000).
 
-**Reach back.** For each new request in the NFN status, it picks one frame per target, for up to `count` targets: the unsent stored frame seeing it nearest the view's centre, within 25° and 50 m. A target no frame covers gets none. It publishes them on the `sendback` producer one at a time, each once the last one's turn in the flow has ended (whatever its outcome), then an `EncodedFrame` with no image as the end marker. Nothing is sent again.
+**Reach back.** For each new request in the NFN status, it picks one frame per target, for up to `count` targets: the unsent stored frame showing it nearest the view's centre, at any distance, the nearer of equally centred frames. Only a target no stored frame has within 25° of its view's centre gets none. It publishes them on the `sendback` producer one at a time, each once the last one's turn in the flow has ended (whatever its outcome), then an `EncodedFrame` with no image as the end marker. Nothing is sent again.
 
 The flow names the producers `local.framestore.keyframes` and `local.framestore.sendback`, each with an edge to the `swiftmap` engine and `tokens = 1`.
 

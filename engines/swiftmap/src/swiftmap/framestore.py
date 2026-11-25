@@ -27,7 +27,6 @@ logger = logging.getLogger("swiftmap.framestore")
 KEEP_FRAMES = 6000
 STORE_INTERVAL_S = 0.2
 HALF_FOV_DEG = 25.0
-MAX_DISTANCE_M = 50.0
 M_PER_DEG = 111_320.0
 END = frame_pb2.EncodedFrame().SerializeToString()
 TURN_ENDED = (uriel.EventKind.RESULT, uriel.EventKind.SKIPPED, uriel.EventKind.TIMED_OUT,
@@ -53,16 +52,18 @@ def to_enu(lla, origin):
 
 
 def covering(poses, numbers, target, exclude):
-    """Index of the frame seeing `target` nearest its view's centre, within
-    HALF_FOV_DEG and MAX_DISTANCE_M, skipping `exclude`d numbers; or None."""
+    """Index of the frame showing `target` nearest its view's centre, at any
+    distance, the nearer of equally centred frames, skipping `exclude`d
+    numbers; or None if no other frame has it within HALF_FOV_DEG."""
     cams = to_enu(poses[:, :3], target)
     dist = np.linalg.norm(cams, axis=1)
     yaw, pitch = np.radians(poses[:, 3]), np.radians(poses[:, 4])
     look = np.column_stack([np.sin(yaw) * np.cos(pitch), np.cos(yaw) * np.cos(pitch), np.sin(pitch)])
     centred = -(look * cams).sum(1) / np.maximum(dist, 1e-9)
-    ok = ((centred >= math.cos(math.radians(HALF_FOV_DEG))) & (dist <= MAX_DISTANCE_M)
-          & ~np.isin(numbers, list(exclude)))
-    return int(np.flatnonzero(ok)[np.argmax(centred[ok])]) if ok.any() else None
+    ok = np.flatnonzero((centred >= math.cos(math.radians(HALF_FOV_DEG))) & ~np.isin(numbers, list(exclude)))
+    if not ok.size:
+        return None
+    return int(ok[np.lexsort((dist[ok], -np.round(centred[ok], 6)))[0]])
 
 
 class FrameStore:
